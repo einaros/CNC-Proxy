@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CNC Proxy</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a212b; --border: #2a3340; --text: #d7dee8;
+    --muted: #8593a3; --accent: #4aa3df; --ok: #2ecc71; --warn: #e67e22;
+    --err: #e74c3c; --pending: #b0b8c4;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 -apple-system, system-ui, sans-serif;
+    background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #machine { margin-left: auto; display: flex; gap: 16px; align-items: center;
+    font-size: 13px; color: var(--muted); }
+  .badge { padding: 2px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; }
+  .state-Idle { background: rgba(46,204,113,.15); color: var(--ok); }
+  .state-Run, .state-Hold { background: rgba(230,126,34,.15); color: var(--warn); }
+  .state-Alarm { background: rgba(231,76,60,.15); color: var(--err); }
+  .state-Unknown, .state- { background: rgba(133,147,163,.15); color: var(--muted); }
+  main { padding: 20px; max-width: 980px; margin: 0 auto; }
+  #drop { border: 2px dashed var(--border); border-radius: 10px; padding: 28px;
+    text-align: center; color: var(--muted); margin-bottom: 20px; transition: .15s; cursor: pointer; }
+  #drop.over { border-color: var(--accent); color: var(--accent); background: rgba(74,163,223,.06); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.actions { text-align: right; white-space: nowrap; }
+  .sync { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .s-synced .dot { background: var(--ok); }
+  .s-uploading .dot, .s-pending_upload .dot, .s-deleting .dot,
+  .s-pending_delete .dot, .s-pending_rename .dot { background: var(--warn); animation: pulse 1.2s infinite; }
+  .s-error .dot { background: var(--err); }
+  .s-remote_only .dot, .s-local_only .dot { background: var(--pending); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 13px; }
+  button:hover { border-color: var(--accent); }
+  .name { font-family: ui-monospace, monospace; }
+  .muted { color: var(--muted); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+    margin: 28px 0 8px; }
+  #jobs .err { color: var(--err); font-size: 12px; }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CNC Proxy</h1>
+  <div id="machine">
+    <span>mode: <b id="mode">—</b></span>
+    <span id="state" class="badge state-Unknown">—</span>
+  </div>
+</header>
+<main>
+  <div id="drop">Drop files here or click to upload to <span class="name">/sd/gcodes</span></div>
+  <input id="file" type="file" multiple hidden>
+
+  <h2>Files</h2>
+  <table id="files-tbl">
+    <thead><tr><th>Name</th><th>Size</th><th>Status</th><th></th></tr></thead>
+    <tbody id="files"></tbody>
+  </table>
+  <div id="files-empty" class="empty">No files yet.</div>
+
+  <h2>Activity</h2>
+  <div id="jobs"></div>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,205 @@
+// Command proxy is the Makera Carvera companion: a transparent pass-through
+// proxy plus a file-handling API for the machine.
+//
+// It does several things at once:
+//   - Relays the official controller to the machine on TCP 2222, byte-for-byte,
+//     and answers UDP discovery so the controller finds the proxy.
+//   - Owns the machine connection whenever no controller is attached, polling
+//     status and draining a durable job queue while the machine is idle.
+//   - Serves an HTTP API + web UI for uploading and managing files, with
+//     Google-Drive-style deferred sync (writes are accepted immediately and
+//     pushed to the machine later).
+//
+// Usage (auto-discover the machine and advertise the proxy in its place):
+//
+//	proxy -proxy-ip 192.168.1.50 -broadcast 192.168.1.255
+//
+// Point at a known machine and skip discovery/advertising (e.g. loopback tests):
+//
+//	proxy -machine 192.168.1.42:2222 -no-advertise
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/uwin/cnc-proxy/internal/api"
+	"github.com/uwin/cnc-proxy/internal/client"
+	"github.com/uwin/cnc-proxy/internal/davfs"
+	"github.com/uwin/cnc-proxy/internal/discovery"
+	"github.com/uwin/cnc-proxy/internal/relay"
+	"github.com/uwin/cnc-proxy/internal/service"
+	"github.com/uwin/cnc-proxy/internal/session"
+	"github.com/uwin/cnc-proxy/internal/store"
+	"github.com/uwin/cnc-proxy/internal/synceng"
+)
+
+func main() {
+	var (
+		tcpPort     = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
+		machineAddr = flag.String("machine", "", "machine host:port; if empty, learned via UDP discovery")
+		proxyIP     = flag.String("proxy-ip", "", "IP the controller should connect to (this host); required to advertise")
+		broadcast   = flag.String("broadcast", "", "broadcast address to advertise on, e.g. 192.168.1.255")
+		nameSuffix  = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name")
+		noAdvertise = flag.Bool("no-advertise", false, "do not re-advertise over UDP (relay only)")
+		apiAddr     = flag.String("api-addr", ":8420", "address for the HTTP API + web UI")
+		davAddr     = flag.String("dav-addr", ":8421", "address for the WebDAV filesystem server")
+		dataDir     = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
+	)
+	flag.Parse()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// --- Discovery ---
+	disc := &discovery.Listener{}
+	if !*noAdvertise || *machineAddr == "" {
+		udp, err := discovery.OpenListenSocket()
+		if err != nil {
+			log.Fatalf("cannot bind UDP discovery port %d: %v", discovery.Port, err)
+		}
+		defer udp.Close()
+		go disc.Listen(udp, "")
+		log.Printf("discovery: listening on udp/%d", discovery.Port)
+	}
+
+	stop := make(chan struct{})
+	if !*noAdvertise {
+		if *proxyIP == "" || *broadcast == "" {
+			log.Fatal("-proxy-ip and -broadcast are required unless -no-advertise is set")
+		}
+		adv := &discovery.Advertiser{Listener: disc, ProxyIP: *proxyIP, ProxyPort: *tcpPort, NameSuffix: *nameSuffix}
+		go func() {
+			if err := adv.Run(*broadcast, stop); err != nil {
+				log.Printf("advertiser stopped: %v", err)
+			}
+		}()
+		log.Printf("discovery: advertising proxy at %s:%d on %s", *proxyIP, *tcpPort, *broadcast)
+	}
+
+	dialAddr := machineDialer(*machineAddr, disc)
+
+	// --- Store, arbiter, sync engine, service, API ---
+	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
+		log.Fatalf("cannot create data dir %s: %v", *dataDir, err)
+	}
+	st, err := store.Open(filepath.Join(*dataDir, "state.json"))
+	if err != nil {
+		log.Fatalf("cannot open store: %v", err)
+	}
+
+	arb := session.New(session.Config{
+		Dial: func() (*client.Conn, error) {
+			addr, err := dialAddr()
+			if err != nil {
+				return nil, err
+			}
+			return client.Dial(addr, 5*time.Second)
+		},
+	})
+	go arb.Poll(ctx, 5*time.Second)
+
+	eng := synceng.New(synceng.Config{Store: st, Arbiter: arb})
+	go eng.Run(ctx, 2*time.Second)
+	// Periodically fold in files added/removed on the machine out-of-band.
+	go eng.RunReconcile(ctx, 30*time.Second, 8)
+
+	svc, err := service.New(st, arb)
+	if err != nil {
+		log.Fatalf("cannot create service: %v", err)
+	}
+
+	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(svc).Handler()}
+	go func() {
+		log.Printf("api: listening on %s", *apiAddr)
+		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("api: %v", err)
+		}
+	}()
+
+	davSrv := &http.Server{Addr: *davAddr, Handler: davfs.New(svc).Handler("")}
+	go func() {
+		log.Printf("webdav: listening on %s (mount this address)", *davAddr)
+		if err := davSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("webdav: %v", err)
+		}
+	}()
+
+	// --- Relay (with arbiter as observer + injection source) ---
+	relaySrv := &relay.Server{
+		Dial:     dialAddr,
+		Observer: arb,
+	}
+	// Let owner-mode operations (sync engine, API) inject onto the controller's
+	// shared connection during relay mode, between the controller's transactions.
+	arb.SetInjector(injectorAdapter{relaySrv})
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *tcpPort))
+	if err != nil {
+		log.Fatalf("cannot listen on tcp/%d: %v", *tcpPort, err)
+	}
+	log.Printf("relay: listening on tcp/%d", *tcpPort)
+
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		log.Print("shutting down")
+		cancel()
+		close(stop)
+		shutdownCtx, c := context.WithTimeout(context.Background(), 3*time.Second)
+		defer c()
+		apiSrv.Shutdown(shutdownCtx)
+		davSrv.Shutdown(shutdownCtx)
+		ln.Close()
+	}()
+
+	if err := relaySrv.Serve(ln); err != nil {
+		log.Fatalf("relay: %v", err)
+	}
+}
+
+// machineDialer resolves the machine address: a fixed address if provided,
+// otherwise the most recently discovered machine.
+func machineDialer(fixed string, l *discovery.Listener) func() (string, error) {
+	return func() (string, error) {
+		if fixed != "" {
+			return fixed, nil
+		}
+		m, ok := l.Latest()
+		if !ok {
+			return "", errors.New("no machine discovered yet")
+		}
+		return net.JoinHostPort(m.IP, strconv.Itoa(m.Port)), nil
+	}
+}
+
+// injectorAdapter bridges *relay.Server to session.Injector. The two packages
+// declare structurally identical injector interfaces but can't import each
+// other's types without a cycle, so this thin adapter converts the result.
+type injectorAdapter struct{ srv *relay.Server }
+
+func (a injectorAdapter) AcquireMachine() (session.InjectTransport, func(), error) {
+	it, release, err := a.srv.AcquireMachine()
+	if err != nil {
+		return nil, nil, err
+	}
+	return it, release, nil
+}
+
+func defaultDataDir() string {
+	if home, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(home, "cnc-proxy")
+	}
+	return ".cnc-proxy"
+}

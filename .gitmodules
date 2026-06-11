@@ -1,0 +1,6 @@
+[submodule "vendor/CarveraController"]
+	path = vendor/CarveraController
+	url = https://github.com/MakeraInc/CarveraController
+[submodule "vendor/CarveraFirmware"]
+	path = vendor/CarveraFirmware
+	url = https://github.com/MakeraInc/CarveraFirmware

@@ -1,0 +1,30 @@
+# Built binaries (compiled output of ./cmd/*). The repo ships source, not builds.
+/proxy
+/cnc-proxy
+/fakemachine
+/tray
+# Catch-all for any binary built in the repo root from a cmd/ package.
+/cmd/*/proxy
+/cmd/*/fakemachine
+/cmd/*/tray
+
+# Go build/test artifacts
+*.test
+*.out
+coverage.out
+
+# Local runtime data: the catalog, job queue, and file cache the proxy writes
+# (default -data-dir is the OS config dir, but allow a repo-local one too).
+/.cnc-proxy/
+/data/
+
+# Machine-specific Claude Code settings (contains local IPs, /tmp paths, and
+# per-session permission grants). The shared .claude/settings.json IS tracked.
+/.claude/settings.local.json
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

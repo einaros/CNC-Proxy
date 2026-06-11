@@ -1,0 +1,161 @@
+package relay
+
+import (
+	"bytes"
+	"io"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/uwin/cnc-proxy/internal/protocol"
+)
+
+// frameMachine is a minimal in-test machine that reads whole frames and lets the
+// test script its replies. It records the controller frames it received.
+type frameMachine struct {
+	ln       net.Listener
+	mu       sync.Mutex
+	received []protocol.Frame
+	onFrame  func(c net.Conn, f protocol.Frame)
+}
+
+func newFrameMachine(t *testing.T) *frameMachine {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &frameMachine{ln: ln}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go m.serve(c)
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return m
+}
+
+func (m *frameMachine) serve(c net.Conn) {
+	defer c.Close()
+	var sc protocol.Scanner
+	buf := make([]byte, 4096)
+	for {
+		n, err := c.Read(buf)
+		for _, f := range sc.Push(buf[:n]) {
+			m.mu.Lock()
+			m.received = append(m.received, f)
+			fn := m.onFrame
+			m.mu.Unlock()
+			if fn != nil {
+				fn(c, f)
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (m *frameMachine) recvFrames() []protocol.Frame {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]protocol.Frame(nil), m.received...)
+}
+
+func startRelay(t *testing.T, m *frameMachine) (*Server, string) {
+	t.Helper()
+	srv := &Server{Dial: func() (string, error) { return m.ln.Addr().String(), nil }}
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { proxyLn.Close() })
+	go srv.Serve(proxyLn)
+	return srv, proxyLn.Addr().String()
+}
+
+// TestRelayForwardsFramesVerbatim checks a controller frame reaches the machine
+// byte-for-byte and a machine reply reaches the controller byte-for-byte.
+func TestRelayForwardsFramesVerbatim(t *testing.T) {
+	m := newFrameMachine(t)
+	// Echo an "ok" NORMAL_INFO reply for each gcode the machine receives.
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd == protocol.CmdCtrlMulti {
+			c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("ok\r\n")))
+		}
+	}
+	_, addr := startRelay(t, m)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	gcode := protocol.Encode(protocol.CmdCtrlMulti, []byte("G0 X10\n"))
+	if _, err := client.Write(gcode); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read the reply frame back.
+	client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sc protocol.Scanner
+	buf := make([]byte, 256)
+	n, _ := client.Read(buf)
+	frames := sc.Push(buf[:n])
+	if len(frames) == 0 || frames[0].Cmd != protocol.CmdNormalInfo || string(frames[0].Data) != "ok\r\n" {
+		t.Fatalf("controller did not get the ok reply: %+v", frames)
+	}
+
+	// Machine should have received exactly the gcode frame, unaltered.
+	time.Sleep(50 * time.Millisecond)
+	rf := m.recvFrames()
+	if len(rf) != 1 || !bytes.Equal(rf[0].Raw, gcode) {
+		t.Fatalf("machine received %d frames; first matches gcode=%v", len(rf), len(rf) == 1 && bytes.Equal(rf[0].Raw, gcode))
+	}
+}
+
+// TestRelaySingleSession verifies a second controller is refused while one is
+// active.
+func TestRelaySingleSession(t *testing.T) {
+	m := newFrameMachine(t)
+	_, addr := startRelay(t, m)
+
+	first, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	second, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	second.SetReadDeadline(time.Now().Add(time.Second))
+	b := make([]byte, 1)
+	if _, err := second.Read(b); err == nil {
+		t.Error("second session was not refused")
+	}
+}
+
+// TestInjectionNoSession confirms AcquireMachine fails when no controller is
+// connected (callers fall back to owner mode).
+func TestInjectionNoSession(t *testing.T) {
+	srv := &Server{Dial: func() (string, error) { return "", nil }}
+	if _, _, err := srv.AcquireMachine(); err != ErrNoSession {
+		t.Errorf("AcquireMachine with no session = %v, want ErrNoSession", err)
+	}
+}
+
+// drainController reads and discards from a connection until closed, so the
+// relay's controller->machine pump isn't blocked on a full socket.
+func drainController(c net.Conn) {
+	go io.Copy(io.Discard, c)
+}

@@ -1,0 +1,248 @@
+// Package relay implements a byte-transparent TCP proxy between the Carvera
+// controller and the machine firmware on port 2222.
+//
+// The firmware is effectively single-session (it sends responses to "the latest
+// connected remote" and uploads take a global lock), so the relay admits only
+// one controller at a time. Additional connections are refused until the active
+// one closes, mirroring how the machine itself behaves.
+//
+// Bytes are forwarded verbatim in both directions; frames are only sniffed for
+// logging and never altered, so CRCs the controller validates stay intact.
+package relay
+
+import (
+	"errors"
+	"log"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/uwin/cnc-proxy/internal/protocol"
+)
+
+// Observer is notified of relay session lifecycle and of machine state observed
+// by sniffing STATUS_RES frames. The session arbiter implements this so the
+// proxy enters relay mode while a controller is connected and keeps the shared
+// machine-state tracker current. It is optional; a nil Observer disables hooks.
+type Observer interface {
+	// EnterRelay is called when a controller session begins.
+	EnterRelay()
+	// ExitRelay is called when the controller session ends.
+	ExitRelay()
+	// ObserveStatusPayload is called with the payload of each STATUS_RES frame
+	// seen flowing from the machine to the controller.
+	ObserveStatusPayload(payload string) bool
+}
+
+// Server relays one controller<->machine session at a time.
+type Server struct {
+	// MachineAddr is resolved lazily per-connection via Dial so the proxy can
+	// start before the machine is discovered.
+	Dial func() (string, error)
+
+	// Observer, if set, receives session lifecycle and state-observation hooks.
+	Observer Observer
+
+	active atomic.Bool
+
+	// mu guards curMux, the active session's injection multiplexer.
+	mu     sync.Mutex
+	curMux *mux
+}
+
+// Injector is the relay's interface for the rest of the system to inject an
+// operation onto the shared machine connection during a controller session.
+type Injector interface {
+	// AcquireMachine borrows the machine connection for one injected operation,
+	// returning a client transport and a release func. It fails with ErrBusy if
+	// the controller is mid file-transfer, or ErrNoSession if no controller is
+	// connected (in which case the caller should use the owner-mode path).
+	AcquireMachine() (it InjectTransport, release func(), err error)
+}
+
+// InjectTransport is the byte channel an injected operation drives. It matches
+// the client package's transport shape.
+type InjectTransport interface {
+	Write(p []byte) (int, error)
+	Read(p []byte) (int, error)
+	SetReadDeadline(t time.Time) error
+	Close() error
+}
+
+// AcquireMachine implements Injector.
+func (s *Server) AcquireMachine() (InjectTransport, func(), error) {
+	s.mu.Lock()
+	m := s.curMux
+	s.mu.Unlock()
+	if m == nil {
+		return nil, nil, ErrNoSession
+	}
+	it, release, err := m.AcquireInjection()
+	if err != nil {
+		return nil, nil, err
+	}
+	return it, release, nil
+}
+
+// Serve accepts connections on ln and relays each to the machine. It returns
+// when ln is closed.
+func (s *Server) Serve(ln net.Listener) error {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		go s.handle(conn)
+	}
+}
+
+func (s *Server) handle(client net.Conn) {
+	defer client.Close()
+	peer := client.RemoteAddr()
+
+	if !s.active.CompareAndSwap(false, true) {
+		log.Printf("relay: refusing %s, a session is already active", peer)
+		return
+	}
+	defer s.active.Store(false)
+
+	// Enter relay mode FIRST so the proxy's owner-mode connection (used for
+	// status polling) is dropped before we open the controller's connection.
+	// The machine is single-conversation: two proxy sockets at once would make
+	// the firmware route responses to the wrong one and the session collapses.
+	if s.Observer != nil {
+		s.Observer.EnterRelay()
+		defer s.Observer.ExitRelay()
+	}
+
+	addr, err := s.Dial()
+	if err != nil {
+		log.Printf("relay: no machine to dial for %s: %v", peer, err)
+		return
+	}
+	machine, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		log.Printf("relay: dial machine %s failed: %v", addr, err)
+		return
+	}
+	defer machine.Close()
+	log.Printf("relay: session up %s <-> machine %s", peer, addr)
+
+	m := newMux(machine)
+	s.mu.Lock()
+	s.curMux = m
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.curMux = nil
+		s.mu.Unlock()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	closeBoth := func() { client.Close(); machine.Close() }
+	go func() {
+		defer wg.Done()
+		s.pumpControllerToMachine(client, machine, m)
+		closeBoth()
+	}()
+	go func() {
+		defer wg.Done()
+		s.pumpMachineToController(machine, client, m)
+		closeBoth()
+	}()
+	wg.Wait()
+	log.Printf("relay: session closed %s", peer)
+}
+
+// pumpControllerToMachine forwards controller frames to the machine, except
+// while an injection holds the mux, when most frames are buffered for replay and
+// status polls are answered locally from the cached status.
+func (s *Server) pumpControllerToMachine(client, machine net.Conn, m *mux) {
+	var sc protocol.Scanner
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := client.Read(buf)
+		if n > 0 {
+			for _, f := range sc.Push(buf[:n]) {
+				logFrame("C->M", f)
+				if m.noteControllerFrame(f, f.Raw) {
+					if _, werr := machine.Write(f.Raw); werr != nil {
+						return
+					}
+				} else if isStatusPoll(f) {
+					// Answer the poll from cache so the controller's heartbeat
+					// stays alive during injection.
+					if frame := m.cachedStatusFrame(); frame != nil {
+						if _, werr := client.Write(frame); werr != nil {
+							return
+						}
+					}
+				}
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
+// pumpMachineToController forwards machine frames to the controller, diverting
+// to the active injector during an injection window. Status reports are always
+// forwarded to the controller (and observed) so its state and heartbeat stay
+// current.
+func (s *Server) pumpMachineToController(machine, client net.Conn, m *mux) {
+	var sc protocol.Scanner
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := machine.Read(buf)
+		if n > 0 {
+			for _, f := range sc.Push(buf[:n]) {
+				logFrame("M->C", f)
+				if s.Observer != nil && f.Cmd == protocol.CmdStatusRes {
+					s.Observer.ObserveStatusPayload(string(f.Data))
+				}
+				if m.routeMachineFrame(f) {
+					if _, werr := client.Write(f.Raw); werr != nil {
+						return
+					}
+				}
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
+func logFrame(dir string, f protocol.Frame) {
+	switch f.Cmd {
+	case protocol.CmdCtrlMulti, protocol.CmdFileStart, protocol.CmdLoadInfo,
+		protocol.CmdLoadError, protocol.CmdNormalInfo:
+		log.Printf("relay %s %s: %q", dir, protocol.CmdName(f.Cmd), preview(f.Data))
+	case protocol.CmdFileData:
+		log.Printf("relay %s FILE_DATA: %d bytes", dir, len(f.Data))
+	default:
+		log.Printf("relay %s %s (%d bytes)", dir, protocol.CmdName(f.Cmd), len(f.Data))
+	}
+}
+
+func preview(b []byte) string {
+	const max = 80
+	if len(b) > max {
+		b = b[:max]
+	}
+	out := make([]rune, 0, len(b))
+	for _, c := range b {
+		if c >= 0x20 && c < 0x7f {
+			out = append(out, rune(c))
+		} else {
+			out = append(out, '.')
+		}
+	}
+	return string(out)
+}
