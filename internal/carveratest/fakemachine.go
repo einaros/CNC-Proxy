@@ -17,13 +17,13 @@ import (
 type FakeMachine struct {
 	ln net.Listener
 
-	mu      sync.Mutex
-	files   map[string][]byte // remote path -> contents (from uploads)
-	dirs    map[string]bool   // created directories
-	status  string            // payload for "?" (e.g. "<Idle|...>")
-	failCmd map[string]bool   // command prefixes to fail (for error-path tests)
-	ftype   string            // advertised upload type ("lz" enables compression)
-	compressDownloads bool    // if set, downloads send a .lz container
+	mu                sync.Mutex
+	files             map[string][]byte // remote path -> contents (from uploads)
+	dirs              map[string]bool   // created directories
+	status            string            // payload for "?" (e.g. "<Idle|...>")
+	failCmd           map[string]bool   // command prefixes to fail (for error-path tests)
+	ftype             string            // advertised upload type ("lz" enables compression)
+	compressDownloads bool              // if set, downloads send a .lz container
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when
@@ -120,7 +120,7 @@ func (m *FakeMachine) handle(c net.Conn) {
 	buf := make([]byte, 16*1024)
 
 	const (
-		modeIdle = iota
+		modeIdle     = iota
 		modeUpload   // controller -> machine (machine receives)
 		modeDownload // machine -> controller (machine sends)
 	)

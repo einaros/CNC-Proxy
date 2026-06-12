@@ -69,16 +69,16 @@ const (
 // Job is one durable operation against the machine. Jobs are executed in order
 // (FIFO) and are idempotent so a retry after a crash is safe.
 type Job struct {
-	ID        int64    `json:"id"`
-	Kind      JobKind  `json:"kind"`
-	Path      string   `json:"path"`            // primary target (machine-absolute)
-	DestPath  string   `json:"dest_path,omitempty"` // for rename
-	CachePath string   `json:"cache_path,omitempty"` // local source for upload
-	MD5       string   `json:"md5,omitempty"`        // expected content MD5 for upload
-	Size      int64    `json:"size,omitempty"`
-	State     JobState `json:"state"`
-	Attempts  int      `json:"attempts"`
-	LastError string   `json:"last_error,omitempty"`
+	ID        int64     `json:"id"`
+	Kind      JobKind   `json:"kind"`
+	Path      string    `json:"path"`                 // primary target (machine-absolute)
+	DestPath  string    `json:"dest_path,omitempty"`  // for rename
+	CachePath string    `json:"cache_path,omitempty"` // local source for upload
+	MD5       string    `json:"md5,omitempty"`        // expected content MD5 for upload
+	Size      int64     `json:"size,omitempty"`
+	State     JobState  `json:"state"`
+	Attempts  int       `json:"attempts"`
+	LastError string    `json:"last_error,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

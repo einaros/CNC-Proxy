@@ -31,3 +31,31 @@ func TestAdvertiseRewritesAddress(t *testing.T) {
 		t.Errorf("advert = %q", adv.format())
 	}
 }
+
+func TestAdvertisedName(t *testing.T) {
+	suffix := &Advertiser{NameSuffix: " (proxy)"}
+	if got := suffix.advertisedName("CARVERA"); got != "CARVERA (proxy)" {
+		t.Errorf("suffix mode = %q", got)
+	}
+	override := &Advertiser{Name: "Workshop CNC", NameSuffix: " (proxy)"}
+	if got := override.advertisedName("CARVERA"); got != "Workshop CNC" {
+		t.Errorf("override mode = %q", got)
+	}
+}
+
+func TestListenerIgnoresSelf(t *testing.T) {
+	l := &Listener{}
+	l.SetSelf(Machine{Name: "CARVERA (proxy)", IP: "192.168.1.50", Port: 2222})
+
+	if !l.isSelf(Machine{Name: "CARVERA (proxy)", IP: "192.168.1.50", Port: 2222}) {
+		t.Error("own advertisement not filtered")
+	}
+	// The real machine must never be filtered, even when the operator picks
+	// the same advertised name as the real one.
+	if l.isSelf(Machine{Name: "CARVERA (proxy)", IP: "192.168.1.42", Port: 2222}) {
+		t.Error("real machine filtered because of a name collision")
+	}
+	if l.isSelf(Machine{Name: "CARVERA", IP: "192.168.1.42", Port: 2222}) {
+		t.Error("real machine filtered")
+	}
+}

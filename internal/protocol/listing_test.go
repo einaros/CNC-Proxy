@@ -29,7 +29,7 @@ func TestParseLsLine(t *testing.T) {
 func TestParseLsLineRejects(t *testing.T) {
 	bad := []string{
 		"",
-		"<Idle|MPos:0,0,0>",  // status report leaked into buffer
+		"<Idle|MPos:0,0,0>", // status report leaked into buffer
 		".hidden 10 20260101120000",
 		"only two fields",
 		"name notanumber 20260101120000",

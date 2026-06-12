@@ -31,6 +31,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,13 +53,19 @@ func main() {
 		advertise   = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
 		proxyIP     = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
 		broadcast   = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
-		nameSuffix  = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name")
+		name        = flag.String("name", "", "advertised machine name; replaces the real name entirely (default: real name + -name-suffix)")
+		nameSuffix  = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name when -name is not set")
 		noAdvertise = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
 		apiAddr     = flag.String("api-addr", ":8420", "address for the HTTP API + web UI")
 		davAddr     = flag.String("dav-addr", ":8421", "address for the WebDAV filesystem server")
 		dataDir     = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
 	)
+	applyEnvDefaults()
 	flag.Parse()
+
+	if strings.Contains(*name, ",") || strings.Contains(*nameSuffix, ",") {
+		log.Fatal("-name/-name-suffix must not contain ',' (the discovery wire format is comma-separated)")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -74,7 +81,7 @@ func main() {
 		log.Fatalf("cannot bind UDP discovery port %d: %v", discovery.Port, err)
 	}
 	defer udp.Close()
-	go disc.Listen(udp, "")
+	go disc.Listen(udp)
 	log.Printf("discovery: listening on udp/%d", discovery.Port)
 
 	dialAddr := machineDialer(*machineAddr, disc)
@@ -105,7 +112,7 @@ func main() {
 					bcast = autoBcast
 				}
 			}
-			adv := &discovery.Advertiser{Listener: disc, ProxyIP: pip, ProxyPort: *tcpPort, NameSuffix: *nameSuffix}
+			adv := &discovery.Advertiser{Listener: disc, ProxyIP: pip, ProxyPort: *tcpPort, Name: *name, NameSuffix: *nameSuffix}
 			log.Printf("discovery: advertising proxy at %s:%d on %s", pip, *tcpPort, bcast)
 			if err := adv.Run(bcast, stop); err != nil {
 				log.Printf("advertiser stopped: %v", err)
@@ -240,6 +247,22 @@ func (a injectorAdapter) AcquireMachine() (session.InjectTransport, func(), erro
 		return nil, nil, err
 	}
 	return it, release, nil
+}
+
+// applyEnvDefaults lets every flag be set through the environment as
+// CNC_<NAME> with '-' mapped to '_' (e.g. CNC_TCP_PORT=2222, CNC_NAME=Shop,
+// CNC_ADVERTISE=true). Explicit command-line flags still win, since this runs
+// before flag.Parse and only adjusts defaults. This is the natural interface
+// for container deployments, where flags are awkward to override per-site.
+func applyEnvDefaults() {
+	flag.VisitAll(func(f *flag.Flag) {
+		env := "CNC_" + strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
+		if v, ok := os.LookupEnv(env); ok {
+			if err := f.Value.Set(v); err != nil {
+				log.Fatalf("invalid %s=%q: %v", env, v, err)
+			}
+		}
+	})
 }
 
 func defaultDataDir() string {

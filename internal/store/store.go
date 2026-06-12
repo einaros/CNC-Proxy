@@ -15,19 +15,19 @@ import (
 // dataset (a few hundred gcode files) is small enough that whole-file
 // persistence is simpler and safe; we can shard later if needed.
 type Store struct {
-	mu       sync.RWMutex
-	path     string
-	now      func() time.Time
-	entries  map[string]*Entry // keyed by Path
-	jobs     []*Job
-	nextJob  int64
-	subs     map[int]chan Event
-	nextSub  int
+	mu      sync.RWMutex
+	path    string
+	now     func() time.Time
+	entries map[string]*Entry // keyed by Path
+	jobs    []*Job
+	nextJob int64
+	subs    map[int]chan Event
+	nextSub int
 }
 
 // Event notifies subscribers of a change, for pushing to the web UI.
 type Event struct {
-	Kind string `json:"kind"` // "entry" | "job"
+	Kind  string `json:"kind"` // "entry" | "job"
 	Entry *Entry `json:"entry,omitempty"`
 	Job   *Job   `json:"job,omitempty"`
 }

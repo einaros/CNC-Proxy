@@ -13,9 +13,9 @@ package quicklz
 import "errors"
 
 const (
-	hashValues = 4096
-	pointers   = 16 // QLZ_POINTERS for level 3
-	minOffset  = 2
+	hashValues  = 4096
+	pointers    = 16 // QLZ_POINTERS for level 3
+	minOffset   = 2
 	uncondMatch = 6 // UNCONDITIONAL_MATCHLEN
 	uncompEnd   = 4 // UNCOMPRESSED_END
 	cwordLen    = 4

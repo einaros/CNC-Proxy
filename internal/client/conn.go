@@ -291,7 +291,6 @@ func (k *Conn) SendGcode(line string, timeout time.Duration) (string, error) {
 	}
 }
 
-
 // QueryState sends `?` and waits for the next STATUS_RES frame, returning its
 // payload (e.g. "<Idle|...>"). The caller parses it via the machine package.
 func (k *Conn) QueryState(timeout time.Duration) (string, error) {

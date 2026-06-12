@@ -53,9 +53,9 @@ func newDirFile(info os.FileInfo, children []os.FileInfo) *dirFile {
 	return &dirFile{info: info, children: children}
 }
 
-func (d *dirFile) Read([]byte) (int, error)   { return 0, os.ErrInvalid }
-func (d *dirFile) Write([]byte) (int, error)  { return 0, os.ErrPermission }
-func (d *dirFile) Close() error               { return nil }
+func (d *dirFile) Read([]byte) (int, error)  { return 0, os.ErrInvalid }
+func (d *dirFile) Write([]byte) (int, error) { return 0, os.ErrPermission }
+func (d *dirFile) Close() error              { return nil }
 func (d *dirFile) Seek(int64, int) (int64, error) {
 	return 0, errors.New("davfs: cannot seek a directory")
 }
@@ -86,11 +86,11 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 // deferred-sync behavior: the write completes locally and syncs to the machine
 // later. The WebDAV client sees an immediate success.
 type writeFile struct {
-	svc      *service.Service
-	name     string
-	tmp      *os.File
-	tmpPath  string
-	closed   bool
+	svc     *service.Service
+	name    string
+	tmp     *os.File
+	tmpPath string
+	closed  bool
 }
 
 func newWriteFile(svc *service.Service, name string) (*writeFile, error) {

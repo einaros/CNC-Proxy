@@ -125,14 +125,52 @@ Then:
 | `-machine` | (discover) | fixed machine `host:port`; empty = learn via UDP |
 | `-advertise` | false | transparent mode: re-advertise so the controller connects through the proxy |
 | `-proxy-ip` | (auto) | IP the controller should connect to; auto-derived if empty |
-| `-broadcast` | (auto) | broadcast address to advertise on; auto-derived if empty |
-| `-name-suffix` | ` (proxy)` | suffix on the advertised machine name |
+| `-broadcast` | (auto) | broadcast (or unicast) address to advertise on; auto-derived if empty |
+| `-name` | (empty) | advertised machine name; replaces the real name entirely |
+| `-name-suffix` | ` (proxy)` | suffix on the advertised machine name when `-name` is not set |
 | `-api-addr` | `:8420` | HTTP API + web UI address |
 | `-dav-addr` | `:8421` | WebDAV server address |
 | `-data-dir` | OS config dir | catalog, job queue, and file cache |
 
 (`-no-advertise` still exists as a deprecated no-op so older invocations don't
 break; advertising is now opt-in via `-advertise`.)
+
+Every flag can also be set through the environment as `CNC_<NAME>` with `-`
+mapped to `_` (e.g. `CNC_MACHINE=192.168.1.42:2222`, `CNC_NAME="Shop CNC"`,
+`CNC_ADVERTISE=true`). Explicit command-line flags win over the environment.
+
+## Run in Docker
+
+The recommended deployment is Docker on the same computer that runs the
+official Carvera Controller:
+
+```sh
+CNC_MACHINE=192.168.1.42:2222 CNC_NAME="Shop CNC" docker compose up -d
+```
+
+Then the controller (on the same computer) sees `Shop CNC` in its machine list
+and connects through the proxy at `127.0.0.1:2222`. Web UI at
+<http://127.0.0.1:8420/>, WebDAV mount at `http://127.0.0.1:8421/`. State
+persists in the `cnc-data` volume across restarts.
+
+Two LAN realities shape the container configuration (already encoded in
+`docker-compose.yml`):
+
+- **Discovery doesn't reach the container.** The machine's UDP broadcasts
+  don't traverse Docker's NAT, so the machine address must be pinned with
+  `CNC_MACHINE` (find the IP in the controller's machine list or your router).
+- **Advertising is unicast to the host.** The container can't usefully
+  broadcast to the LAN either, so it sends the discovery record straight to
+  `host.docker.internal` — the controller listening on UDP 3333 on the same
+  computer receives it. `CNC_NAME` is required here: without the machine's
+  broadcasts the proxy never learns the real name to derive one from.
+  Controllers on *other* computers won't see this advertisement; they'd keep
+  connecting to the machine directly (which then refuses the proxy's relay —
+  one client at a time).
+
+A side benefit of the container's own network namespace: the proxy's UDP 3333
+listener can't collide with the controller's, which it would when both run
+natively on the same host (the controller binds without `SO_REUSEPORT`).
 
 ## Sync states
 

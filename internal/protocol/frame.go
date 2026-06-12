@@ -173,7 +173,7 @@ func (s *Scanner) parseOne() (Frame, int, bool) {
 		return Frame{}, 0, false // need LEN + CMD
 	}
 	dataLen := int(binary.BigEndian.Uint16(b[2:4])) // = CMD(1)+DATA(N)+CRC(2)
-	total := 4 + dataLen + 2                         // header + body + footer
+	total := 4 + dataLen + 2                        // header + body + footer
 	if dataLen < 3 || total > 1<<17 {
 		return Frame{}, 2, false // implausible length: skip this header, resync
 	}

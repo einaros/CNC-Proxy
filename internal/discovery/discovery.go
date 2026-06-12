@@ -10,6 +10,7 @@
 package discovery
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -56,6 +57,29 @@ type Listener struct {
 	mu   sync.RWMutex
 	last *Machine
 	seen time.Time
+	self *Machine
+}
+
+// SetSelf records the identity this proxy currently advertises. A UDP socket
+// bound to 0.0.0.0:3333 receives broadcasts sent from the same host, so without
+// this filter the proxy would learn its own re-advertisement as "the machine"
+// and dial itself. The Advertiser calls this before every broadcast.
+func (l *Listener) SetSelf(m Machine) {
+	l.mu.Lock()
+	l.self = &m
+	l.mu.Unlock()
+}
+
+func (l *Listener) isSelf(m Machine) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.self == nil {
+		return false
+	}
+	// Match on ip:port, not name: that pair is what uniquely identifies the
+	// proxy's advertisement, and a name match would wrongly filter the real
+	// machine if the operator picks the same advertised name.
+	return m.IP == l.self.IP && m.Port == l.self.Port
 }
 
 // Latest returns the most recently observed machine, or false if none yet.
@@ -69,9 +93,9 @@ func (l *Listener) Latest() (Machine, bool) {
 }
 
 // Listen blocks, reading machine broadcasts until the conn is closed. Records
-// whose name matches selfName are ignored so the proxy never learns from its
-// own re-advertisements.
-func (l *Listener) Listen(conn *net.UDPConn, selfName string) {
+// matching the identity registered via SetSelf are ignored so the proxy never
+// learns from its own re-advertisements.
+func (l *Listener) Listen(conn *net.UDPConn) {
 	buf := make([]byte, 256)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
@@ -79,7 +103,7 @@ func (l *Listener) Listen(conn *net.UDPConn, selfName string) {
 			return
 		}
 		m, ok := parse(string(buf[:n]))
-		if !ok || m.Name == selfName {
+		if !ok || l.isSelf(m) {
 			continue
 		}
 		l.mu.Lock()
@@ -99,18 +123,29 @@ type Advertiser struct {
 	Listener   *Listener
 	ProxyIP    string // address the controller should connect to (this host)
 	ProxyPort  int    // proxy's TCP listen port
-	NameSuffix string // appended to the real machine name, e.g. " (proxy)"
+	Name       string // advertised machine name; empty = real name + NameSuffix
+	NameSuffix string // appended to the real machine name when Name is empty
 }
 
-// Run broadcasts once per second to the given broadcast address until stop is
-// closed. It only advertises once a real machine has been learned, copying its
-// busy flag through.
-func (a *Advertiser) Run(broadcast string, stop <-chan struct{}) error {
-	dst, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(broadcast, strconv.Itoa(Port)))
-	if err != nil {
-		return err
+// advertisedName returns the name to broadcast for the real machine realName.
+func (a *Advertiser) advertisedName(realName string) string {
+	if a.Name != "" {
+		return a.Name
 	}
-	conn, err := net.DialUDP("udp4", nil, dst)
+	return realName + a.NameSuffix
+}
+
+// Run broadcasts once per second to the given destination (a directed-broadcast
+// address, or a unicast host such as host.docker.internal when broadcasts can't
+// traverse the network) until stop is closed. With an explicit Name it
+// advertises immediately; otherwise it waits until a real machine has been
+// learned, since the advertised name is derived from the real one. The busy
+// flag is copied from the machine's own broadcasts when available.
+func (a *Advertiser) Run(broadcast string, stop <-chan struct{}) error {
+	// SO_BROADCAST is required to send to a broadcast address on Linux (and is
+	// harmless for unicast destinations); Go does not set it by default.
+	d := net.Dialer{Control: broadcastable}
+	conn, err := d.Dial("udp4", net.JoinHostPort(broadcast, strconv.Itoa(Port)))
 	if err != nil {
 		return err
 	}
@@ -124,15 +159,16 @@ func (a *Advertiser) Run(broadcast string, stop <-chan struct{}) error {
 			return nil
 		case <-ticker.C:
 			m, ok := a.Listener.Latest()
-			if !ok {
+			if !ok && a.Name == "" {
 				continue
 			}
 			adv := Machine{
-				Name: m.Name + a.NameSuffix,
+				Name: a.advertisedName(m.Name),
 				IP:   a.ProxyIP,
 				Port: a.ProxyPort,
-				Busy: m.Busy,
+				Busy: ok && m.Busy,
 			}
+			a.Listener.SetSelf(adv)
 			if _, err := conn.Write([]byte(adv.format())); err != nil {
 				log.Printf("discovery: advertise write failed: %v", err)
 			}
@@ -140,11 +176,19 @@ func (a *Advertiser) Run(broadcast string, stop <-chan struct{}) error {
 	}
 }
 
-// OpenListenSocket binds the discovery port for reading, allowing address reuse
-// so it can run alongside other listeners on the same host.
+// OpenListenSocket binds the discovery port for reading with SO_REUSEADDR and
+// SO_REUSEPORT (where the platform supports them) so it can coexist with other
+// reuse-aware listeners on the same host. Note the official controller binds
+// 3333 without these options, so it still cannot share the port with a
+// natively-running proxy — running the proxy in a container (own network
+// namespace) avoids that conflict entirely.
 func OpenListenSocket() (*net.UDPConn, error) {
-	addr := &net.UDPAddr{IP: net.IPv4zero, Port: Port}
-	return net.ListenUDP("udp4", addr)
+	lc := net.ListenConfig{Control: reusePort}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", fmt.Sprintf("0.0.0.0:%d", Port))
+	if err != nil {
+		return nil, err
+	}
+	return pc.(*net.UDPConn), nil
 }
 
 // LocalIPToward returns the local IPv4 address the OS would use as the source

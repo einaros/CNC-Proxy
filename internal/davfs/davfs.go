@@ -191,11 +191,11 @@ func svcPath(name string) string {
 // --- FileInfo ---
 
 type fileInfo struct {
-	name    string
-	size    int64
-	mode    os.FileMode
-	mtime   time.Time
-	isDir   bool
+	name  string
+	size  int64
+	mode  os.FileMode
+	mtime time.Time
+	isDir bool
 }
 
 func (fi *fileInfo) Name() string       { return fi.name }

@@ -23,8 +23,8 @@ import (
 
 // Engine executes queued jobs against the machine via the arbiter.
 type Engine struct {
-	store   *store.Store
-	arb     *session.Arbiter
+	store     *store.Store
+	arb       *session.Arbiter
 	opTimeout time.Duration
 
 	// backoff bounds. A failed job's next attempt waits up to maxBackoff.

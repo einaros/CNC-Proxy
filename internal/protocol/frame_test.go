@@ -11,8 +11,8 @@ func buildFrame(cmd byte, data []byte) []byte {
 	dataLen := 1 + len(data) + 2
 	b := []byte{0x86, 0x68, byte(dataLen >> 8), byte(dataLen), cmd}
 	b = append(b, data...)
-	b = append(b, 0x00, 0x00)       // CRC placeholder (unchecked)
-	b = append(b, 0x55, 0xAA)       // footer
+	b = append(b, 0x00, 0x00) // CRC placeholder (unchecked)
+	b = append(b, 0x55, 0xAA) // footer
 	return b
 }
 
