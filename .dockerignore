@@ -1,0 +1,8 @@
+# The vendored Makera suite (controller + firmware sources) is reference
+# material, not a build input — keep it out of the build context.
+vendor/
+.git/
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore

@@ -1,0 +1,32 @@
+# Runs the proxy in Docker on the same computer as the official Carvera
+# Controller.
+#
+# A container behind Docker's NAT cannot receive the machine's LAN UDP
+# broadcasts, so discovery doesn't work inside it: pin the machine address
+# with CNC_MACHINE. Advertising still works by unicasting the discovery
+# record to the host (host.docker.internal), where the controller listens
+# on UDP 3333; the record points the controller at 127.0.0.1:2222, which is
+# the published relay port. CNC_NAME is required for advertising in Docker
+# (without LAN broadcasts the proxy never learns the real machine's name to
+# derive one from) — and it is also how you rename the machine.
+services:
+  cnc-proxy:
+    build: .
+    image: cnc-proxy
+    container_name: cnc-proxy
+    restart: unless-stopped
+    ports:
+      - "2222:2222"   # relay: the controller connects here
+      - "8420:8420"   # HTTP API + web UI
+      - "8421:8421"   # WebDAV (mount http://127.0.0.1:8421/)
+    environment:
+      CNC_MACHINE: "${CNC_MACHINE:?set CNC_MACHINE to the machine's ip:port, e.g. 192.168.1.42:2222}"
+      CNC_NAME: "${CNC_NAME:-Carvera (proxy)}"
+      CNC_ADVERTISE: "true"
+      CNC_PROXY_IP: "127.0.0.1"
+      CNC_BROADCAST: "host.docker.internal"
+    volumes:
+      - cnc-data:/data
+
+volumes:
+  cnc-data:
