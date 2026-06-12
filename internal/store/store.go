@@ -273,6 +273,19 @@ func (s *Store) NextQueued() (Job, bool) {
 	return Job{}, false
 }
 
+// QueuedJobs returns copies of all queued jobs in queue (FIFO) order.
+func (s *Store) QueuedJobs() []Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []Job
+	for _, j := range s.jobs {
+		if j.State == Queued {
+			out = append(out, *j)
+		}
+	}
+	return out
+}
+
 // UpdateJob applies a mutation to a job by ID, persisting and publishing.
 func (s *Store) UpdateJob(id int64, mutate func(*Job)) error {
 	s.mu.Lock()

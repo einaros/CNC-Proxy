@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"runtime"
 
 	"github.com/uwin/cnc-proxy/internal/service"
@@ -125,6 +126,30 @@ func (f *writeFile) Seek(offset int64, whence int) (int64, error) {
 func (f *writeFile) Stat() (os.FileInfo, error) {
 	// Report the in-progress temp file's stat (size grows as bytes are written).
 	return f.tmp.Stat()
+}
+
+// discardFile accepts and silently drops writes. It backs OS-metadata files
+// (AppleDouble "._*", ".DS_Store", etc.) that a desktop file manager insists on
+// writing into the mount: the client sees success, but nothing is staged or
+// synced to the CNC.
+type discardFile struct {
+	name string
+	n    int64
+}
+
+func newDiscardFile(name string) *discardFile { return &discardFile{name: path.Base(name)} }
+
+func (f *discardFile) Write(p []byte) (int, error) { f.n += int64(len(p)); return len(p), nil }
+func (f *discardFile) Read([]byte) (int, error)    { return 0, io.EOF }
+func (f *discardFile) Close() error                { return nil }
+func (f *discardFile) Seek(int64, int) (int64, error) {
+	return 0, nil
+}
+func (f *discardFile) Readdir(int) ([]os.FileInfo, error) {
+	return nil, errors.New("davfs: not a directory")
+}
+func (f *discardFile) Stat() (os.FileInfo, error) {
+	return &fileInfo{name: f.name, size: f.n, mode: 0o644}, nil
 }
 
 // Close flushes the buffered content into the service and cleans up the temp

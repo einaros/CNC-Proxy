@@ -231,6 +231,36 @@ func TestFailureRecordedAndRetried(t *testing.T) {
 	}
 }
 
+// TestFailingJobDoesNotBlockOthers ensures one persistently-failing job (e.g. a
+// delete of a file that doesn't exist on the machine) doesn't stall unrelated
+// jobs behind it in the queue — the head-of-line problem seen on a real mount
+// when macOS wrote AppleDouble metadata.
+func TestFailingJobDoesNotBlockOthers(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	tr.Observe(machine.Idle)
+
+	// A delete that the machine always fails (file not present).
+	m.FailCommand("rm")
+	st.Enqueue(store.Job{Kind: store.JobDelete, Path: "/sd/gcodes/ghost.nc"})
+
+	// A legitimate upload queued AFTER the failing delete, different path.
+	cachePath, md5hex, size := writeCache(t, t.TempDir(), 100)
+	remote := "/sd/gcodes/real.nc"
+	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
+
+	eng.drain()
+
+	// The upload must have synced despite the failing delete ahead of it.
+	if e, _ := st.GetEntry(remote); e.Sync != store.Synced {
+		t.Errorf("real.nc sync = %q, want synced (failing delete blocked the queue)", e.Sync)
+	}
+	if _, ok := m.File(remote); !ok {
+		t.Error("real.nc never reached the machine")
+	}
+}
+
 func TestEmptyFileUploadSyncs(t *testing.T) {
 	m, st, arb, tr := setup(t)
 	eng := newEngine(st, arb)

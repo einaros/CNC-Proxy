@@ -52,6 +52,9 @@ func (fs *FS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	if isRoot(name) {
 		return os.ErrExist
 	}
+	if isJunk(name) {
+		return nil // pretend success; never create OS-metadata dirs on the CNC
+	}
 	_, err := fs.svc.Mkdir(svcPath(name))
 	return err
 }
@@ -59,6 +62,9 @@ func (fs *FS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 func (fs *FS) RemoveAll(ctx context.Context, name string) error {
 	if isRoot(name) {
 		return os.ErrPermission
+	}
+	if isJunk(name) {
+		return nil // junk was never synced; deleting it is a no-op success
 	}
 	if err := fs.svc.Delete(svcPath(name)); err != nil {
 		if err == service.ErrNotFound {
@@ -70,6 +76,9 @@ func (fs *FS) RemoveAll(ctx context.Context, name string) error {
 }
 
 func (fs *FS) Rename(ctx context.Context, oldName, newName string) error {
+	if isJunk(oldName) || isJunk(newName) {
+		return nil // junk paths aren't tracked; renaming them is a no-op
+	}
 	if err := fs.svc.Rename(svcPath(oldName), svcPath(newName)); err != nil {
 		if err == service.ErrNotFound {
 			return os.ErrNotExist
@@ -83,6 +92,9 @@ func (fs *FS) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	if isRoot(name) {
 		return rootInfo(), nil
 	}
+	if isJunk(name) {
+		return nil, os.ErrNotExist // junk doesn't exist as far as the mount is concerned
+	}
 	entry, ok := fs.svc.Lookup(svcPath(name))
 	if !ok {
 		return nil, os.ErrNotExist
@@ -92,6 +104,13 @@ func (fs *FS) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 
 func (fs *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
 	writable := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0
+	if isJunk(name) {
+		// Accept writes to OS-metadata files but discard them; reads/opens 404.
+		if writable {
+			return newDiscardFile(name), nil
+		}
+		return nil, os.ErrNotExist
+	}
 	if writable {
 		return newWriteFile(fs.svc, svcPath(name))
 	}
@@ -144,6 +163,22 @@ func (fs *FS) openDir(name string) (webdav.File, error) {
 // isRoot reports whether a WebDAV path refers to the mount root.
 func isRoot(name string) bool {
 	return svcPath(name) == ""
+}
+
+// isJunk reports whether a path's final component is OS-generated metadata that
+// must never be synced to the CNC (it would create dead files on the SD card
+// and, worse, a failed cleanup of one could block the sync queue). macOS Finder
+// alone writes AppleDouble "._*" files, ".DS_Store", and a handful of dot-dirs;
+// Windows writes "Thumbs.db"/"desktop.ini". We treat these as nonexistent so
+// the OS believes its bookkeeping succeeded while nothing reaches the machine.
+func isJunk(name string) bool {
+	base := path.Base(strings.Trim(path.Clean("/"+name), "/"))
+	switch base {
+	case ".DS_Store", ".localized", "Thumbs.db", "desktop.ini", ".fseventsd",
+		".Spotlight-V100", ".Trashes", ".TemporaryItems", ".apdisk":
+		return true
+	}
+	return strings.HasPrefix(base, "._")
 }
 
 // svcPath converts a WebDAV mount-relative path (rooted at "/") into the

@@ -27,6 +27,41 @@ func newFS(t *testing.T) (*FS, *service.Service) {
 	return New(svc), svc
 }
 
+// TestJunkFilesNotSynced ensures OS-metadata files written into the mount are
+// accepted (so the file manager is happy) but never reach the catalog/queue and
+// thus never the CNC.
+func TestJunkFilesNotSynced(t *testing.T) {
+	fs, svc := newFS(t)
+	ctx := context.Background()
+
+	for _, junk := range []string{"/._part.nc", "/.DS_Store", "/sub/._x", "/Thumbs.db"} {
+		wf, err := fs.OpenFile(ctx, junk, os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatalf("open junk %q: %v", junk, err)
+		}
+		if _, err := wf.Write([]byte("garbage")); err != nil {
+			t.Errorf("write junk %q: %v", junk, err)
+		}
+		if err := wf.Close(); err != nil {
+			t.Errorf("close junk %q: %v", junk, err)
+		}
+		// Stat must report it as nonexistent, and nothing should be enqueued.
+		if _, err := fs.Stat(ctx, junk); !os.IsNotExist(err) {
+			t.Errorf("stat junk %q = %v, want NotExist", junk, err)
+		}
+	}
+	if files := svc.Files(); len(files) != 0 {
+		t.Errorf("junk leaked into catalog: %+v", files)
+	}
+	// Mkdir/Remove/Rename of junk are no-op successes.
+	if err := fs.Mkdir(ctx, "/.Spotlight-V100", 0o755); err != nil {
+		t.Errorf("mkdir junk: %v", err)
+	}
+	if err := fs.RemoveAll(ctx, "/._gone"); err != nil {
+		t.Errorf("remove junk: %v", err)
+	}
+}
+
 func TestWriteThenReadAndStat(t *testing.T) {
 	fs, _ := newFS(t)
 	ctx := context.Background()

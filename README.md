@@ -74,21 +74,38 @@ which otherwise triggers Go's vendoring mode.)
 
 ## Run
 
-Auto-discover the machine and advertise the proxy in its place:
+The simplest form takes no addresses at all — the proxy finds the machine on
+the LAN via UDP discovery and serves the API + WebDAV mount:
 
 ```sh
-./cnc-proxy -proxy-ip <this-host-ip> -broadcast <subnet-broadcast>
+./cnc-proxy
 ```
 
-Point at a known machine and skip discovery (e.g. loopback testing against
-`cmd/fakemachine`):
+To put the proxy in front of the official controller (transparent mode), add
+`-advertise`. It re-advertises itself so the controller connects through it,
+auto-deriving this host's IP and the subnet broadcast from the discovered
+machine — no address flags needed:
+
+```sh
+./cnc-proxy -advertise
+```
+
+You can still pin any address explicitly (e.g. a fixed machine, or to override
+the auto-derived advertise addresses on a multi-homed host):
+
+```sh
+./cnc-proxy -machine 192.168.1.42:2222 -advertise \
+  -proxy-ip 192.168.1.50 -broadcast 192.168.1.255
+```
+
+Loopback testing against the bundled fake machine:
 
 ```sh
 # terminal 1: a fake machine
 go run -mod=mod ./cmd/fakemachine -addr 127.0.0.1:12222
 
-# terminal 2: the proxy
-./cnc-proxy -machine 127.0.0.1:12222 -no-advertise \
+# terminal 2: the proxy (fixed machine, no advertising)
+./cnc-proxy -machine 127.0.0.1:12222 \
   -tcp-port 12200 -api-addr 127.0.0.1:8420 -dav-addr 127.0.0.1:8421
 ```
 
@@ -106,13 +123,16 @@ Then:
 |------|---------|---------|
 | `-tcp-port` | 2222 | port the relay listens on for the controller |
 | `-machine` | (discover) | fixed machine `host:port`; empty = learn via UDP |
-| `-proxy-ip` | — | IP the controller should connect to (this host) |
-| `-broadcast` | — | broadcast address to advertise on |
+| `-advertise` | false | transparent mode: re-advertise so the controller connects through the proxy |
+| `-proxy-ip` | (auto) | IP the controller should connect to; auto-derived if empty |
+| `-broadcast` | (auto) | broadcast address to advertise on; auto-derived if empty |
 | `-name-suffix` | ` (proxy)` | suffix on the advertised machine name |
-| `-no-advertise` | false | relay only, don't re-advertise over UDP |
 | `-api-addr` | `:8420` | HTTP API + web UI address |
 | `-dav-addr` | `:8421` | WebDAV server address |
 | `-data-dir` | OS config dir | catalog, job queue, and file cache |
+
+(`-no-advertise` still exists as a deprecated no-op so older invocations don't
+break; advertising is now opt-in via `-advertise`.)
 
 ## Sync states
 

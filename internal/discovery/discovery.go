@@ -146,3 +146,76 @@ func OpenListenSocket() (*net.UDPConn, error) {
 	addr := &net.UDPAddr{IP: net.IPv4zero, Port: Port}
 	return net.ListenUDP("udp4", addr)
 }
+
+// LocalIPToward returns the local IPv4 address the OS would use as the source
+// when sending to target (e.g. the machine's IP). It opens a UDP socket but
+// sends nothing — the kernel resolves the route on "connect". This lets the
+// proxy auto-fill -proxy-ip without the user knowing which interface reaches
+// the machine.
+func LocalIPToward(target string) (net.IP, error) {
+	c, err := net.Dial("udp4", net.JoinHostPort(target, "9")) // port arbitrary; no packet sent
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	ip := c.LocalAddr().(*net.UDPAddr).IP.To4()
+	if ip == nil {
+		return nil, fmt.Errorf("discovery: no IPv4 route toward %s", target)
+	}
+	return ip, nil
+}
+
+// BroadcastFor returns the IPv4 directed-broadcast address of the local
+// interface that owns localIP (localIP | ^netmask). This is the address the
+// proxy advertises on so the controller, which listens for broadcasts, sees it.
+func BroadcastFor(localIP net.IP) (net.IP, error) {
+	want := localIP.To4()
+	if want == nil {
+		return nil, fmt.Errorf("discovery: %v is not IPv4", localIP)
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	for _, ifc := range ifaces {
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok || ipn.IP.To4() == nil {
+				continue
+			}
+			if ipn.IP.To4().Equal(want) {
+				ip := ipn.IP.To4()
+				mask := ipn.Mask
+				if len(mask) != 4 {
+					mask = ipn.Mask[len(ipn.Mask)-4:]
+				}
+				b := make(net.IP, 4)
+				for i := 0; i < 4; i++ {
+					b[i] = ip[i] | ^mask[i]
+				}
+				return b, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("discovery: no interface owns %v", localIP)
+}
+
+// AutoAdvertiseAddrs derives the (proxyIP, broadcast) the advertiser should use,
+// given the machine address (host or host:port) to route toward. Both are
+// computed from the local interface that reaches the machine.
+func AutoAdvertiseAddrs(machineHostPort string) (proxyIP, broadcast string, err error) {
+	host := machineHostPort
+	if h, _, e := net.SplitHostPort(machineHostPort); e == nil {
+		host = h
+	}
+	lip, err := LocalIPToward(host)
+	if err != nil {
+		return "", "", err
+	}
+	b, err := BroadcastFor(lip)
+	if err != nil {
+		return "", "", err
+	}
+	return lip.String(), b.String(), nil
+}

@@ -101,34 +101,40 @@ func (e *Engine) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// drain runs queued jobs until none are runnable (queue empty, or blocked by
-// relay/idle/unreachable). One job at a time, in order — the machine is
-// single-conversation.
+// drain runs queued jobs while the machine is available. It walks the queue in
+// FIFO order, but a single failing or backing-off job does NOT stall unrelated
+// jobs — only jobs for the SAME path are kept strictly ordered behind it (so a
+// queued delete-then-reupload of one file stays correct). A session-level block
+// (controller connected / machine not idle / unreachable) stops the whole pass,
+// since it applies to every job equally.
+//
+// One job runs at a time — the machine is single-conversation.
 func (e *Engine) drain() {
-	for {
-		job, ok := e.store.NextQueued()
-		if !ok {
-			return
+	// deferredPaths holds paths with an earlier job we skipped this pass; later
+	// jobs for those paths must wait to preserve per-path ordering.
+	deferredPaths := make(map[string]bool)
+	for _, job := range e.store.QueuedJobs() {
+		if deferredPaths[job.Path] {
+			continue // an earlier job for this path is pending; keep order
 		}
 		if !e.shouldAttempt(job) {
-			// The head job is backing off; don't starve it by skipping ahead,
-			// since order matters for correctness (e.g. mkdir before upload).
-			return
+			// Backing off after a failure; skip it (and later same-path jobs)
+			// this pass — the next tick retries once its backoff elapses.
+			deferredPaths[job.Path] = true
+			continue
 		}
 		ran, err := e.runJob(job)
 		if !ran {
-			// Blocked (relay active / not idle / unreachable): stop this pass
-			// and try again next tick.
+			// Session-level block (relay/idle/unreachable): nothing will run
+			// this pass, so stop entirely and retry next tick.
 			return
 		}
 		if err != nil {
-			// Attempted but failed. The job stays queued at the head; stop the
-			// pass so it isn't busy-retried within a single drain — the next
-			// tick re-attempts it once its backoff has elapsed.
+			// Attempted but failed: defer this path (don't busy-retry within the
+			// pass) but keep draining other paths.
 			log.Printf("synceng: job %d (%s %s) failed: %v", job.ID, job.Kind, job.Path, err)
-			return
+			deferredPaths[job.Path] = true
 		}
-		// Success: the job is done; advance to the next queued job.
 	}
 }
 

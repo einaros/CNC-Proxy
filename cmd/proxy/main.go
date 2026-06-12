@@ -49,10 +49,11 @@ func main() {
 	var (
 		tcpPort     = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
 		machineAddr = flag.String("machine", "", "machine host:port; if empty, learned via UDP discovery")
-		proxyIP     = flag.String("proxy-ip", "", "IP the controller should connect to (this host); required to advertise")
-		broadcast   = flag.String("broadcast", "", "broadcast address to advertise on, e.g. 192.168.1.255")
+		advertise   = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
+		proxyIP     = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
+		broadcast   = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
 		nameSuffix  = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name")
-		noAdvertise = flag.Bool("no-advertise", false, "do not re-advertise over UDP (relay only)")
+		noAdvertise = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
 		apiAddr     = flag.String("api-addr", ":8420", "address for the HTTP API + web UI")
 		davAddr     = flag.String("dav-addr", ":8421", "address for the WebDAV filesystem server")
 		dataDir     = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
@@ -62,33 +63,55 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	_ = *noAdvertise // deprecated flag, kept so old invocations don't error
+
 	// --- Discovery ---
+	// Always listen: discovery is how we learn the machine when -machine is
+	// omitted, and how the advertiser learns the machine name to re-broadcast.
 	disc := &discovery.Listener{}
-	if !*noAdvertise || *machineAddr == "" {
-		udp, err := discovery.OpenListenSocket()
-		if err != nil {
-			log.Fatalf("cannot bind UDP discovery port %d: %v", discovery.Port, err)
-		}
-		defer udp.Close()
-		go disc.Listen(udp, "")
-		log.Printf("discovery: listening on udp/%d", discovery.Port)
+	udp, err := discovery.OpenListenSocket()
+	if err != nil {
+		log.Fatalf("cannot bind UDP discovery port %d: %v", discovery.Port, err)
 	}
+	defer udp.Close()
+	go disc.Listen(udp, "")
+	log.Printf("discovery: listening on udp/%d", discovery.Port)
+
+	dialAddr := machineDialer(*machineAddr, disc)
 
 	stop := make(chan struct{})
-	if !*noAdvertise {
-		if *proxyIP == "" || *broadcast == "" {
-			log.Fatal("-proxy-ip and -broadcast are required unless -no-advertise is set")
-		}
-		adv := &discovery.Advertiser{Listener: disc, ProxyIP: *proxyIP, ProxyPort: *tcpPort, NameSuffix: *nameSuffix}
+	if *advertise {
+		// Transparent mode: re-advertise so the official controller connects
+		// through us. Resolve the addresses to advertise; auto-derive any that
+		// the user didn't pin via flags. Run in a goroutine because in pure
+		// auto mode we must wait for the machine to be discovered first.
 		go func() {
-			if err := adv.Run(*broadcast, stop); err != nil {
+			pip, bcast := *proxyIP, *broadcast
+			if pip == "" || bcast == "" {
+				machine := resolveMachineForAdvertise(*machineAddr, disc, stop)
+				if machine == "" {
+					return // shutting down before a machine appeared
+				}
+				autoIP, autoBcast, derr := discovery.AutoAdvertiseAddrs(machine)
+				if derr != nil {
+					log.Printf("discovery: cannot auto-derive advertise addresses (%v); "+
+						"pass -proxy-ip and -broadcast explicitly", derr)
+					return
+				}
+				if pip == "" {
+					pip = autoIP
+				}
+				if bcast == "" {
+					bcast = autoBcast
+				}
+			}
+			adv := &discovery.Advertiser{Listener: disc, ProxyIP: pip, ProxyPort: *tcpPort, NameSuffix: *nameSuffix}
+			log.Printf("discovery: advertising proxy at %s:%d on %s", pip, *tcpPort, bcast)
+			if err := adv.Run(bcast, stop); err != nil {
 				log.Printf("advertiser stopped: %v", err)
 			}
 		}()
-		log.Printf("discovery: advertising proxy at %s:%d on %s", *proxyIP, *tcpPort, *broadcast)
 	}
-
-	dialAddr := machineDialer(*machineAddr, disc)
 
 	// --- Store, arbiter, sync engine, service, API ---
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
@@ -166,6 +189,28 @@ func main() {
 
 	if err := relaySrv.Serve(ln); err != nil {
 		log.Fatalf("relay: %v", err)
+	}
+}
+
+// resolveMachineForAdvertise returns the machine IP the advertiser should route
+// toward for auto-deriving its own addresses. If fixed (-machine) is set it is
+// used directly; otherwise it waits for discovery to learn a machine, polling
+// until one appears or stop is closed (returns "" on shutdown).
+func resolveMachineForAdvertise(fixed string, l *discovery.Listener, stop <-chan struct{}) string {
+	if fixed != "" {
+		return fixed
+	}
+	t := time.NewTicker(500 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if m, ok := l.Latest(); ok {
+			return m.IP
+		}
+		select {
+		case <-stop:
+			return ""
+		case <-t.C:
+		}
 	}
 }
 
