@@ -6,7 +6,10 @@ const state = {
   files: new Map(),
   jobs: new Map(),
   machine: { state: "Unknown", mode: "—" },
+  // Gcode I/O lines, deduped by seq (the snapshot and live stream can overlap).
+  gcodeSeqs: new Set(),
 };
+const GCODE_MAX_LINES = 500;
 
 const SYNC_LABEL = {
   synced: "Synced",
@@ -91,6 +94,23 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
+// appendGcodeLine adds one gcode I/O line to the console, deduping by seq and
+// keeping the view pinned to the bottom unless the user scrolled up.
+function appendGcodeLine(ln) {
+  if (!ln || state.gcodeSeqs.has(ln.seq)) return;
+  state.gcodeSeqs.add(ln.seq);
+  const log = document.getElementById("gcode-log");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+  const div = document.createElement("div");
+  const isErr = ln.dir === "recv" && /^(error|alarm)/i.test(ln.text);
+  div.className = ln.dir + (isErr ? " err-line" : "");
+  const arrow = ln.dir === "send" ? "›" : "‹";
+  div.innerHTML = `<span class="src">${escapeHtml(ln.source)} ${arrow}</span> ${escapeHtml(ln.text)}`;
+  log.appendChild(div);
+  while (log.childNodes.length > GCODE_MAX_LINES) log.removeChild(log.firstChild);
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
 // --- Actions ---
 
 async function uploadFiles(fileList) {
@@ -121,6 +141,21 @@ async function doRename(path) {
   });
 }
 
+// sendGcode submits one line to the machine. The sent line, its output, and
+// any machine/arbiter error all arrive back through the SSE gcode stream (the
+// server logs them), so only a transport failure needs local rendering.
+async function sendGcode(line) {
+  try {
+    await fetch("/api/gcode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ line }),
+    });
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e });
+  }
+}
+
 // --- SSE wiring ---
 
 function applySnapshot(snap) {
@@ -130,6 +165,12 @@ function applySnapshot(snap) {
   renderMachine();
   renderFiles();
   renderJobs();
+  // Rebuild the console from the snapshot: it carries the server's full
+  // retained history, and resetting keeps seq-dedup correct across proxy
+  // restarts (where seq numbering starts over).
+  state.gcodeSeqs.clear();
+  document.getElementById("gcode-log").innerHTML = "";
+  for (const ln of snap.gcode || []) appendGcodeLine(ln);
 }
 
 function applyChange(ev) {
@@ -148,6 +189,7 @@ function connectSSE() {
   const es = new EventSource("/api/events");
   es.addEventListener("snapshot", (e) => applySnapshot(JSON.parse(e.data)));
   es.addEventListener("change", (e) => applyChange(JSON.parse(e.data)));
+  es.addEventListener("gcode", (e) => appendGcodeLine(JSON.parse(e.data)));
   es.onerror = () => { /* EventSource auto-reconnects */ };
 }
 
@@ -171,6 +213,16 @@ function init() {
     e.preventDefault();
     drop.classList.remove("over");
     uploadFiles(e.dataTransfer.files);
+  };
+
+  const form = document.getElementById("gcode-form");
+  const gcodeInput = document.getElementById("gcode-input");
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const line = gcodeInput.value.trim();
+    if (!line) return;
+    gcodeInput.value = "";
+    sendGcode(line);
   };
 
   connectSSE();

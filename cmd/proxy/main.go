@@ -170,6 +170,9 @@ func main() {
 	relaySrv := &relay.Server{
 		Dial:     dialAddr,
 		Observer: arb,
+		// Sniff the controller's gcode/console traffic into the shared log the
+		// API streams to web clients (read-only; frames are never altered).
+		GcodeLog: svc.GcodeLog(),
 	}
 	// Let owner-mode operations (sync engine, API) inject onto the controller's
 	// shared connection during relay mode, between the controller's transactions.

@@ -197,6 +197,71 @@ func TestWebUIServed(t *testing.T) {
 	}
 }
 
+func TestGcodeLogEndpointAndStream(t *testing.T) {
+	srv, svc := newTestServer(t)
+
+	// Open the SSE stream first so the live event (not just the snapshot)
+	// carries the line.
+	req, _ := http.NewRequest("GET", srv.URL+"/api/events", nil)
+	resp := do(t, req)
+	defer resp.Body.Close()
+	// Consume the snapshot event.
+	buf := make([]byte, 8192)
+	n, _ := resp.Body.Read(buf)
+	if !strings.Contains(string(buf[:n]), "event: snapshot") {
+		t.Fatalf("expected snapshot first, got %q", buf[:n])
+	}
+
+	// Submitting gcode fails (no machine in this harness), but the attempt and
+	// the error must still land in the shared log and stream to clients.
+	body, _ := json.Marshal(map[string]string{"line": "M114"})
+	greq, _ := http.NewRequest("POST", srv.URL+"/api/gcode", bytes.NewReader(body))
+	greq.Header.Set("Content-Type", "application/json")
+	gresp := do(t, greq)
+	gresp.Body.Close()
+
+	// The REST log endpoint has both lines.
+	lresp := get(t, srv.URL+"/api/gcode/log")
+	var lines []struct {
+		Dir    string `json:"dir"`
+		Source string `json:"source"`
+		Text   string `json:"text"`
+	}
+	json.NewDecoder(lresp.Body).Decode(&lines)
+	lresp.Body.Close()
+	if len(lines) < 2 || lines[0].Dir != "send" || lines[0].Text != "M114" || lines[0].Source != "api" {
+		t.Fatalf("log lines = %+v", lines)
+	}
+	if lines[1].Dir != "recv" || !strings.Contains(lines[1].Text, "error") {
+		t.Errorf("expected error output line, got %+v", lines[1])
+	}
+
+	// The SSE stream carries the same lines as gcode events.
+	var got string
+	for !strings.Contains(got, "M114") {
+		n, err := resp.Body.Read(buf)
+		got += string(buf[:n])
+		if err != nil {
+			t.Fatalf("stream ended before gcode event: %q (%v)", got, err)
+		}
+	}
+	if !strings.Contains(got, "event: gcode") {
+		t.Errorf("expected gcode event, got %q", got)
+	}
+
+	// Lines appended directly (as the relay does for controller traffic) also
+	// reach the same stream.
+	svc.GcodeLog().Append("recv", "controller", "ok")
+	got = ""
+	for !strings.Contains(got, `"controller"`) {
+		n, err := resp.Body.Read(buf)
+		got += string(buf[:n])
+		if err != nil {
+			t.Fatalf("stream ended before controller line: %q (%v)", got, err)
+		}
+	}
+}
+
 func TestEventsSnapshot(t *testing.T) {
 	srv, _ := newTestServer(t)
 	http.Post(srv.URL+"/api/files?path=a.nc", "application/octet-stream", strings.NewReader("x"))

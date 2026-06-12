@@ -21,6 +21,19 @@ func Escape(s string) string {
 	return escaper.Replace(s)
 }
 
+var unescaper = strings.NewReplacer(
+	"\x01", " ",
+	"\x02", "?",
+	"\x03", "*",
+	"\x04", "!",
+	"\x05", "~",
+)
+
+// Unescape reverses the wire escaping, for displaying observed command lines.
+func Unescape(s string) string {
+	return unescaper.Replace(s)
+}
+
 // The file commands are sent as CTRL_MULTI text frames. The "-e" flag tells the
 // firmware to packetize its response (LOAD_INFO/LOAD_FINISH/LOAD_ERROR) rather
 // than stream raw text, which is what we parse. ls additionally uses -s for the

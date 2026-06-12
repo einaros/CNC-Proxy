@@ -34,7 +34,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/files/rename", s.renameFile) // body: {from,to}
 	mux.HandleFunc("POST /api/dirs", s.postDir)            // body: {path}
 	mux.HandleFunc("GET /api/jobs", s.getJobs)
-	mux.HandleFunc("POST /api/gcode", s.postGcode) // body: {line}
+	mux.HandleFunc("POST /api/gcode", s.postGcode)      // body: {line}
+	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog) // recent gcode I/O lines
 	mux.HandleFunc("GET /api/events", s.events)
 	// Everything not under /api/ is the embedded web UI.
 	mux.Handle("/", webHandler())
@@ -193,6 +194,12 @@ func (s *Server) postGcode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"output": out})
 }
 
+// getGcodeLog returns the retained gcode I/O lines (oldest first), so a client
+// can backfill history before following the live SSE stream.
+func (s *Server) getGcodeLog(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.svc.GcodeLog().Recent())
+}
+
 // events streams catalog/job/machine changes as Server-Sent Events.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
@@ -206,12 +213,17 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 
 	ch, unsub := s.svc.Subscribe()
 	defer unsub()
+	gch, gunsub := s.svc.GcodeLog().Subscribe()
+	defer gunsub()
 
 	// Send an initial snapshot so a fresh client is immediately consistent.
+	// Subscriptions are already active, so lines logged from here on arrive as
+	// gcode events; duplicates against the snapshot are detectable by seq.
 	sendEvent(w, "snapshot", map[string]any{
 		"machine": s.svc.Status(),
 		"files":   s.svc.Files(),
 		"jobs":    s.svc.Jobs(),
+		"gcode":   s.svc.GcodeLog().Recent(),
 	})
 	flusher.Flush()
 
@@ -224,6 +236,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sendEvent(w, "change", ev)
+			flusher.Flush()
+		case ln, ok := <-gch:
+			if !ok {
+				return
+			}
+			sendEvent(w, "gcode", ln)
 			flusher.Flush()
 		}
 	}

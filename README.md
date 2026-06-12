@@ -113,7 +113,10 @@ Then:
 - Web UI: <http://127.0.0.1:8420/>
 - API: `POST /api/files?path=part.nc` (raw body or multipart), `GET /api/files`,
   `DELETE /api/files/{path}`, `POST /api/files/rename`, `GET /api/machine`,
-  `GET /api/jobs`, `GET /api/events` (SSE).
+  `GET /api/jobs`, `POST /api/gcode` (body `{"line":"M114"}`), `GET
+  /api/gcode/log` (recent gcode I/O), `GET /api/events` (SSE: catalog/job
+  changes plus all gcode I/O — both API-submitted and controller traffic
+  observed by the relay).
 - WebDAV mount: macOS Finder → Go → Connect to Server → `http://127.0.0.1:8421/`;
   Windows → Map network drive; Linux → `davs?://…` in the file manager.
 

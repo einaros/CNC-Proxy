@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/client"
+	"github.com/uwin/cnc-proxy/internal/gcodelog"
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/quicklz"
 	"github.com/uwin/cnc-proxy/internal/session"
@@ -42,6 +43,11 @@ type Service struct {
 	arb      *session.Arbiter
 	cacheDir string
 
+	// gcodeLog records all gcode/console I/O with the machine — lines injected
+	// via SendGcode here, plus controller traffic the relay sniffs into the same
+	// log — for streaming to web clients.
+	gcodeLog *gcodelog.Log
+
 	// commitMu makes a mutation's "publish to cache + update catalog + enqueue
 	// job" sequence atomic across concurrent callers, so the cache file, the
 	// catalog entry's MD5/size, and the queued job always describe the same
@@ -55,8 +61,12 @@ func New(st *store.Store, arb *session.Arbiter) (*Service, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, err
 	}
-	return &Service{store: st, arb: arb, cacheDir: cacheDir}, nil
+	return &Service{store: st, arb: arb, cacheDir: cacheDir, gcodeLog: gcodelog.New(500)}, nil
 }
+
+// GcodeLog exposes the shared gcode I/O log so the relay can record controller
+// traffic into it and the API can stream it.
+func (s *Service) GcodeLog() *gcodelog.Log { return s.gcodeLog }
 
 // MachineStatus is the snapshot returned to clients.
 type MachineStatus struct {
@@ -240,12 +250,21 @@ const gcodeTimeout = 30 * time.Second
 // NOT require idle — jogging or querying while a job runs is legitimate — but in
 // relay mode it returns session.ErrBusy if the controller is mid file-transfer.
 func (s *Service) SendGcode(line string) (string, error) {
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, line)
 	var out string
 	err := s.arb.WithMachine(false, func(c *client.Conn) error {
 		o, e := c.SendGcode(line, gcodeTimeout)
 		out = o
 		return e
 	})
+	if out != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+	} else if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
+	}
 	return out, err
 }
 

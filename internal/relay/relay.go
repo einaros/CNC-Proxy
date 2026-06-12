@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/gcodelog"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
@@ -43,6 +44,10 @@ type Server struct {
 
 	// Observer, if set, receives session lifecycle and state-observation hooks.
 	Observer Observer
+
+	// GcodeLog, if set, records the controller's command lines and the machine's
+	// textual output as they pass through the relay (sniffed, never altered).
+	GcodeLog *gcodelog.Log
 
 	active atomic.Bool
 
@@ -170,6 +175,7 @@ func (s *Server) pumpControllerToMachine(client, machine net.Conn, m *mux) {
 		if n > 0 {
 			for _, f := range sc.Push(buf[:n]) {
 				logFrame("C->M", f)
+				s.logControllerCommand(f)
 				if m.noteControllerFrame(f, f.Raw) {
 					if _, werr := machine.Write(f.Raw); werr != nil {
 						return
@@ -207,6 +213,10 @@ func (s *Server) pumpMachineToController(machine, client net.Conn, m *mux) {
 					s.Observer.ObserveStatusPayload(string(f.Data))
 				}
 				if m.routeMachineFrame(f) {
+					// Log only frames actually forwarded to the controller:
+					// diverted frames belong to an injected operation, which
+					// records its own I/O under the "api" source.
+					s.logMachineOutput(f)
 					if _, werr := client.Write(f.Raw); werr != nil {
 						return
 					}
@@ -216,6 +226,45 @@ func (s *Server) pumpMachineToController(machine, client net.Conn, m *mux) {
 		if rerr != nil {
 			return
 		}
+	}
+}
+
+// logControllerCommand records a controller frame's command text into the
+// gcode log. Status polls (`?`, sent every second as the controller's
+// heartbeat) are skipped — they are transport noise, not commands.
+func (s *Server) logControllerCommand(f protocol.Frame) {
+	if s.GcodeLog == nil {
+		return
+	}
+	switch f.Cmd {
+	case protocol.CmdCtrlMulti:
+		s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, protocol.Unescape(string(f.Data)))
+	case protocol.CmdCtrlSingle:
+		if len(f.Data) != 1 {
+			return
+		}
+		switch f.Data[0] {
+		case '!':
+			s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, "! (feed hold)")
+		case '~':
+			s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, "~ (resume)")
+		case 0x18:
+			s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, "^X (halt)")
+		}
+		// '?' status polls are deliberately not logged.
+	}
+}
+
+// logMachineOutput records the machine's textual command output into the gcode
+// log. Only NORMAL_INFO carries gcode/console output ("ok", error lines,
+// command results); status reports and file-transfer frames are protocol
+// machinery and stay out of the log.
+func (s *Server) logMachineOutput(f protocol.Frame) {
+	if s.GcodeLog == nil {
+		return
+	}
+	if f.Cmd == protocol.CmdNormalInfo {
+		s.GcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceController, string(f.Data))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/gcodelog"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
@@ -117,6 +118,96 @@ func TestRelayForwardsFramesVerbatim(t *testing.T) {
 	rf := m.recvFrames()
 	if len(rf) != 1 || !bytes.Equal(rf[0].Raw, gcode) {
 		t.Fatalf("machine received %d frames; first matches gcode=%v", len(rf), len(rf) == 1 && bytes.Equal(rf[0].Raw, gcode))
+	}
+}
+
+// TestRelaySniffsGcodeIntoLog verifies that a controller's command lines and
+// the machine's textual replies land in the gcode log, while `?` status polls
+// and their STATUS_RES replies stay out of it.
+func TestRelaySniffsGcodeIntoLog(t *testing.T) {
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		switch f.Cmd {
+		case protocol.CmdCtrlMulti:
+			c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("ok\r\n")))
+		case protocol.CmdCtrlSingle:
+			if len(f.Data) == 1 && f.Data[0] == '?' {
+				c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:0,0,0>")))
+			}
+		}
+	}
+	glog := gcodelog.New(50)
+	srv, addr := startRelay(t, m)
+	srv.GcodeLog = glog
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	drainController(controller)
+
+	// A status poll (must NOT be logged), then a gcode line (must be logged,
+	// with its escaped space decoded), then the machine's "ok" reply.
+	controller.Write(protocol.QueryStatus())
+	controller.Write(protocol.Encode(protocol.CmdCtrlMulti, []byte("G0\x01X10\n")))
+
+	deadline := time.Now().Add(2 * time.Second)
+	var lines []gcodelog.Line
+	for time.Now().Before(deadline) {
+		lines = glog.Recent()
+		if len(lines) >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("log = %+v, want exactly [send G0 X10, recv ok]", lines)
+	}
+	if lines[0].Dir != gcodelog.DirSend || lines[0].Source != gcodelog.SourceController || lines[0].Text != "G0 X10" {
+		t.Errorf("send line = %+v", lines[0])
+	}
+	if lines[1].Dir != gcodelog.DirRecv || lines[1].Text != "ok" {
+		t.Errorf("recv line = %+v", lines[1])
+	}
+}
+
+// TestInjectionResponsesNotLoggedAsController verifies frames diverted to an
+// injected operation do not appear in the log as controller traffic (the
+// injecting side logs its own conversation under the "api" source).
+func TestInjectionResponsesNotLoggedAsController(t *testing.T) {
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd == protocol.CmdCtrlMulti {
+			c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("injected-reply\r\n")))
+		}
+	}
+	glog := gcodelog.New(50)
+	srv, addr := startRelay(t, m)
+	srv.GcodeLog = glog
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	drainController(controller)
+	time.Sleep(100 * time.Millisecond) // let the session establish
+
+	it, release, err := srv.AcquireMachine()
+	if err != nil {
+		t.Fatalf("AcquireMachine: %v", err)
+	}
+	it.Write(protocol.Encode(protocol.CmdCtrlMulti, []byte("version\n")))
+	it.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 4096)
+	it.Read(buf) // consume the diverted reply
+	release()
+
+	for _, ln := range glog.Recent() {
+		if ln.Source == gcodelog.SourceController && ln.Text == "injected-reply" {
+			t.Errorf("diverted injection reply was logged as controller traffic: %+v", ln)
+		}
 	}
 }
 
