@@ -15,6 +15,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"time"
@@ -25,8 +26,10 @@ import (
 )
 
 var (
-	apiBase = flag.String("api", "http://127.0.0.1:8420", "proxy API base URL")
-	poll    = flag.Duration("poll", 3*time.Second, "status poll interval")
+	apiBase   = flag.String("api", "http://127.0.0.1:8420", "proxy API base URL")
+	authUser  = flag.String("auth-user", envDefault("CNC_AUTH_USER", "cnc"), "HTTP Basic Auth username")
+	authToken = flag.String("auth-token", envDefault("CNC_AUTH_TOKEN", ""), "HTTP Basic Auth token/password")
+	poll      = flag.Duration("poll", 3*time.Second, "status poll interval")
 )
 
 func main() {
@@ -45,7 +48,7 @@ func onReady() {
 	mOpen := systray.AddMenuItem("Open Web UI", "Open the proxy web UI in a browser")
 	mQuit := systray.AddMenuItem("Quit", "Quit the tray app")
 
-	client := apiclient.New(*apiBase)
+	client := apiclient.NewWithAuth(*apiBase, *authUser, *authToken)
 
 	go func() {
 		ticker := time.NewTicker(*poll)
@@ -113,4 +116,11 @@ func openBrowser(url string) {
 	}
 	args = append(args, url)
 	_ = exec.Command(cmd, args...).Start()
+}
+
+func envDefault(name, fallback string) string {
+	if v, ok := os.LookupEnv(name); ok {
+		return v
+	}
+	return fallback
 }

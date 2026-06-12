@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/client"
+	"github.com/uwin/cnc-proxy/internal/httpauth"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -205,5 +208,35 @@ func TestReadNotCached(t *testing.T) {
 	var nce *notCachedError
 	if !errors.As(err, &nce) {
 		t.Errorf("error = %v, want notCachedError", err)
+	}
+}
+
+func TestWebDAVAuthMiddleware(t *testing.T) {
+	fs, _ := newFS(t)
+	srv := httptest.NewServer(httpauth.Middleware(
+		httpauth.Config{User: "operator", Token: "secret"},
+		fs.Handler(""),
+	))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodOptions, srv.URL+"/", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated WebDAV status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodOptions, srv.URL+"/", nil)
+	req.SetBasicAuth("operator", "secret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Fatal("authenticated WebDAV request was rejected")
 	}
 }

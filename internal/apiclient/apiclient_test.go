@@ -43,6 +43,24 @@ func TestClientReadsEndpoints(t *testing.T) {
 	}
 }
 
+func TestClientSendsBasicAuth(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/machine", func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "operator" || pass != "secret" {
+			t.Fatalf("basic auth = %q/%q ok=%v", user, pass, ok)
+		}
+		w.Write([]byte(`{"state":"Idle","mode":"owner","connected":true,"age_ms":100}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewWithAuth(srv.URL, "operator", "secret")
+	if _, err := c.Machine(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPendingCount(t *testing.T) {
 	files := []File{
 		{Path: "a", Sync: "synced"},

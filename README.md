@@ -15,7 +15,8 @@ a mountable WebDAV filesystem — without modifying the controller or firmware.
   status and runs queued file operations while the machine is `Idle`.
 - **File-handling API + web UI (HTTP):** upload, list, delete, rename, with
   Google-Drive-style deferred sync — writes are accepted immediately and pushed
-  to the machine later, when it's reachable and idle. Live status via SSE.
+  to the machine later, when it's reachable and idle. Live status, sync jobs,
+  and gcode I/O are shown through the operational web UI and SSE stream.
 - **WebDAV filesystem (HTTP):** mount the machine's gcode directory natively on
   macOS/Windows/Linux. No driver install, nothing to sign — the OS's built-in
   WebDAV client connects to the server the proxy runs.
@@ -75,7 +76,7 @@ which otherwise triggers Go's vendoring mode.)
 ## Run
 
 The simplest form takes no addresses at all — the proxy finds the machine on
-the LAN via UDP discovery and serves the API + WebDAV mount:
+the LAN via UDP discovery and serves the API + WebDAV mount on loopback only:
 
 ```sh
 ./cnc-proxy
@@ -120,6 +121,10 @@ Then:
 - WebDAV mount: macOS Finder → Go → Connect to Server → `http://127.0.0.1:8421/`;
   Windows → Map network drive; Linux → `davs?://…` in the file manager.
 
+API and WebDAV are unauthenticated only when both bind to loopback addresses.
+If either is bound to a wildcard or LAN address, set `-auth-token` (Basic Auth
+password; default user `cnc`) or explicitly pass `-allow-insecure-http`.
+
 ### Flags
 
 | Flag | Default | Purpose |
@@ -131,8 +136,11 @@ Then:
 | `-broadcast` | (auto) | broadcast (or unicast) address to advertise on; auto-derived if empty |
 | `-name` | (empty) | advertised machine name; replaces the real name entirely |
 | `-name-suffix` | ` (proxy)` | suffix on the advertised machine name when `-name` is not set |
-| `-api-addr` | `:8420` | HTTP API + web UI address |
-| `-dav-addr` | `:8421` | WebDAV server address |
+| `-api-addr` | `127.0.0.1:8420` | HTTP API + web UI address |
+| `-dav-addr` | `127.0.0.1:8421` | WebDAV server address |
+| `-auth-user` | `cnc` | HTTP Basic Auth username for API/WebDAV when `-auth-token` is set |
+| `-auth-token` | (empty) | HTTP Basic Auth token/password for API/WebDAV |
+| `-allow-insecure-http` | false | allow API/WebDAV to bind beyond loopback without auth |
 | `-data-dir` | OS config dir | catalog, job queue, and file cache |
 
 (`-no-advertise` still exists as a deprecated no-op so older invocations don't
@@ -140,7 +148,8 @@ break; advertising is now opt-in via `-advertise`.)
 
 Every flag can also be set through the environment as `CNC_<NAME>` with `-`
 mapped to `_` (e.g. `CNC_MACHINE=192.168.1.42:2222`, `CNC_NAME="Shop CNC"`,
-`CNC_ADVERTISE=true`). Explicit command-line flags win over the environment.
+`CNC_AUTH_TOKEN=...`, `CNC_ADVERTISE=true`). Explicit command-line flags win
+over the environment.
 
 ## Run in Docker
 
@@ -148,13 +157,14 @@ The recommended deployment is Docker on the same computer that runs the
 official Carvera Controller:
 
 ```sh
-CNC_MACHINE=192.168.1.42:2222 CNC_NAME="Shop CNC" docker compose up -d
+CNC_MACHINE=192.168.1.42:2222 CNC_NAME="Shop CNC" CNC_AUTH_TOKEN="$(openssl rand -hex 24)" docker compose up -d
 ```
 
 Then the controller (on the same computer) sees `Shop CNC` in its machine list
 and connects through the proxy at `127.0.0.1:2222`. Web UI at
-<http://127.0.0.1:8420/>, WebDAV mount at `http://127.0.0.1:8421/`. State
-persists in the `cnc-data` volume across restarts.
+<http://127.0.0.1:8420/>, WebDAV mount at `http://127.0.0.1:8421/`. Use Basic
+Auth user `cnc` and the `CNC_AUTH_TOKEN` value. State persists in the
+`cnc-data` volume across restarts.
 
 Two LAN realities shape the container configuration (already encoded in
 `docker-compose.yml`):
@@ -174,6 +184,10 @@ Two LAN realities shape the container configuration (already encoded in
 A side benefit of the container's own network namespace: the proxy's UDP 3333
 listener can't collide with the controller's, which it would when both run
 natively on the same host (the controller binds without `SO_REUSEPORT`).
+
+The compose file binds API/WebDAV to host loopback (`127.0.0.1`) while the
+container itself listens on `0.0.0.0` so Docker port publishing works. Publishing
+those ports on the LAN requires keeping `CNC_AUTH_TOKEN` set.
 
 ## Sync states
 
@@ -208,7 +222,9 @@ CGO_ENABLED=1 go test -mod=mod -tags cgo_compat ./internal/quicklz/
   comparing against the machine-reported uncompressed MD5).
 - **Reconcile sweep:** every 30s in owner mode while idle, the engine walks the
   machine's gcode tree and folds in files added/removed out-of-band (e.g. by the
-  controller), without disturbing in-flight local changes.
+  controller), without disturbing in-flight local changes. A slower deep
+  reconcile periodically uses `md5sum` on cached synced files to catch same-size
+  out-of-band edits.
 - **Upload compression:** uploads larger than 4 KB are QuickLZ-compressed when
   the firmware advertises `.lz` support (`ftype`), cutting transfer size. The
   MD5 sent and verified is always of the uncompressed content.
@@ -219,10 +235,10 @@ CGO_ENABLED=1 go test -mod=mod -tags cgo_compat ./internal/quicklz/
   require code signing on macOS, which is ruled out. Sync status lives in the
   web UI and the menu-bar/tray companion (`cmd/tray`) instead.
 - **Real-hardware validation:** the protocol and sync flow are verified against
-  the fake machine and (for QuickLZ) the firmware C code. Discovery
-  re-advertisement should still be validated on a real LAN (ideally with the
-  proxy on a separate host from the controller).
+  the fake machine and (for QuickLZ) the firmware C code. Real releases should
+  also run the hardware validation runbook in `docs/hardware-validation.md`.
 
 ## Next steps
 
-- Validate against a real Carvera + the official controller on a LAN.
+- Run `docs/hardware-validation.md` against a real Carvera + the official
+  controller before tagging production releases.

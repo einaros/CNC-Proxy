@@ -131,8 +131,8 @@ func (s *Service) Root() string { return GcodeRoot }
 
 // PutRemoteOnly records an entry known to exist on the machine but not cached
 // locally. Reconciliation (ls/md5sum sweeps) uses this to surface files added
-// out-of-band, e.g. by the controller. Reads of such files require a future
-// download-on-demand step.
+// out-of-band, e.g. by the controller. Reads of such files fetch through the
+// arbiter on demand when the machine is reachable and idle.
 func (s *Service) PutRemoteOnly(remotePath string, size int64, mtime time.Time, md5hex string) error {
 	remote, err := normalizeRemote(remotePath)
 	if err != nil {

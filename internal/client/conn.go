@@ -318,9 +318,9 @@ var ErrUploadCanceled = errors.New("upload canceled by machine")
 // sequence number; we react to each request. progress, if non-nil, is called
 // with the number of packets sent so far.
 //
-// Note: this uploads uncompressed. The controller QuickLZ-compresses large
-// files when the firmware advertises .lz support; that is a future optimization
-// and not required for correctness.
+// Note: this primitive uploads the bytes it is given. The sync engine may wrap
+// it with QuickLZ compression by passing a .lz container and the uncompressed
+// MD5, matching the controller's large-upload behavior.
 func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex string, timeout time.Duration, progress func(sent, total uint32)) error {
 	if err := k.writeFrame(protocol.UploadCommand(remotePath)); err != nil {
 		return err

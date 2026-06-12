@@ -7,9 +7,8 @@
 //   - A write buffers locally and, on close, lands in the cache immediately and
 //     enqueues an upload. The file is visible and readable at once; it reaches
 //     the machine later, when the machine is idle and no controller is attached.
-//   - Reads are served from the local cache. Files known only to be on the
-//     machine but not cached return a not-yet-available error (download-on-demand
-//     is a future enhancement).
+//   - Reads are served from the local cache, fetching remote_only files from the
+//     machine on demand when the arbiter can safely run the download.
 //   - Directory listings come from the catalog.
 //
 // The status of in-flight files is surfaced through the web UI / tray app, not
@@ -223,9 +222,8 @@ func rootInfo() *fileInfo {
 	return &fileInfo{name: "gcodes", mode: os.ModeDir | 0o755, isDir: true, mtime: time.Unix(0, 0)}
 }
 
-// notCachedError reports a file present on the machine but not yet cached
-// locally. It maps to a 404-ish condition for the WebDAV client until
-// download-on-demand is implemented.
+// notCachedError reports a file present on the machine but not fetchable right
+// now because the machine is unavailable, in relay mode, or not idle.
 type notCachedError struct{ name string }
 
 func (e *notCachedError) Error() string {

@@ -13,13 +13,23 @@ import (
 
 // Client talks to a running proxy's HTTP API.
 type Client struct {
-	base string
-	http *http.Client
+	base  string
+	http  *http.Client
+	user  string
+	token string
 }
 
 // New returns a client for the API at baseURL (e.g. "http://127.0.0.1:8420").
 func New(baseURL string) *Client {
 	return &Client{base: baseURL, http: &http.Client{Timeout: 5 * time.Second}}
+}
+
+// NewWithAuth returns a client that sends HTTP Basic Auth when token is set.
+func NewWithAuth(baseURL, user, token string) *Client {
+	c := New(baseURL)
+	c.user = user
+	c.token = token
+	return c
 }
 
 // MachineStatus mirrors service.MachineStatus.
@@ -50,6 +60,13 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
 		return err
+	}
+	if c.token != "" {
+		user := c.user
+		if user == "" {
+			user = "cnc"
+		}
+		req.SetBasicAuth(user, c.token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

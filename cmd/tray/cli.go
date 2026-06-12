@@ -17,14 +17,16 @@ import (
 )
 
 var (
-	apiBase = flag.String("api", "http://127.0.0.1:8420", "proxy API base URL")
-	watch   = flag.Bool("watch", false, "poll and print status continuously")
-	poll    = flag.Duration("poll", 3*time.Second, "poll interval when watching")
+	apiBase   = flag.String("api", "http://127.0.0.1:8420", "proxy API base URL")
+	authUser  = flag.String("auth-user", envDefault("CNC_AUTH_USER", "cnc"), "HTTP Basic Auth username")
+	authToken = flag.String("auth-token", envDefault("CNC_AUTH_TOKEN", ""), "HTTP Basic Auth token/password")
+	watch     = flag.Bool("watch", false, "poll and print status continuously")
+	poll      = flag.Duration("poll", 3*time.Second, "poll interval when watching")
 )
 
 func main() {
 	flag.Parse()
-	client := apiclient.New(*apiBase)
+	client := apiclient.NewWithAuth(*apiBase, *authUser, *authToken)
 
 	if !*watch {
 		if err := printStatus(client); err != nil {
@@ -67,4 +69,11 @@ func stateOrUnknown(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+func envDefault(name, fallback string) string {
+	if v, ok := os.LookupEnv(name); ok {
+		return v
+	}
+	return fallback
 }

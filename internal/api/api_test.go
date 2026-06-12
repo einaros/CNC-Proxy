@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/uwin/cnc-proxy/internal/client"
+	"github.com/uwin/cnc-proxy/internal/httpauth"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -63,6 +64,48 @@ func TestPostFileRawBody(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&entry)
 	if entry.Path != "/sd/gcodes/part.nc" || entry.Sync != store.PendingUpload {
 		t.Errorf("entry = %+v", entry)
+	}
+}
+
+func TestAuthenticatedAPIRequests(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	arb := session.New(session.Config{Dial: func() (*client.Conn, error) { return nil, io.EOF }})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(httpauth.Middleware(httpauth.Config{User: "operator", Token: "secret"}, New(svc).Handler()))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/files", nil)
+	resp := do(t, req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest("GET", srv.URL+"/api/files", nil)
+	req.SetBasicAuth("operator", "secret")
+	resp = do(t, req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want 200", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest("GET", srv.URL+"/api/events", nil)
+	req.SetBasicAuth("operator", "secret")
+	resp = do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("authenticated SSE status=%d content-type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+
+	req, _ = http.NewRequest("GET", srv.URL+"/healthz", nil)
+	resp = do(t, req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "ok\n" {
+		t.Fatalf("healthz status=%d body=%q", resp.StatusCode, body)
 	}
 }
 

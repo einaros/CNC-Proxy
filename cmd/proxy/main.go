@@ -39,6 +39,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/davfs"
 	"github.com/uwin/cnc-proxy/internal/discovery"
+	"github.com/uwin/cnc-proxy/internal/httpauth"
 	"github.com/uwin/cnc-proxy/internal/relay"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
@@ -48,23 +49,29 @@ import (
 
 func main() {
 	var (
-		tcpPort     = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
-		machineAddr = flag.String("machine", "", "machine host:port; if empty, learned via UDP discovery")
-		advertise   = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
-		proxyIP     = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
-		broadcast   = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
-		name        = flag.String("name", "", "advertised machine name; replaces the real name entirely (default: real name + -name-suffix)")
-		nameSuffix  = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name when -name is not set")
-		noAdvertise = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
-		apiAddr     = flag.String("api-addr", ":8420", "address for the HTTP API + web UI")
-		davAddr     = flag.String("dav-addr", ":8421", "address for the WebDAV filesystem server")
-		dataDir     = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
+		tcpPort      = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
+		machineAddr  = flag.String("machine", "", "machine host:port; if empty, learned via UDP discovery")
+		advertise    = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
+		proxyIP      = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
+		broadcast    = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
+		name         = flag.String("name", "", "advertised machine name; replaces the real name entirely (default: real name + -name-suffix)")
+		nameSuffix   = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name when -name is not set")
+		noAdvertise  = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
+		apiAddr      = flag.String("api-addr", "127.0.0.1:8420", "address for the HTTP API + web UI")
+		davAddr      = flag.String("dav-addr", "127.0.0.1:8421", "address for the WebDAV filesystem server")
+		authUser     = flag.String("auth-user", "cnc", "HTTP Basic Auth username for API/WebDAV when -auth-token is set")
+		authToken    = flag.String("auth-token", "", "HTTP Basic Auth token/password for API/WebDAV")
+		insecureHTTP = flag.Bool("allow-insecure-http", false, "allow API/WebDAV to bind beyond loopback without -auth-token")
+		dataDir      = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
 	)
 	applyEnvDefaults()
 	flag.Parse()
 
 	if strings.Contains(*name, ",") || strings.Contains(*nameSuffix, ",") {
 		log.Fatal("-name/-name-suffix must not contain ',' (the discovery wire format is comma-separated)")
+	}
+	if err := validateHTTPExposure(*apiAddr, *davAddr, *authToken, *insecureHTTP); err != nil {
+		log.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -144,13 +151,16 @@ func main() {
 	go eng.Run(ctx, 2*time.Second)
 	// Periodically fold in files added/removed on the machine out-of-band.
 	go eng.RunReconcile(ctx, 30*time.Second, 8)
+	// Less frequently, use md5sum to catch same-size out-of-band changes.
+	go eng.RunDeepReconcile(ctx, 5*time.Minute, 8)
 
 	svc, err := service.New(st, arb)
 	if err != nil {
 		log.Fatalf("cannot create service: %v", err)
 	}
 
-	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(svc).Handler()}
+	authCfg := httpauth.Config{User: *authUser, Token: *authToken}
+	apiSrv := &http.Server{Addr: *apiAddr, Handler: httpauth.Middleware(authCfg, api.New(svc).Handler())}
 	go func() {
 		log.Printf("api: listening on %s", *apiAddr)
 		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -158,7 +168,7 @@ func main() {
 		}
 	}()
 
-	davSrv := &http.Server{Addr: *davAddr, Handler: davfs.New(svc).Handler("")}
+	davSrv := &http.Server{Addr: *davAddr, Handler: httpauth.Middleware(authCfg, davfs.New(svc).Handler(""))}
 	go func() {
 		log.Printf("webdav: listening on %s (mount this address)", *davAddr)
 		if err := davSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -237,6 +247,31 @@ func machineDialer(fixed string, l *discovery.Listener) func() (string, error) {
 		}
 		return net.JoinHostPort(m.IP, strconv.Itoa(m.Port)), nil
 	}
+}
+
+func validateHTTPExposure(apiAddr, davAddr, authToken string, allowInsecure bool) error {
+	if authToken != "" || allowInsecure {
+		return nil
+	}
+	if !isLoopbackBind(apiAddr) || !isLoopbackBind(davAddr) {
+		return errors.New("api/webdav bind beyond loopback requires -auth-token (or explicit -allow-insecure-http)")
+	}
+	return nil
+}
+
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // injectorAdapter bridges *relay.Server to session.Injector. The two packages

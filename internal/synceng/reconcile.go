@@ -3,6 +3,7 @@ package synceng
 import (
 	"context"
 	"log"
+	"os"
 	"path"
 	"time"
 
@@ -32,10 +33,25 @@ func isSettled(s store.SyncState) bool {
 // read re-fetches), and drops settled entries that vanished from the machine.
 // In-flight entries are left untouched.
 func (e *Engine) Reconcile(maxDepth int) error {
+	return e.reconcile(maxDepth, false)
+}
+
+// DeepReconcile performs the metadata reconcile plus MD5 checks for cached
+// synced files. It is intentionally separate from the frequent metadata sweep:
+// md5sum is slower and firmware-shaped, but it catches same-size out-of-band
+// edits that listing metadata alone cannot distinguish.
+func (e *Engine) DeepReconcile(maxDepth int) error {
+	return e.reconcile(maxDepth, true)
+}
+
+func (e *Engine) reconcile(maxDepth int, deep bool) error {
 	var remote map[string]protocol.DirEntry
 	err := e.arb.WithMachine(true, func(c *client.Conn) error {
 		var lerr error
 		remote, lerr = listTree(c, service.GcodeRoot, maxDepth, e.opTimeout)
+		if lerr == nil && deep {
+			e.deepCheck(c, remote)
+		}
 		return lerr
 	})
 	if err != nil {
@@ -65,14 +81,13 @@ func (e *Engine) Reconcile(maxDepth int) error {
 		if de.IsDir || existing.IsDir {
 			continue
 		}
-		// A settled file whose size changed on the machine: re-fetch on next read.
-		if isSettled(existing.Sync) && existing.Size != de.Size {
-			existing.Size = de.Size
-			existing.MTime = de.MTime
-			existing.Sync = store.RemoteOnly
-			existing.CachePath = "" // force re-download
-			existing.MD5 = ""
-			_ = e.store.PutEntry(existing)
+		// A settled file whose machine metadata changed: re-fetch on next read.
+		// For freshly uploaded synced files, local mtime and machine mtime are
+		// often different even when content is identical, so mtime alone only
+		// invalidates remote_only entries. DeepReconcile uses md5sum for synced
+		// cached files to catch same-size content changes without that false hit.
+		if isSettled(existing.Sync) && (existing.Size != de.Size || remoteOnlyMTimeChanged(existing, de)) {
+			e.markRemoteOnly(existing, de, "")
 		}
 	}
 
@@ -86,6 +101,43 @@ func (e *Engine) Reconcile(maxDepth int) error {
 		}
 	}
 	return nil
+}
+
+func remoteOnlyMTimeChanged(existing store.Entry, de protocol.DirEntry) bool {
+	return existing.Sync == store.RemoteOnly && !existing.MTime.IsZero() && !de.MTime.IsZero() && !existing.MTime.Equal(de.MTime)
+}
+
+func (e *Engine) deepCheck(c *client.Conn, remote map[string]protocol.DirEntry) {
+	for _, existing := range e.store.ListEntries() {
+		if existing.Sync != store.Synced || existing.IsDir || existing.MD5 == "" || existing.CachePath == "" {
+			continue
+		}
+		de, ok := remote[existing.Path]
+		if !ok || de.IsDir {
+			continue
+		}
+		remoteMD5, err := c.Md5(existing.Path, e.opTimeout)
+		if err != nil {
+			log.Printf("synceng: deep reconcile md5 skipped for %s: %v", existing.Path, err)
+			continue
+		}
+		if remoteMD5 != existing.MD5 {
+			e.markRemoteOnly(existing, de, remoteMD5)
+		}
+	}
+}
+
+func (e *Engine) markRemoteOnly(existing store.Entry, de protocol.DirEntry, remoteMD5 string) {
+	if existing.CachePath != "" {
+		_ = os.Remove(existing.CachePath)
+	}
+	existing.Size = de.Size
+	existing.MTime = de.MTime
+	existing.Sync = store.RemoteOnly
+	existing.CachePath = ""
+	existing.MD5 = remoteMD5
+	existing.Error = ""
+	_ = e.store.PutEntry(existing)
 }
 
 func syncStateFor(de protocol.DirEntry) store.SyncState {
@@ -136,6 +188,25 @@ func (e *Engine) RunReconcile(ctx context.Context, interval time.Duration, maxDe
 				// Blocked (relay/idle) or transient: not worth logging loudly.
 				if !isBlocked(err) {
 					log.Printf("synceng: reconcile error: %v", err)
+				}
+			}
+		}
+	}
+}
+
+// RunDeepReconcile periodically runs the slower MD5-based reconcile until ctx is
+// canceled. It is meant to run less frequently than RunReconcile.
+func (e *Engine) RunDeepReconcile(ctx context.Context, interval time.Duration, maxDepth int) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := e.DeepReconcile(maxDepth); err != nil {
+				if !isBlocked(err) {
+					log.Printf("synceng: deep reconcile error: %v", err)
 				}
 			}
 		}

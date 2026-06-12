@@ -18,5 +18,5 @@ VOLUME /data
 # 2222: relay for the controller; 8420: HTTP API + web UI; 8421: WebDAV.
 EXPOSE 2222 8420 8421
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
-  CMD wget -q -O /dev/null http://127.0.0.1:8420/api/machine || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:8420/healthz || exit 1
 ENTRYPOINT ["cnc-proxy", "-data-dir", "/data"]
