@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -13,9 +15,11 @@ import (
 
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/httpauth"
+	"github.com/uwin/cnc-proxy/internal/jog"
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
@@ -226,6 +230,23 @@ func TestMachineEndpoint(t *testing.T) {
 	}
 }
 
+func TestMachineStatusEndpointRichFields(t *testing.T) {
+	srv, _, tr := serverWithMachine(t)
+	tr.ObserveStatusPayload("<Idle|MPos:1,2,3|WPos:4,5,6|F:0,100,100>")
+	resp := get(t, srv.URL+"/api/machine/status")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var st service.MachineStatus
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.State != machine.Idle || st.MPos["x"] != 1 || st.WPos["z"] != 6 || st.Feed == nil {
+		t.Fatalf("machine status = %+v", st)
+	}
+}
+
 func TestWebUIServed(t *testing.T) {
 	srv, _ := newTestServer(t)
 
@@ -235,12 +256,18 @@ func TestWebUIServed(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<!DOCTYPE html>") {
 		t.Errorf("index status=%d body-start=%.30q", resp.StatusCode, body)
 	}
+	if !strings.Contains(string(body), `id="tab-files"`) || !strings.Contains(string(body), `id="control-view"`) {
+		t.Errorf("index missing lazy tab markup")
+	}
 
 	js := get(t, srv.URL+"/app.js")
 	jsBody, _ := io.ReadAll(js.Body)
 	js.Body.Close()
 	if js.StatusCode != http.StatusOK || !strings.Contains(string(jsBody), "EventSource") {
 		t.Errorf("app.js status=%d", js.StatusCode)
+	}
+	if !strings.Contains(string(jsBody), "/api/events?scope=control") || !strings.Contains(string(jsBody), "/api/events?scope=files") {
+		t.Errorf("app.js missing scoped event streams")
 	}
 }
 
@@ -266,6 +293,180 @@ func serverWithMachine(t *testing.T) (*httptest.Server, *carveratest.FakeMachine
 	srv := httptest.NewServer(New(svc).Handler())
 	t.Cleanup(srv.Close)
 	return srv, m, tr
+}
+
+func serverWithJog(t *testing.T, auth bool) (*httptest.Server, *carveratest.FakeMachine, *machine.Tracker) {
+	t.Helper()
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0|F:0,0,100|S:0,0,100>"
+	m.SetStatus(status)
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("status precondition failed")
+	}
+	arb := session.New(session.Config{
+		Tracker:     tr,
+		StateMaxAge: time.Second,
+		Dial:        func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := jog.DefaultConfig()
+	cfg.Tick = 20 * time.Millisecond
+	cfg.StatusInterval = 40 * time.Millisecond
+	cfg.DeadmanTimeout = 120 * time.Millisecond
+	h := NewWithOptions(svc, Options{Jog: jog.New(arb, cfg)}).Handler()
+	if auth {
+		h = httpauth.Middleware(httpauth.Config{User: "operator", Token: "secret"}, h)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv, m, tr
+}
+
+func TestJogCapabilities(t *testing.T) {
+	srv, _, _ := serverWithJog(t, false)
+	resp := get(t, srv.URL+"/api/jog/capabilities")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var caps jog.Capabilities
+	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
+		t.Fatal(err)
+	}
+	if !caps.Enabled || caps.Axes[0] != "x" || !caps.Availability.Available {
+		t.Fatalf("capabilities = %+v", caps)
+	}
+}
+
+func TestJogWebSocketAuth(t *testing.T) {
+	srv, _, _ := serverWithJog(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, wsURL(srv.URL), nil)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated dial err=%v resp=%v", err, resp)
+	}
+
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL), &websocket.DialOptions{
+		HTTPHeader: basicAuthHeader("operator", "secret"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+	if ev := readWSEvent(t, c, "hello"); ev.Type != "hello" {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
+func TestJogWebSocketBadAxis(t *testing.T) {
+	srv, _, _ := serverWithJog(t, false)
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "input", "seq": 1, "deadman": true, "axes": map[string]float64{"a": 1}})
+	ev := readWSEvent(t, c, "error")
+	if ev.Code != jog.CodeBadInput {
+		t.Fatalf("error = %+v", ev)
+	}
+}
+
+func TestJogWebSocketDuplicateSession(t *testing.T) {
+	srv, _, _ := serverWithJog(t, false)
+	first := dialWS(t, srv.URL)
+	defer first.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, first, "hello")
+
+	second := dialWS(t, srv.URL)
+	defer second.Close(websocket.StatusNormalClosure, "")
+	ev := readWSEvent(t, second, "error")
+	if ev.Code != jog.CodeBusy {
+		t.Fatalf("second session error = %+v", ev)
+	}
+}
+
+func TestJogWebSocketArmAndInput(t *testing.T) {
+	srv, m, _ := serverWithJog(t, false)
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+	writeWS(t, c, map[string]any{"type": "input", "seq": 2, "deadman": true, "axes": map[string]float64{"x": 1}})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if strings.HasPrefix(line, "G53 G0 X") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no jog command observed: %v", m.Gcodes())
+}
+
+func wsURL(httpURL string) string {
+	return "ws" + strings.TrimPrefix(httpURL, "http") + "/api/jog/ws"
+}
+
+func basicAuthHeader(user, pass string) http.Header {
+	h := http.Header{}
+	token := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+	h.Set("Authorization", "Basic "+token)
+	return h
+}
+
+func dialWS(t *testing.T, serverURL string) *websocket.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(serverURL), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func writeWS(t *testing.T, c *websocket.Conn, v any) {
+	t.Helper()
+	b, _ := json.Marshal(v)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := c.Write(ctx, websocket.MessageText, b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readWSEvent(t *testing.T, c *websocket.Conn, typ string) jog.Event {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		_, b, err := c.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("read websocket event %q: %v", typ, err)
+		}
+		var ev jog.Event
+		if err := json.Unmarshal(b, &ev); err != nil {
+			t.Fatalf("decode event %q: %v", string(b), err)
+		}
+		if ev.Type == typ {
+			return ev
+		}
+	}
+	t.Fatalf("timeout waiting for websocket event %q", typ)
+	return jog.Event{}
 }
 
 func postJSON(t *testing.T, url string, body any) *http.Response {
@@ -422,5 +623,47 @@ func TestEventsSnapshot(t *testing.T) {
 	got := string(buf[:n])
 	if !strings.Contains(got, "event: snapshot") || !strings.Contains(got, "/sd/gcodes/a.nc") {
 		t.Errorf("snapshot event missing expected content: %q", got)
+	}
+}
+
+func TestEventsControlScopeOmitsCatalog(t *testing.T) {
+	srv, _ := newTestServer(t)
+	http.Post(srv.URL+"/api/files?path=a.nc", "application/octet-stream", strings.NewReader("x"))
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/events?scope=control", nil)
+	resp := do(t, req)
+	defer resp.Body.Close()
+
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	got := string(buf[:n])
+	if !strings.Contains(got, "event: snapshot") || !strings.Contains(got, `"machine"`) {
+		t.Fatalf("control snapshot missing expected machine content: %q", got)
+	}
+	if strings.Contains(got, "/sd/gcodes/a.nc") || strings.Contains(got, `"files"`) || strings.Contains(got, `"jobs"`) {
+		t.Errorf("control snapshot unexpectedly included catalog data: %q", got)
+	}
+	if !strings.Contains(got, `"gcode"`) {
+		t.Errorf("control snapshot should include gcode history: %q", got)
+	}
+}
+
+func TestEventsFilesScopeOmitsGcode(t *testing.T) {
+	srv, svc := newTestServer(t)
+	http.Post(srv.URL+"/api/files?path=a.nc", "application/octet-stream", strings.NewReader("x"))
+	svc.GcodeLog().Append("send", "api", "M114")
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/events?scope=files", nil)
+	resp := do(t, req)
+	defer resp.Body.Close()
+
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	got := string(buf[:n])
+	if !strings.Contains(got, "/sd/gcodes/a.nc") || !strings.Contains(got, `"files"`) || !strings.Contains(got, `"jobs"`) {
+		t.Fatalf("files snapshot missing expected catalog data: %q", got)
+	}
+	if strings.Contains(got, `"gcode"`) || strings.Contains(got, "M114") {
+		t.Errorf("files snapshot unexpectedly included gcode data: %q", got)
 	}
 }

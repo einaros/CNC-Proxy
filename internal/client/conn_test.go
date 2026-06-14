@@ -274,6 +274,27 @@ func TestSendGcodeMultiLineOutput(t *testing.T) {
 	}
 }
 
+func TestSendGcodeDiagResponse(t *testing.T) {
+	// diagnose returns DIAG_RES on the real firmware, not NORMAL_INFO.
+	conn := gcodeServer(t, func(c net.Conn) {
+		c.Write(protocol.Encode(protocol.CmdDiagRes, []byte("{S:0,0|I:0}\n")))
+	})
+	out, err := conn.SendGcodeLine("diagnose", reply)
+	if err != nil || out != "{S:0,0|I:0}" {
+		t.Errorf("diag: out=%q err=%v", out, err)
+	}
+}
+
+func TestSendGcodeReplyExpectedNoOutputIsError(t *testing.T) {
+	conn := gcodeServer(t, func(c net.Conn) {
+		time.Sleep(time.Second) // stay connected, stay silent
+	})
+	_, err := conn.SendGcodeLine("M114", reply)
+	if err == nil {
+		t.Fatal("reply-expected command with no reply should error")
+	}
+}
+
 func TestSendGcodeFireAndForgetSilent(t *testing.T) {
 	// A silent motion command: the firmware sends nothing. SendGcodeLine must
 	// return promptly (within the settle window), not block to the cap.

@@ -51,6 +51,27 @@ Carvera, official controller, LAN discovery, and WebDAV clients.
 7. Confirm Finder/Explorer metadata files such as `.DS_Store` and `._*` do not
    appear in the catalog or on the machine.
 
+## Gamepad Jogging
+
+1. With no controller connected, confirm the web UI Gamepad Jog panel shows a
+   fresh Idle state and parsed `MPos`.
+2. Connect a browser-supported gamepad. Arm jogging in the UI, hold the deadman
+   button, and jog small XYZ moves at slow speed first.
+3. Release the deadman and confirm motion stops within the configured timeout.
+4. While jogging, press Halt in the UI and confirm the machine halts promptly.
+5. Confirm `$G` or the controller's modal display still reports the expected
+   distance mode after jogging; jog commands must not leave the machine in
+   relative mode.
+6. Connect the official controller through the proxy, wait for relay mode and
+   Idle, then repeat a short jog. Confirm the controller remains connected and
+   receives status responses.
+7. Start a controller-run job or otherwise make the machine non-Idle. Confirm
+   arming jog is rejected and no jog command reaches the machine.
+8. Start a controller file transfer and confirm arming jog is rejected or an
+   active jog lease aborts before controller file frames continue.
+9. Record observed status latency, jog responsiveness, and any controller log
+   anomalies.
+
 ## Reconcile And Durability
 
 1. Upload or delete a file directly through the official controller.

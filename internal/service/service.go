@@ -71,20 +71,43 @@ func (s *Service) GcodeLog() *gcodelog.Log { return s.gcodeLog }
 
 // MachineStatus is the snapshot returned to clients.
 type MachineStatus struct {
-	State     machine.State `json:"state"`
-	Mode      string        `json:"mode"`
-	Connected bool          `json:"connected"`
-	AgeMs     int64         `json:"age_ms"`
+	State      machine.State       `json:"state"`
+	Mode       string              `json:"mode"`
+	Connected  bool                `json:"connected"`
+	AgeMs      int64               `json:"age_ms"`
+	ObservedAt time.Time           `json:"observed_at,omitempty"`
+	Stale      bool                `json:"stale"`
+	Raw        string              `json:"raw,omitempty"`
+	Fields     map[string]string   `json:"fields,omitempty"`
+	MPos       machine.AxisValues  `json:"mpos,omitempty"`
+	WPos       machine.AxisValues  `json:"wpos,omitempty"`
+	Feed       *machine.Triple     `json:"feed,omitempty"`
+	Spindle    *machine.Spindle    `json:"spindle,omitempty"`
+	Tool       *machine.ToolStatus `json:"tool,omitempty"`
+	Progress   []float64           `json:"progress,omitempty"`
+	Machine    []float64           `json:"machine,omitempty"`
 }
 
 // Status returns the current machine state and proxy mode.
 func (s *Service) Status() MachineStatus {
-	st, age := s.arb.Tracker().Snapshot()
+	st, age := s.arb.Tracker().Current()
+	observed := !st.ObservedAt.IsZero()
 	return MachineStatus{
-		State:     st,
-		Mode:      s.arb.Mode().String(),
-		Connected: st != machine.Unknown,
-		AgeMs:     age.Milliseconds(),
+		State:      st.State,
+		Mode:       s.arb.Mode().String(),
+		Connected:  observed && st.State != machine.Unknown,
+		AgeMs:      age.Milliseconds(),
+		ObservedAt: st.ObservedAt,
+		Stale:      !s.arb.Tracker().Fresh(s.arb.StateMaxAge()),
+		Raw:        st.Raw,
+		Fields:     st.Fields,
+		MPos:       st.MPos,
+		WPos:       st.WPos,
+		Feed:       st.Feed,
+		Spindle:    st.Spindle,
+		Tool:       st.Tool,
+		Progress:   st.Progress,
+		Machine:    st.Machine,
 	}
 }
 
@@ -304,9 +327,10 @@ const (
 // — they do NOT take the arbiter's transaction lock: feed-hold, resume, and
 // emergency-halt must work precisely WHILE the machine is moving, including
 // preempting a blocking move or a program a connected controller started. The
-// only time it cannot run is mid binary file-transfer in relay mode
-// (session.ErrBusy / ErrRelayActive), since a raw data stream can't be safely
-// interleaved; those are retryable, not failures.
+// same policy intentionally applies during controller file transfers: the
+// firmware's file parser still accepts standalone CTRL_SINGLE realtime frames,
+// and the relay writes those frames without entering the injection window.
+// Errors here mean an unsupported control or no live path to the machine.
 func (s *Service) SendControl(c byte) error {
 	label, ok := protocol.ControlLabel(c)
 	if !ok {

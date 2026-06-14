@@ -38,15 +38,14 @@ type Conn struct {
 	// pending holds frames already parsed from a read that returned more than
 	// one frame, so the next readFrame call drains them first.
 	pending []protocol.Frame
-	// onStatus, if set, is called with each STATUS_RES payload observed during a
-	// command (e.g. SendGcode's keepalive polls), so the caller's state tracker
-	// stays current even while a long blocking command holds the connection.
+	// onStatus, if set, is called with each STATUS_RES payload observed while
+	// another command is active, so the caller's state tracker can stay current
+	// when status frames are interleaved with command traffic.
 	onStatus func(payload string)
 }
 
 // SetStatusObserver registers a callback invoked with each STATUS_RES payload
-// seen while running a command. Used so keepalive polls during a long move keep
-// the machine-state tracker fresh instead of going stale.
+// seen while running a command.
 func (k *Conn) SetStatusObserver(f func(payload string)) { k.onStatus = f }
 
 // Dial connects to a machine at host:port.
@@ -70,6 +69,15 @@ func (k *Conn) Close() error { return k.c.Close() }
 func (k *Conn) writeFrame(b []byte) error {
 	_, err := k.c.Write(b)
 	return err
+}
+
+// WriteGcodeLine writes a CTRL_MULTI gcode/console line and does not wait for a
+// reply. It is for higher-level schedulers that own their own status/read loop.
+func (k *Conn) WriteGcodeLine(line string) error {
+	if len(line) == 0 || line[len(line)-1] != '\n' {
+		line += "\n"
+	}
+	return k.writeFrame(protocol.Encode(protocol.CmdCtrlMulti, []byte(line)))
 }
 
 // readFrame returns the next protocol frame, blocking until one arrives or the
@@ -293,13 +301,22 @@ func (k *Conn) SendGcodeLine(line string, opts GcodeOpts) (string, error) {
 	if len(line) == 0 || line[len(line)-1] != '\n' {
 		line += "\n"
 	}
-	if err := k.writeFrame(protocol.Encode(protocol.CmdCtrlMulti, []byte(line))); err != nil {
+	if err := k.WriteGcodeLine(line); err != nil {
 		return "", err
 	}
 
 	hardDeadline := time.Now().Add(opts.Cap)
 	var out []byte
 	haveOutput := false
+	observedReply := false
+	appendOutput := func(s string) {
+		if haveOutput {
+			out = append(out, '\n')
+		}
+		out = append(out, s...)
+		haveOutput = true
+		observedReply = true
+	}
 	for {
 		// Read deadline: the settle window (so a quiescent reply terminates),
 		// capped by the overall hard deadline.
@@ -314,6 +331,9 @@ func (k *Conn) SendGcodeLine(line string, opts GcodeOpts) (string, error) {
 				// ends a no-"ok" multi-line reply; for fire-and-forget it is the
 				// normal, expected outcome (nothing more is coming). Either way,
 				// return what we have.
+				if opts.ExpectReply && !observedReply {
+					return "", fmt.Errorf("machine: no reply for %q", strings.TrimSpace(line))
+				}
 				return string(out), nil
 			}
 			// A real connection error (EOF/closed). If we already captured output
@@ -325,6 +345,7 @@ func (k *Conn) SendGcodeLine(line string, opts GcodeOpts) (string, error) {
 		}
 		switch f.Cmd {
 		case protocol.CmdNormalInfo:
+			observedReply = true
 			trimmed := strings.TrimRight(string(f.Data), "\r\n")
 			low := strings.ToLower(strings.TrimSpace(trimmed))
 			switch {
@@ -342,12 +363,10 @@ func (k *Conn) SendGcodeLine(line string, opts GcodeOpts) (string, error) {
 			case strings.Contains(low, "error") || strings.Contains(low, "alarm"):
 				return string(out), fmt.Errorf("machine: %s", trimmed)
 			default:
-				if haveOutput {
-					out = append(out, '\n')
-				}
-				out = append(out, trimmed...)
-				haveOutput = true
+				appendOutput(trimmed)
 			}
+		case protocol.CmdDiagRes:
+			appendOutput(strings.TrimRight(string(f.Data), "\r\n"))
 		case protocol.CmdStatusRes:
 			// Interleaved status report (e.g. a concurrent poll's reply): feed the
 			// observer so the tracker stays fresh, but it's not this command's
@@ -370,7 +389,7 @@ func (k *Conn) SendControl(c byte) error {
 }
 
 // isTimeout reports whether err is a deadline/timeout (net.Error.Timeout),
-// distinguishing a keepalive/quiescence tick from a real connection failure.
+// distinguishing a quiescence deadline from a real connection failure.
 func isTimeout(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()

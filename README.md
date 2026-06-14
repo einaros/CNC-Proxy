@@ -114,10 +114,14 @@ Then:
 - Web UI: <http://127.0.0.1:8420/>
 - API: `POST /api/files?path=part.nc` (raw body or multipart), `GET /api/files`,
   `DELETE /api/files/{path}`, `POST /api/files/rename`, `GET /api/machine`,
-  `GET /api/jobs`, `POST /api/gcode` (body `{"line":"G0 X10"}`), `POST
-  /api/control` (body `{"action":"hold|resume|halt"}`), `GET /api/gcode/log`
-  (recent gcode I/O), `GET /api/events` (SSE: catalog/job changes plus all gcode
-  I/O — both API-submitted and controller traffic observed by the relay).
+  `GET /api/machine/status`, `GET /api/jobs`, `POST /api/gcode` (body
+  `{"line":"G0 X10"}`), `POST /api/control` (body
+  `{"action":"hold|resume|halt"}`), `GET /api/gcode/log` (recent gcode I/O),
+  `GET /api/events` (SSE: catalog/job changes plus all gcode I/O — both
+  API-submitted and controller traffic observed by the relay; optional
+  `?scope=control` omits catalog/jobs and `?scope=files` omits gcode),
+  `GET /api/jog/capabilities`, and authenticated `GET /api/jog/ws` WebSocket
+  for low-latency gamepad jogging.
   - **Injecting gcode** works whether the proxy runs alone (owner mode) or with
     the official controller attached (relay mode — injected between the
     controller's transactions). Read-only queries (`M114`, `M115`, `version`,
@@ -126,6 +130,17 @@ Then:
     never disturb a controller-driven job. Realtime control (`hold`/`resume`/
     `halt`) is out-of-band and always works, even mid-move — use `halt` as an
     emergency stop.
+  - **Gamepad jogging** uses short `G53 G0` machine-coordinate segments generated
+    server-side from fresh cached `MPos`. It requires the web UI to be armed and
+    a held gamepad deadman button. In relay mode, jog motion is allowed only
+    while the official controller is connected but the machine is freshly Idle;
+    controller jobs, file transfers, unknown/stale state, or controller traffic
+    abort/reject jogging. Realtime `halt` remains out-of-band.
+    WebSocket client messages are `arm`, `input`, `control`, and `disarm`:
+    `{"type":"input","seq":2,"deadman":true,"axes":{"x":0,"y":0,"z":0},"slow":false}`.
+    Server messages are `hello`, `state`, `status`, `ack`, and `error`; stable
+    error codes include `disabled`, `not_idle`, `busy`, `stale_status`,
+    `bad_input`, `controller_waiting`, `machine_error`, and `unauthorized`.
 - WebDAV mount: macOS Finder → Go → Connect to Server → `http://127.0.0.1:8421/`;
   Windows → Map network drive; Linux → `davs?://…` in the file manager.
 
@@ -150,6 +165,12 @@ password; default user `cnc`) or explicitly pass `-allow-insecure-http`.
 | `-auth-token` | (empty) | HTTP Basic Auth token/password for API/WebDAV |
 | `-allow-insecure-http` | false | allow API/WebDAV to bind beyond loopback without auth |
 | `-data-dir` | OS config dir | catalog, job queue, and file cache |
+| `-jog-enabled` | true | enable low-latency gamepad jogging API/UI |
+| `-jog-max-xy-mm-min` | 1200 | maximum XY jog speed in mm/min |
+| `-jog-max-z-mm-min` | 300 | maximum Z jog speed in mm/min |
+| `-jog-tick` | 50ms | gamepad jog motion tick interval |
+| `-jog-status-interval` | 100ms | status polling interval while a jog lease is armed |
+| `-jog-deadman-timeout` | 150ms | maximum age of held-deadman input before motion stops |
 
 (`-no-advertise` still exists as a deprecated no-op so older invocations don't
 break; advertising is now opt-in via `-advertise`.)

@@ -9,6 +9,24 @@ const state = {
   machine: { state: "", mode: "owner", age_ms: 0, connected: false },
   gcodeSeqs: new Set(),
   filter: "",
+  activeTab: "control",
+  filesLoaded: false,
+  controlES: null,
+  filesES: null,
+  jog: {
+    caps: null,
+    ws: null,
+    seq: 1,
+    armed: false,
+    link: "offline",
+    pad: "",
+    deadman: false,
+    axes: { x: 0, y: 0, z: 0 },
+    mpos: null,
+    wpos: null,
+    error: "",
+    sent: new Map(),
+  },
 };
 
 const SYNC_LABEL = {
@@ -69,6 +87,39 @@ function fmtAge(ms) {
   return Math.round(min / 60) + "h";
 }
 
+function fmtCoord(v) {
+  return Number.isFinite(v) ? v.toFixed(3) : "-";
+}
+
+function fmtPos(p) {
+  if (!p) return "-";
+  return `X ${fmtCoord(p.x)} Y ${fmtCoord(p.y)} Z ${fmtCoord(p.z)}`;
+}
+
+function fmtTriple(v, suffix = "") {
+  if (!v) return "-";
+  const cur = Number.isFinite(v.current) ? v.current.toFixed(1) : "-";
+  const target = Number.isFinite(v.target) ? v.target.toFixed(1) : "-";
+  const over = Number.isFinite(v.override) ? Math.round(v.override) + "%" : "-";
+  return `${cur}/${target}${suffix} ${over}`;
+}
+
+function fmtSpindle(s) {
+  if (!s) return "-";
+  const cur = Number.isFinite(s.current_rpm) ? Math.round(s.current_rpm) : "-";
+  const target = Number.isFinite(s.target_rpm) ? Math.round(s.target_rpm) : "-";
+  const over = Number.isFinite(s.override) ? Math.round(s.override) + "%" : "-";
+  return `${cur}/${target} rpm ${over}`;
+}
+
+function fmtTool(t) {
+  if (!t) return "-";
+  const active = Number.isFinite(t.active) ? "T" + t.active : "-";
+  const target = Number.isFinite(t.target) ? " -> T" + t.target : "";
+  const offset = Number.isFinite(t.offset) ? " Z " + t.offset.toFixed(3) : "";
+  return active + target + offset;
+}
+
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
@@ -111,6 +162,30 @@ function renderMachine() {
   const el = document.getElementById("state");
   el.textContent = m.state || "Unknown";
   el.className = "badge state-" + (m.state || "Unknown");
+  document.getElementById("status-mpos").textContent = fmtPos(m.mpos);
+  document.getElementById("status-wpos").textContent = fmtPos(m.wpos);
+  document.getElementById("status-feed").textContent = fmtTriple(m.feed, " mm/min");
+  document.getElementById("status-spindle").textContent = fmtSpindle(m.spindle);
+  document.getElementById("status-tool").textContent = fmtTool(m.tool);
+  document.getElementById("status-age").textContent = fmtAge(m.age_ms);
+}
+
+function renderJog() {
+  const j = state.jog;
+  document.getElementById("jog-link").textContent = j.link;
+  document.getElementById("jog-pad").textContent = j.pad || "-";
+  const dead = document.getElementById("jog-deadman");
+  dead.textContent = j.deadman ? "on" : "off";
+  dead.className = j.deadman ? "on" : "";
+  document.getElementById("jog-axes").textContent =
+    `X ${j.axes.x.toFixed(2)} Y ${j.axes.y.toFixed(2)} Z ${j.axes.z.toFixed(2)}`;
+  document.getElementById("jog-mpos").textContent = fmtPos(j.mpos);
+  document.getElementById("jog-wpos").textContent = fmtPos(j.wpos);
+  document.getElementById("jog-error").textContent = j.error || "";
+  const arm = document.getElementById("jog-arm");
+  arm.textContent = j.armed ? "Disarm Jog" : "Arm Jog";
+  arm.classList.toggle("armed", j.armed);
+  arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online";
 }
 
 function renderFiles() {
@@ -120,7 +195,9 @@ function renderFiles() {
     .filter((f) => !q || relPath(f.path).toLowerCase().includes(q) || (f.sync || "").toLowerCase().includes(q))
     .sort((a, b) => relPath(a.path).localeCompare(relPath(b.path)));
 
-  document.getElementById("files-empty").hidden = files.length > 0;
+  const empty = document.getElementById("files-empty");
+  empty.textContent = state.filesLoaded ? "No files match the current view." : "Files load when this tab opens.";
+  empty.hidden = files.length > 0;
   tbody.innerHTML = "";
 
   for (const f of files) {
@@ -167,7 +244,8 @@ function renderJobs() {
     .sort((a, b) => a.id - b.id);
   document.getElementById("active-jobs").textContent = String(jobs.length);
   if (!jobs.length) {
-    div.innerHTML = `<div class="empty">No active or failed jobs.</div>`;
+    const text = state.filesLoaded ? "No active or failed jobs." : "Activity loads with the Files tab.";
+    div.innerHTML = `<div class="empty">${text}</div>`;
     return;
   }
   div.innerHTML = "";
@@ -268,16 +346,142 @@ async function sendControl(action) {
   }
 }
 
+async function loadJogCapabilities() {
+  try {
+    const r = await request("/api/jog/capabilities");
+    state.jog.caps = await r.json();
+  } catch (e) {
+    state.jog.error = e.message;
+  }
+  renderJog();
+}
+
+function jogURL() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return proto + "//" + location.host + "/api/jog/ws";
+}
+
+function connectJog() {
+  if (!("WebSocket" in window) || state.jog.ws) return;
+  const ws = new WebSocket(jogURL());
+  state.jog.ws = ws;
+  state.jog.link = "connecting";
+  renderJog();
+  ws.onopen = () => {
+    state.jog.link = "online";
+    state.jog.error = "";
+    renderJog();
+  };
+  ws.onclose = () => {
+    state.jog.ws = null;
+    state.jog.link = "offline";
+    state.jog.armed = false;
+    renderJog();
+    setTimeout(connectJog, 2000);
+  };
+  ws.onerror = () => {
+    state.jog.error = "jog socket error";
+    renderJog();
+  };
+  ws.onmessage = (e) => applyJogEvent(JSON.parse(e.data));
+}
+
+function sendJog(msg) {
+  const ws = state.jog.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!msg.seq) msg.seq = state.jog.seq++;
+  state.jog.sent.set(msg.seq, performance.now());
+  ws.send(JSON.stringify(msg));
+}
+
+function applyJogEvent(ev) {
+  if (ev.type === "hello" && ev.capabilities) {
+    state.jog.caps = ev.capabilities;
+  } else if (ev.type === "state") {
+    state.jog.armed = !!ev.armed;
+    if (ev.availability && ev.availability.reason && !ev.availability.available && !state.jog.armed) {
+      state.jog.error = ev.availability.reason;
+    }
+  } else if (ev.type === "status" && ev.status) {
+    state.jog.mpos = ev.status.mpos || state.jog.mpos;
+    state.jog.wpos = ev.status.wpos || state.jog.wpos;
+    state.jog.error = "";
+  } else if (ev.type === "ack") {
+    const sent = state.jog.sent.get(ev.seq);
+    if (sent) {
+      document.getElementById("jog-latency").textContent = Math.round(performance.now() - sent) + "ms";
+      state.jog.sent.delete(ev.seq);
+    }
+    state.jog.error = "";
+  } else if (ev.type === "error") {
+    state.jog.error = ev.code || ev.message || "jog error";
+    if (ev.code === "controller_waiting" || ev.code === "not_idle" || ev.code === "stale_status") {
+      state.jog.armed = false;
+    }
+  }
+  renderJog();
+}
+
+function currentGamepad() {
+  if (!navigator.getGamepads) return null;
+  const pads = navigator.getGamepads();
+  for (const p of pads) {
+    if (p) return p;
+  }
+  return null;
+}
+
+function sampleJog() {
+  const gp = currentGamepad();
+  if (!gp) {
+    state.jog.pad = "";
+    state.jog.deadman = false;
+    state.jog.axes = { x: 0, y: 0, z: 0 };
+    if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes });
+    renderJog();
+    scheduleJogSample();
+    return;
+  }
+  const axes = {
+    x: clampAxis(gp.axes[0] || 0),
+    y: clampAxis(-(gp.axes[1] || 0)),
+    z: clampAxis(-(gp.axes[3] || 0)),
+  };
+  const deadman = !!(gp.buttons[0] && gp.buttons[0].pressed);
+  const slow = !!((gp.buttons[4] && gp.buttons[4].pressed) || (gp.buttons[5] && gp.buttons[5].pressed));
+  state.jog.pad = gp.id || "connected";
+  state.jog.deadman = deadman;
+  state.jog.axes = axes;
+  if (state.jog.armed) sendJog({ type: "input", deadman, axes, slow });
+  renderJog();
+  scheduleJogSample();
+}
+
+function scheduleJogSample() {
+  const ms = Math.max(20, Number(state.jog.caps?.tick_ms) || 50);
+  setTimeout(sampleJog, ms);
+}
+
+function clampAxis(v) {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(-1, Math.min(1, v));
+}
+
 function applySnapshot(snap) {
-  state.machine = snap.machine || state.machine;
-  state.files = new Map((snap.files || []).map((f) => [f.path, f]));
-  state.jobs = new Map((snap.jobs || []).map((j) => [j.id, j]));
+  if (snap.machine) state.machine = snap.machine;
+  if (Array.isArray(snap.files)) {
+    state.files = new Map(snap.files.map((f) => [f.path, f]));
+    state.filesLoaded = true;
+  }
+  if (Array.isArray(snap.jobs)) state.jobs = new Map(snap.jobs.map((j) => [j.id, j]));
   renderMachine();
   renderFiles();
   renderJobs();
-  state.gcodeSeqs.clear();
-  document.getElementById("gcode-log").innerHTML = "";
-  for (const ln of snap.gcode || []) appendGcodeLine(ln);
+  if (Array.isArray(snap.gcode)) {
+    state.gcodeSeqs.clear();
+    document.getElementById("gcode-log").innerHTML = "";
+    for (const ln of snap.gcode) appendGcodeLine(ln);
+  }
 }
 
 function applyChange(ev) {
@@ -292,17 +496,36 @@ function applyChange(ev) {
   }
 }
 
-function connectSSE() {
-  const es = new EventSource("/api/events");
+function connectControlSSE() {
+  if (state.controlES) return;
+  const es = new EventSource("/api/events?scope=control");
+  state.controlES = es;
+  es.addEventListener("snapshot", (e) => applySnapshot(JSON.parse(e.data)));
+  es.addEventListener("gcode", (e) => appendGcodeLine(JSON.parse(e.data)));
+  es.onerror = () => setNotice("Control event stream disconnected; retrying.", "error");
+}
+
+function connectFilesSSE() {
+  if (state.filesES) return;
+  const es = new EventSource("/api/events?scope=files");
+  state.filesES = es;
   es.addEventListener("snapshot", (e) => applySnapshot(JSON.parse(e.data)));
   es.addEventListener("change", (e) => applyChange(JSON.parse(e.data)));
-  es.addEventListener("gcode", (e) => appendGcodeLine(JSON.parse(e.data)));
-  es.onerror = () => setNotice("Live event stream disconnected; retrying.", "error");
+  es.onerror = () => setNotice("Files event stream disconnected; retrying.", "error");
+}
+
+function showTab(name) {
+  state.activeTab = name;
+  document.getElementById("control-view").hidden = name !== "control";
+  document.getElementById("files-view").hidden = name !== "files";
+  document.getElementById("tab-control").classList.toggle("active", name === "control");
+  document.getElementById("tab-files").classList.toggle("active", name === "files");
+  if (name === "files") connectFilesSSE();
 }
 
 async function pollMachine() {
   try {
-    const r = await request("/api/machine");
+    const r = await request("/api/machine/status");
     state.machine = await r.json();
     renderMachine();
   } catch (e) {
@@ -313,6 +536,8 @@ async function pollMachine() {
 function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
+  document.getElementById("tab-control").onclick = () => showTab("control");
+  document.getElementById("tab-files").onclick = () => showTab("files");
   drop.onclick = () => input.click();
   input.onchange = () => { uploadFiles(input.files); input.value = ""; };
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
@@ -343,8 +568,16 @@ function init() {
   document.getElementById("ctl-halt").onclick = () => {
     if (confirm("Emergency halt the machine? This stops all motion and enters Alarm.")) sendControl("halt");
   };
+  document.getElementById("jog-arm").onclick = () => sendJog({ type: state.jog.armed ? "disarm" : "arm" });
 
-  connectSSE();
+  loadJogCapabilities();
+  connectJog();
+  window.addEventListener("gamepadconnected", renderJog);
+  window.addEventListener("gamepaddisconnected", renderJog);
+  scheduleJogSample();
+  renderFiles();
+  renderJobs();
+  connectControlSSE();
   pollMachine();
   setInterval(pollMachine, 3000);
 }

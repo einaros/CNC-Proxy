@@ -90,15 +90,33 @@ func (s *Server) AcquireMachine() (InjectTransport, func(), error) {
 	return it, release, nil
 }
 
+// AcquireInteractive borrows the shared machine connection for a long-lived
+// interactive operation such as jogging. The returned abort channel is closed
+// if the controller sends non-status traffic and the lease must release.
+func (s *Server) AcquireInteractive() (InjectTransport, <-chan struct{}, func(), error) {
+	s.mu.Lock()
+	m := s.curMux
+	s.mu.Unlock()
+	if m == nil {
+		return nil, nil, nil, ErrNoSession
+	}
+	it, abortCh, release, err := m.AcquireInteractive()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return it, abortCh, release, nil
+}
+
 // SendControl writes a single realtime control character (CTRL_SINGLE) straight
 // to the shared machine socket, out-of-band — without taking the injection
 // window. The firmware acts on '!'/'~'/0x18 immediately from its receive path
-// regardless of any in-flight transaction, so this lets an emergency halt
-// preempt even a controller program. Returns ErrNoSession if no controller (and
-// thus no machine connection) is currently active. The injected control byte is
-// the proxy's own; the controller's responses are unaffected (the firmware
-// sends no reply to these, save an ALARM line on halt which flows to the
-// controller as normal and correctly reflects the new machine state).
+// regardless of any in-flight transaction, including controller file transfers,
+// so this lets an emergency halt preempt even a controller program. Returns
+// ErrNoSession if no controller (and thus no machine connection) is currently
+// active. The injected control byte is the proxy's own; the controller's
+// responses are unaffected (the firmware sends no reply to these, save an ALARM
+// line on halt which flows to the controller as normal and correctly reflects
+// the new machine state).
 func (s *Server) SendControl(c byte) error {
 	s.mu.Lock()
 	m := s.curMux

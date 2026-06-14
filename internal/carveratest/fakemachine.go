@@ -26,7 +26,7 @@ type FakeMachine struct {
 	compressDownloads bool              // if set, downloads send a .lz container
 	gcodes            []string          // CTRL_MULTI gcode lines received (motion/MDI)
 	controls          []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
-	gcodeReplies      map[string]string // exact line -> "ok <payload>" reply (else bare "ok")
+	gcodeReplies      map[string]string // exact line -> textual reply payload
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when
@@ -384,6 +384,17 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 			ft = "nc" // default: no compression
 		}
 		m.send(c, protocol.CmdNormalInfo, "ftype = "+ft+"\n")
+	case strings.EqualFold(line, "diagnose"):
+		// Real firmware emits DIAG_RES for diagnose, not NORMAL_INFO. Keep the
+		// fake strict so tests catch callers that only listen for NORMAL_INFO.
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		reply, ok := m.gcodeReplies[line]
+		m.mu.Unlock()
+		if !ok {
+			reply = "{S:0,0|I:0}"
+		}
+		m.send(c, protocol.CmdDiagRes, strings.TrimRight(reply, "\r\n")+"\n")
 	case strings.HasPrefix(line, "rm"):
 		path := secondField(line)
 		m.mu.Lock()

@@ -77,7 +77,10 @@ CTRL_SINGLE 0xA1 (`?` status, `!` hold, `~` resume, 0x18 halt), CTRL_MULTI
 0xA2 (console lines: `ls -e -s`, `rm/mv/mkdir … -e`, `md5sum`, gcode), FILE_*
 0xB0–0xB6 (upload/download handshakes); responses STATUS_RES 0x81,
 DIAG_RES 0x82, LOAD_INFO/FINISH/ERROR 0x83–0x85, NORMAL_INFO 0x90. Machine
-state arrives as `<Idle|MPos:…>` in STATUS_RES; file ops only when Idle.
+state arrives as `<Idle|MPos:…>` in STATUS_RES; accepted states are `Sleep`,
+`Pause`, `Wait`, `Tool`, `Alarm`, `Home`, `Hold`, `Idle`, and `Run`. File ops
+only run when state is freshly `Idle`; well-formed unknown states update the
+tracker to fresh `Unknown` so stale Idle is never trusted.
 Uploads >4 KB are QuickLZ-compressed to `.lz` when the firmware advertises it;
 MD5 is always of the uncompressed content. Wire escaping: space→0x01, ?→0x02,
 *→0x03, !→0x04, ~→0x05.
@@ -85,15 +88,14 @@ MD5 is always of the uncompressed content. Wire escaping: space→0x01, ?→0x02
 Known firmware quirks (verified on hardware, don't "fix" symptoms of these):
 - Firmware does NOT verify CRC on receive; the controller DOES.
 - `md5sum` has no LOAD framing and doesn't parse `-e`; replies NORMAL_INFO.
+- `diagnose` replies DIAG_RES, not NORMAL_INFO.
 - Console commands like `version` produce output but no `ok` (socket may EOF).
-- A blocking motion gcode (G4 dwell, M400, a long G0/G1) produces no output
-  until it finishes. The firmware's WiFi TCP server auto-disconnects a client
-  that is silent for ~10s (`tcp_timeout_s`, default 10), so a naive
-  "send then block on ok" reset the connection (the old EOF). `client.SendGcode`
-  now polls `?` every 2s while waiting (mirroring how the official controller
-  keeps polling during MDI), which keeps the socket alive through long moves.
-  Injected gcode is therefore NOT limited to queries — any command works, but
-  motion/state-changing commands are idle-gated (see below).
+- Motion/state-changing gcode (G4 dwell, M400, G0/G1, modal sets, etc.)
+  produces no terminating reply frame over WiFi. `client.SendGcodeLine`
+  therefore uses the classifier: reply-producing queries read until short
+  quiescence, while silent commands are fire-and-forget with only a brief drain
+  for immediate errors. Injected gcode is NOT limited to queries — any command
+  works, but motion/state-changing commands are idle-gated (see below).
 - Immediately md5sum-ing after an upload races the firmware's cache flush;
   post-upload verification is intentionally non-fatal.
 
@@ -110,7 +112,23 @@ Injection & control model (both modes — proxy alone OR with controller attache
   one atomic socket write the firmware acts on from its receive path). Owner mode
   writes the live owner conn (dialing if needed); relay mode delegates to the
   relay's `SendControl`, which writes the shared machine socket without taking
-  the injection window. `POST /api/control {action: hold|resume|halt}`.
+  the injection window. This remains intentional even during controller file
+  transfers: the firmware's file parser accepts standalone CTRL_SINGLE realtime
+  frames, and transfer frames remain forwarded verbatim. `POST /api/control
+  {action: hold|resume|halt}`.
+- **gamepad jog** (`internal/jog`, authenticated `GET /api/jog/ws`) is a
+  long-lived interactive lease, not regular MDI. `Arbiter.AcquireJog` holds
+  `opMu` for the session duration, so sync/reconcile/file operations cannot
+  interleave with jog motion. Owner mode uses the owner connection; relay mode
+  uses an interactive injection lease only while the machine is freshly `Idle`.
+  During relay jog, controller `?` polls are answered from cache, proxy status
+  polls update the tracker and jog client, and any controller non-status frame
+  aborts the jog lease before that frame is flushed to the machine. Jog motion is
+  server-generated XYZ-only `G53 G0` from fresh parsed `MPos`; never use `G91`
+  for relay jogging because that would mutate modal distance state behind the
+  controller. The operator must arm the UI/API session and continuously hold the
+  gamepad deadman. Stale/Unknown/non-Idle states stop or reject motion; realtime
+  `halt` still bypasses the jog lease.
 
 ## Engineering practices in force
 
@@ -145,6 +163,7 @@ Injection & control model (both modes — proxy alone OR with controller attache
 | `internal/client` | owner-mode conn: ls/rm/mv/mkdir/md5/ftype, upload/download |
 | `internal/relay` | transparent relay + injection mux |
 | `internal/session` | arbiter: relay vs owner mode, idle gating, opMu |
+| `internal/jog` | single-session gamepad jog lease and motion generator |
 | `internal/gcodelog` | bounded in-memory gcode I/O log + subscriber fan-out |
 | `internal/store` | durable catalog + job queue (atomic JSON) |
 | `internal/synceng` | deferred-sync drain + reconcile sweep |

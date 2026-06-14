@@ -40,6 +40,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/davfs"
 	"github.com/uwin/cnc-proxy/internal/discovery"
 	"github.com/uwin/cnc-proxy/internal/httpauth"
+	"github.com/uwin/cnc-proxy/internal/jog"
 	"github.com/uwin/cnc-proxy/internal/relay"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
@@ -48,6 +49,7 @@ import (
 )
 
 func main() {
+	jogDefaults := jog.DefaultConfig()
 	var (
 		tcpPort      = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
 		machineAddr  = flag.String("machine", "", "machine host:port; if empty, learned via UDP discovery")
@@ -63,6 +65,12 @@ func main() {
 		authToken    = flag.String("auth-token", "", "HTTP Basic Auth token/password for API/WebDAV")
 		insecureHTTP = flag.Bool("allow-insecure-http", false, "allow API/WebDAV to bind beyond loopback without -auth-token")
 		dataDir      = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
+		jogEnabled   = flag.Bool("jog-enabled", jogDefaults.Enabled, "enable low-latency gamepad jogging API/UI")
+		jogMaxXY     = flag.Float64("jog-max-xy-mm-min", jogDefaults.MaxXYMMMin, "maximum XY jog speed in mm/min")
+		jogMaxZ      = flag.Float64("jog-max-z-mm-min", jogDefaults.MaxZMMMin, "maximum Z jog speed in mm/min")
+		jogTick      = flag.Duration("jog-tick", jogDefaults.Tick, "gamepad jog motion tick interval")
+		jogStatus    = flag.Duration("jog-status-interval", jogDefaults.StatusInterval, "status polling interval while a jog lease is armed")
+		jogDeadman   = flag.Duration("jog-deadman-timeout", jogDefaults.DeadmanTimeout, "maximum age of held-deadman gamepad input before motion stops")
 	)
 	applyEnvDefaults()
 	flag.Parse()
@@ -158,9 +166,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("cannot create service: %v", err)
 	}
+	jogMgr := jog.New(arb, jog.Config{
+		Enabled:        *jogEnabled,
+		MaxXYMMMin:     *jogMaxXY,
+		MaxZMMMin:      *jogMaxZ,
+		Tick:           *jogTick,
+		StatusInterval: *jogStatus,
+		DeadmanTimeout: *jogDeadman,
+	})
 
 	authCfg := httpauth.Config{User: *authUser, Token: *authToken}
-	apiSrv := &http.Server{Addr: *apiAddr, Handler: httpauth.Middleware(authCfg, api.New(svc).Handler())}
+	apiSrv := &http.Server{Addr: *apiAddr, Handler: httpauth.Middleware(authCfg, api.NewWithOptions(svc, api.Options{Jog: jogMgr}).Handler())}
 	go func() {
 		log.Printf("api: listening on %s", *apiAddr)
 		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -288,6 +304,14 @@ func (a injectorAdapter) AcquireMachine() (session.InjectTransport, func(), erro
 		return nil, nil, err
 	}
 	return it, release, nil
+}
+
+func (a injectorAdapter) AcquireInteractive() (session.InjectTransport, <-chan struct{}, func(), error) {
+	it, abort, release, err := a.srv.AcquireInteractive()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return it, abort, release, nil
 }
 
 // applyEnvDefaults lets every flag be set through the environment as

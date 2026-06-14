@@ -239,3 +239,229 @@ func TestInjectionAnswersControllerPollsFromCache(t *testing.T) {
 	}
 	release()
 }
+
+func TestRelayControlAllowedDuringControllerFileTransfer(t *testing.T) {
+	m := newFrameMachine(t)
+	srv, addr := startRelay(t, m)
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	if _, err := controller.Write(protocol.UploadCommand("/sd/gcodes/job.nc")); err != nil {
+		t.Fatal(err)
+	}
+	waitForMachineFrame(t, m, protocol.CmdFileStart)
+
+	controls := []byte{protocol.CtrlFeedHold, protocol.CtrlResume, protocol.CtrlHalt}
+	for _, c := range controls {
+		if err := srv.SendControl(c); err != nil {
+			t.Fatalf("SendControl(%#x) during file transfer: %v", c, err)
+		}
+	}
+
+	dataPayload := append([]byte{0, 0, 0, 1}, []byte("chunk")...)
+	if _, err := controller.Write(protocol.Encode(protocol.CmdFileData, dataPayload)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Write(protocol.Encode(protocol.CmdFileEnd, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		frames := m.recvFrames()
+		if hasControlFrames(frames, controls) &&
+			hasFrame(frames, protocol.CmdFileData) &&
+			hasFrame(frames, protocol.CmdFileEnd) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("machine frames did not include controls and file frames: %s", frameSummary(m.recvFrames()))
+}
+
+func TestInteractiveLeaseDivertsStatusFromController(t *testing.T) {
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd == protocol.CmdCtrlSingle && len(f.Data) == 1 && f.Data[0] == '?' {
+			c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:1,2,3>")))
+		}
+	}
+	srv, addr := startRelay(t, m)
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	controller.Write(protocol.QueryStatus())
+	readControllerFrame(t, controller, protocol.CmdStatusRes)
+
+	it, _, release, err := srv.AcquireInteractive()
+	if err != nil {
+		t.Fatalf("AcquireInteractive: %v", err)
+	}
+	defer release()
+
+	if _, err := it.Write(protocol.QueryStatus()); err != nil {
+		t.Fatal(err)
+	}
+	readTransportFrame(t, it, protocol.CmdStatusRes)
+
+	controller.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	buf := make([]byte, 256)
+	if n, err := controller.Read(buf); err == nil && n > 0 {
+		t.Fatalf("controller received proxy interactive status frame: %x", buf[:n])
+	}
+}
+
+func TestInteractiveLeaseAbortsAndFlushesControllerTraffic(t *testing.T) {
+	m := newFrameMachine(t)
+	srv, addr := startRelay(t, m)
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	it, abort, release, err := srv.AcquireInteractive()
+	if err != nil {
+		t.Fatalf("AcquireInteractive: %v", err)
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 128)
+		_, err := it.Read(buf)
+		readDone <- err
+	}()
+
+	gcode := protocol.Encode(protocol.CmdCtrlMulti, []byte("M114\n"))
+	if _, err := controller.Write(gcode); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-abort:
+	case <-time.After(time.Second):
+		t.Fatal("interactive lease was not aborted by controller traffic")
+	}
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("interactive transport read unexpectedly succeeded after abort")
+		}
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("interactive transport read did not unblock promptly after abort")
+	}
+
+	release()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, f := range m.recvFrames() {
+			if f.Cmd == protocol.CmdCtrlMulti && string(f.Data) == "M114\n" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("controller frame was not flushed after release; frames: %s", frameSummary(m.recvFrames()))
+}
+
+func waitForMachineFrame(t *testing.T, m *frameMachine, want byte) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasFrame(m.recvFrames(), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("machine did not receive %s; frames: %s", protocol.CmdName(want), frameSummary(m.recvFrames()))
+}
+
+func readControllerFrame(t *testing.T, c net.Conn, want byte) protocol.Frame {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sc protocol.Scanner
+	buf := make([]byte, 1024)
+	for {
+		n, err := c.Read(buf)
+		for _, f := range sc.Push(buf[:n]) {
+			if f.Cmd == want {
+				return f
+			}
+		}
+		if err != nil {
+			t.Fatalf("read controller frame %s: %v", protocol.CmdName(want), err)
+		}
+	}
+}
+
+func readTransportFrame(t *testing.T, tr InjectTransport, want byte) protocol.Frame {
+	t.Helper()
+	tr.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sc protocol.Scanner
+	buf := make([]byte, 1024)
+	for {
+		n, err := tr.Read(buf)
+		for _, f := range sc.Push(buf[:n]) {
+			if f.Cmd == want {
+				return f
+			}
+		}
+		if err != nil {
+			t.Fatalf("read transport frame %s: %v", protocol.CmdName(want), err)
+		}
+	}
+}
+
+func hasFrame(frames []protocol.Frame, want byte) bool {
+	for _, f := range frames {
+		if f.Cmd == want {
+			return true
+		}
+	}
+	return false
+}
+
+func hasControlFrames(frames []protocol.Frame, controls []byte) bool {
+	counts := make(map[byte]int, len(controls))
+	for _, c := range controls {
+		counts[c]++
+	}
+	for _, f := range frames {
+		if f.Cmd == protocol.CmdCtrlSingle && len(f.Data) == 1 {
+			if counts[f.Data[0]] > 0 {
+				counts[f.Data[0]]--
+			}
+		}
+	}
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func frameSummary(frames []protocol.Frame) string {
+	if len(frames) == 0 {
+		return "[]"
+	}
+	out := "["
+	for i, f := range frames {
+		if i > 0 {
+			out += " "
+		}
+		out += protocol.CmdName(f.Cmd)
+		if f.Cmd == protocol.CmdCtrlSingle && len(f.Data) == 1 {
+			out += "(" + protocol.Unescape(string(f.Data)) + ")"
+		}
+	}
+	return out + "]"
+}

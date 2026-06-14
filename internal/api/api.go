@@ -11,22 +11,37 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/uwin/cnc-proxy/internal/gcodelog"
+	"github.com/uwin/cnc-proxy/internal/jog"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
+	"github.com/uwin/cnc-proxy/internal/store"
 )
 
 // Server holds the HTTP handlers.
 type Server struct {
 	svc *service.Service
+	jog *jog.Manager
+}
+
+// Options configures optional API surfaces.
+type Options struct {
+	Jog *jog.Manager
 }
 
 // New creates an API server.
-func New(svc *service.Service) *Server { return &Server{svc: svc} }
+func New(svc *service.Service) *Server { return NewWithOptions(svc, Options{}) }
+
+// NewWithOptions creates an API server with optional feature managers.
+func NewWithOptions(svc *service.Service, opts Options) *Server {
+	return &Server{svc: svc, jog: opts.Jog}
+}
 
 // Handler returns the configured HTTP mux.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/machine", s.getMachine)
+	mux.HandleFunc("GET /api/machine/status", s.getMachine)
 	mux.HandleFunc("GET /api/files", s.getFiles)
 	mux.HandleFunc("POST /api/files", s.postFile)
 	mux.HandleFunc("GET /api/files/", s.getFileContent)    // GET /api/files/{path...}
@@ -37,6 +52,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gcode", s.postGcode)      // body: {line}
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog) // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)  // body: {action: hold|resume|halt}
+	mux.HandleFunc("GET /api/jog/capabilities", s.getJogCapabilities)
+	mux.HandleFunc("GET /api/jog/ws", s.jogWS)
 	mux.HandleFunc("GET /api/events", s.events)
 	// Everything not under /api/ is the embedded web UI.
 	mux.Handle("/", webHandler())
@@ -232,7 +249,12 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// events streams catalog/job/machine changes as Server-Sent Events.
+// events streams catalog/job/machine/gcode changes as Server-Sent Events.
+// Optional scope narrows the stream for UI surfaces that should not depend on
+// unrelated data being loaded:
+//   - all or empty: machine, files, jobs, and gcode
+//   - control: machine and gcode only
+//   - files: machine, files, and jobs only
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -243,20 +265,40 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch, unsub := s.svc.Subscribe()
-	defer unsub()
-	gch, gunsub := s.svc.GcodeLog().Subscribe()
-	defer gunsub()
+	scope := strings.ToLower(r.URL.Query().Get("scope"))
+	if scope != "" && scope != "all" && scope != "control" && scope != "files" {
+		scope = "all"
+	}
+	includeFiles := scope == "" || scope == "all" || scope == "files"
+	includeGcode := scope == "" || scope == "all" || scope == "control"
+
+	var ch <-chan store.Event
+	var unsub func()
+	if includeFiles {
+		ch, unsub = s.svc.Subscribe()
+		defer unsub()
+	}
+	var gch <-chan gcodelog.Line
+	var gunsub func()
+	if includeGcode {
+		gch, gunsub = s.svc.GcodeLog().Subscribe()
+		defer gunsub()
+	}
 
 	// Send an initial snapshot so a fresh client is immediately consistent.
 	// Subscriptions are already active, so lines logged from here on arrive as
 	// gcode events; duplicates against the snapshot are detectable by seq.
-	sendEvent(w, "snapshot", map[string]any{
+	snap := map[string]any{
 		"machine": s.svc.Status(),
-		"files":   s.svc.Files(),
-		"jobs":    s.svc.Jobs(),
-		"gcode":   s.svc.GcodeLog().Recent(),
-	})
+	}
+	if includeFiles {
+		snap["files"] = s.svc.Files()
+		snap["jobs"] = s.svc.Jobs()
+	}
+	if includeGcode {
+		snap["gcode"] = s.svc.GcodeLog().Recent()
+	}
+	sendEvent(w, "snapshot", snap)
 	flusher.Flush()
 
 	for {

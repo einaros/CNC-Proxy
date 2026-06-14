@@ -51,6 +51,13 @@ type Injector interface {
 	AcquireMachine() (it InjectTransport, release func(), err error)
 }
 
+// InteractiveInjector borrows the controller's shared machine connection for a
+// long-lived interactive operation. The abort channel closes when controller
+// traffic needs the connection back.
+type InteractiveInjector interface {
+	AcquireInteractive() (it InjectTransport, abort <-chan struct{}, release func(), err error)
+}
+
 // ControlWriter writes a single realtime control character (feed-hold, resume,
 // halt) straight to the machine, out-of-band — without taking the transaction
 // lock. The relay Server implements it for relay mode; an injector that also
@@ -68,6 +75,30 @@ type InjectTransport interface {
 	Read(p []byte) (int, error)
 	SetReadDeadline(t time.Time) error
 	Close() error
+}
+
+// JogLease is a long-lived exclusive lease over normal machine I/O. Realtime
+// controls still bypass it through SendControl.
+type JogLease struct {
+	Conn  *client.Conn
+	Mode  Mode
+	Abort <-chan struct{}
+
+	once    sync.Once
+	release func(error)
+}
+
+// Release returns the machine I/O lease. Passing a non-nil err lets owner mode
+// drop the underlying connection before future operations reuse it.
+func (l *JogLease) Release(err error) {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() {
+		if l.release != nil {
+			l.release(err)
+		}
+	})
 }
 
 // Arbiter tracks mode and machine state, and gates access to the machine
@@ -160,6 +191,9 @@ func (a *Arbiter) Mode() Mode {
 	return a.mode
 }
 
+// StateMaxAge returns the configured freshness bound for gating machine ops.
+func (a *Arbiter) StateMaxAge() time.Duration { return a.stateMaxAge }
+
 // Tracker exposes the shared machine-state tracker.
 func (a *Arbiter) Tracker() *machine.Tracker { return a.tracker }
 
@@ -237,6 +271,94 @@ func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) err
 		return err
 	}
 	return nil
+}
+
+// AcquireJog acquires a long-lived exclusive machine I/O lease for interactive
+// jogging. It requires fresh Idle state before acquiring the machine path; the
+// caller should still query status before each motion tick.
+func (a *Arbiter) AcquireJog(ctx context.Context) (*JogLease, error) {
+	if err := a.lockOp(ctx); err != nil {
+		return nil, err
+	}
+	locked := true
+	defer func() {
+		if locked {
+			a.opMu.Unlock()
+		}
+	}()
+
+	a.mu.Lock()
+	st, _ := a.tracker.Snapshot()
+	if !a.tracker.Fresh(a.stateMaxAge) || !st.CanRunFileOps() {
+		a.mu.Unlock()
+		return nil, ErrNotIdle
+	}
+	mode := a.mode
+	if mode != ModeOwner {
+		inj, ok := a.injector.(InteractiveInjector)
+		a.mu.Unlock()
+		if !ok || inj == nil {
+			return nil, ErrRelayActive
+		}
+		it, abort, release, err := inj.AcquireInteractive()
+		if err != nil {
+			switch {
+			case errors.Is(err, relay.ErrBusy):
+				return nil, ErrBusy
+			case errors.Is(err, relay.ErrNoSession):
+				return nil, ErrRelayActive
+			default:
+				return nil, err
+			}
+		}
+		conn := client.NewTransport(it)
+		conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
+		locked = false
+		return &JogLease{
+			Conn:  conn,
+			Mode:  mode,
+			Abort: abort,
+			release: func(error) {
+				release()
+				a.opMu.Unlock()
+			},
+		}, nil
+	}
+
+	conn, err := a.acquireConnLocked()
+	a.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	locked = false
+	return &JogLease{
+		Conn: conn,
+		Mode: mode,
+		release: func(err error) {
+			if err != nil {
+				a.mu.Lock()
+				if a.ownerConn == conn {
+					a.ownerConn.Close()
+					a.ownerConn = nil
+				}
+				a.mu.Unlock()
+			}
+			a.opMu.Unlock()
+		},
+	}, nil
+}
+
+func (a *Arbiter) lockOp(ctx context.Context) error {
+	for {
+		if a.opMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // withInjection borrows the controller's shared connection for one operation.
@@ -335,9 +457,9 @@ func (a *Arbiter) acquireConnLocked() (*client.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Feed status reports observed mid-command (e.g. SendGcode's keepalive polls
-	// during a long move) into the tracker, so state doesn't go stale while a
-	// blocking command holds opMu and starves the periodic poll loop.
+	// Feed status reports observed mid-command into the tracker, so interleaved
+	// STATUS_RES frames keep state fresh even while another command holds opMu
+	// and starves the periodic poll loop.
 	conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
 	a.ownerConn = conn
 	return conn, nil

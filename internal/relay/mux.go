@@ -35,8 +35,13 @@ type mux struct {
 	mu sync.Mutex
 	// injecting is true while an injected operation owns the reply stream.
 	injecting bool
+	// interactive is true for a long-lived jog/control lease. A controller
+	// non-status frame aborts the lease so the controller can proceed.
+	interactive bool
 	// injectCh delivers machine frames to the active injector.
 	injectCh chan protocol.Frame
+	// abortCh is closed when an interactive lease must release promptly.
+	abortCh chan struct{}
 	// heldController accumulates controller->machine frames during injection,
 	// to be flushed verbatim when injection ends.
 	heldController [][]byte
@@ -50,13 +55,6 @@ type mux struct {
 
 func newMux(machine net.Conn) *mux {
 	return &mux{machine: machine}
-}
-
-// setLastStatus records the latest status payload (called by the reader).
-func (m *mux) setLastStatus(p []byte) {
-	m.mu.Lock()
-	m.lastStatus = append(m.lastStatus[:0], p...)
-	m.mu.Unlock()
 }
 
 // noteControllerFrame updates controller-transaction tracking from an
@@ -84,6 +82,9 @@ func (m *mux) noteControllerFrame(f protocol.Frame, raw []byte) (forward bool) {
 	if isStatusPoll(f) {
 		return false
 	}
+	if m.interactive {
+		m.abortInteractiveLocked()
+	}
 	cp := append([]byte(nil), raw...)
 	m.heldController = append(m.heldController, cp)
 	return false
@@ -108,7 +109,8 @@ func (m *mux) cachedStatusFrame() []byte {
 // writeControl writes a single realtime control character to the machine socket
 // out-of-band, without taking the injection window. net.Conn writes are
 // concurrency-safe, and a CTRL_SINGLE frame is one atomic Write, so this is safe
-// to call concurrently with an active injection or the relay's own pumps.
+// to call concurrently with an active injection, controller file transfer, or
+// the relay's own pumps.
 func (m *mux) writeControl(c byte) error {
 	_, err := m.machine.Write(protocol.Encode(protocol.CmdCtrlSingle, []byte{c}))
 	return err
@@ -128,12 +130,40 @@ func (m *mux) AcquireInjection() (*injectTransport, func(), error) {
 		return nil, nil, ErrBusy
 	}
 	m.injecting = true
+	m.interactive = false
 	m.injectCh = make(chan protocol.Frame, 64)
+	m.abortCh = nil
 	m.mu.Unlock()
 
 	it := &injectTransport{m: m}
 	release := func() { m.releaseInjection() }
 	return it, release, nil
+}
+
+// AcquireInteractive begins a long-lived interactive lease for jog/control
+// traffic. It uses the same reply diversion as injection, but STATUS_RES frames
+// produced by the interactive side are delivered to the lease rather than
+// forwarded to the controller. A controller non-status frame aborts the lease.
+func (m *mux) AcquireInteractive() (*injectTransport, <-chan struct{}, func(), error) {
+	m.mu.Lock()
+	if m.injecting {
+		m.mu.Unlock()
+		return nil, nil, nil, ErrBusy
+	}
+	if m.controllerMidXfer {
+		m.mu.Unlock()
+		return nil, nil, nil, ErrBusy
+	}
+	m.injecting = true
+	m.interactive = true
+	m.injectCh = make(chan protocol.Frame, 128)
+	m.abortCh = make(chan struct{})
+	abortCh := m.abortCh
+	m.mu.Unlock()
+
+	it := &injectTransport{m: m}
+	release := func() { m.releaseInjection() }
+	return it, abortCh, release, nil
 }
 
 // releaseInjection ends the injection window and flushes held controller frames
@@ -143,10 +173,16 @@ func (m *mux) releaseInjection() {
 	held := m.heldController
 	m.heldController = nil
 	m.injecting = false
+	m.interactive = false
 	ch := m.injectCh
 	m.injectCh = nil
+	abortCh := m.abortCh
+	m.abortCh = nil
 	m.mu.Unlock()
 
+	if abortCh != nil {
+		m.closeAbort(abortCh)
+	}
 	if ch != nil {
 		close(ch)
 	}
@@ -159,28 +195,52 @@ func (m *mux) releaseInjection() {
 // During injection it diverts frames to the injector and returns false (do not
 // forward to controller); otherwise returns true.
 func (m *mux) routeMachineFrame(f protocol.Frame) (forward bool) {
-	if f.Cmd == protocol.CmdStatusRes {
-		m.setLastStatus(f.Data)
-	}
 	m.mu.Lock()
-	ch := m.injectCh
-	injecting := m.injecting
-	m.mu.Unlock()
-	if !injecting {
+	defer m.mu.Unlock()
+	if f.Cmd == protocol.CmdStatusRes {
+		m.lastStatus = append(m.lastStatus[:0], f.Data...)
+	}
+	if !m.injecting {
 		return true
+	}
+	if m.interactive && f.Cmd == protocol.CmdStatusRes {
+		if m.injectCh != nil {
+			select {
+			case m.injectCh <- f:
+			default:
+			}
+		}
+		return false
 	}
 	// Status reports during injection still go to the controller too, so its
 	// heartbeat stays fed; everything else is the injected op's response.
 	if f.Cmd == protocol.CmdStatusRes {
 		return true
 	}
-	if ch != nil {
+	if m.injectCh != nil {
 		select {
-		case ch <- f:
+		case m.injectCh <- f:
 		default:
 		}
 	}
 	return false
+}
+
+func (m *mux) abortInteractiveLocked() {
+	if m.abortCh == nil {
+		return
+	}
+	m.closeAbort(m.abortCh)
+	m.abortCh = nil
+	if m.injectCh != nil {
+		close(m.injectCh)
+		m.injectCh = nil
+	}
+}
+
+func (m *mux) closeAbort(ch chan struct{}) {
+	defer func() { _ = recover() }()
+	close(ch)
 }
 
 // injectTransport adapts the mux into a client.transport for the duration of an
@@ -193,6 +253,12 @@ type injectTransport struct {
 }
 
 func (t *injectTransport) Write(p []byte) (int, error) {
+	t.m.mu.Lock()
+	closed := !t.m.injecting || (t.m.interactive && t.m.injectCh == nil)
+	t.m.mu.Unlock()
+	if closed {
+		return 0, errInjectionClosed
+	}
 	return t.m.machine.Write(p)
 }
 
