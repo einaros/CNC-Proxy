@@ -105,6 +105,15 @@ func (m *mux) cachedStatusFrame() []byte {
 	return protocol.Encode(protocol.CmdStatusRes, m.lastStatus)
 }
 
+// writeControl writes a single realtime control character to the machine socket
+// out-of-band, without taking the injection window. net.Conn writes are
+// concurrency-safe, and a CTRL_SINGLE frame is one atomic Write, so this is safe
+// to call concurrently with an active injection or the relay's own pumps.
+func (m *mux) writeControl(c byte) error {
+	_, err := m.machine.Write(protocol.Encode(protocol.CmdCtrlSingle, []byte{c}))
+	return err
+}
+
 // AcquireInjection begins an injection window, returning a transport the client
 // package can drive. It fails with ErrBusy if the controller is mid file
 // transfer. The caller MUST call the returned release func when done.

@@ -28,6 +28,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
 	"github.com/uwin/cnc-proxy/internal/machine"
+	"github.com/uwin/cnc-proxy/internal/protocol"
 	"github.com/uwin/cnc-proxy/internal/quicklz"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -241,19 +242,41 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 	return entry, nil
 }
 
-// gcodeTimeout bounds a single injected gcode command.
-const gcodeTimeout = 30 * time.Second
+// gcodeReplyCap bounds a reply-expected query (M114, version, $G, M503, …). The
+// firmware answers these promptly, so this is only a safety net; the read
+// actually terminates on the reply's quiescence well before this.
+const gcodeReplyCap = 30 * time.Second
 
-// SendGcode runs a single gcode line on the machine synchronously and returns
-// the machine's output (excluding the terminating "ok"). It works in both owner
-// mode and relay mode (injected between the controller's transactions). It does
-// NOT require idle — jogging or querying while a job runs is legitimate — but in
-// relay mode it returns session.ErrBusy if the controller is mid file-transfer.
+// SendGcode runs a single gcode line on the machine and returns the machine's
+// output (the payload of an "ok <payload>" reply, or output lines for a no-"ok"
+// reply; empty for fire-and-forget commands). It works in both owner mode and
+// relay mode (injected between the controller's transactions).
+//
+// protocol.ClassifyGcode is the single source of truth for two independent
+// decisions, both grounded in hardware-verified firmware behavior:
+//
+//   - requiresIdle: read-only queries (M114, version, $G, bare M220, …) run
+//     regardless of machine state — observing state while a program runs is
+//     legitimate. Motion, modal/state changes, dual-nature SETs, and SD I/O
+//     require a fresh Idle machine and return session.ErrNotIdle otherwise
+//     (HTTP 503, retryable), so the proxy can never disturb a running program.
+//   - resp: whether the firmware will reply at all. Reply-expected commands are
+//     read to quiescence; fire-and-forget commands (which the firmware never
+//     acks over WiFi) are written and only briefly drained for a late error.
+//     This is why an injected move no longer blocks waiting for an ack that
+//     never comes (the original "second move hangs" bug).
+//
+// In relay mode it additionally returns session.ErrBusy if the controller is
+// mid file-transfer; that too is retryable, not a failure.
 func (s *Service) SendGcode(line string) (string, error) {
 	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, line)
+	resp, requireIdle := protocol.ClassifyGcode(line)
 	var out string
-	err := s.arb.WithMachine(false, func(c *client.Conn) error {
-		o, e := c.SendGcode(line, gcodeTimeout)
+	err := s.arb.WithMachine(requireIdle, func(c *client.Conn) error {
+		o, e := c.SendGcodeLine(line, client.GcodeOpts{
+			ExpectReply: resp == protocol.ReplyExpected,
+			Cap:         gcodeReplyCap,
+		})
 		out = o
 		return e
 	})
@@ -266,6 +289,35 @@ func (s *Service) SendGcode(line string) (string, error) {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
 	}
 	return out, err
+}
+
+// Control characters accepted by SendControl (mirrors the protocol constants).
+const (
+	ControlFeedHold = protocol.CtrlFeedHold
+	ControlResume   = protocol.CtrlResume
+	ControlHalt     = protocol.CtrlHalt
+)
+
+// SendControl injects a realtime control character. These are out-of-band on
+// the firmware (acted upon immediately from its receive path, independent of
+// the gcode stream), so unlike SendGcode they are NOT idle-gated and — crucially
+// — they do NOT take the arbiter's transaction lock: feed-hold, resume, and
+// emergency-halt must work precisely WHILE the machine is moving, including
+// preempting a blocking move or a program a connected controller started. The
+// only time it cannot run is mid binary file-transfer in relay mode
+// (session.ErrBusy / ErrRelayActive), since a raw data stream can't be safely
+// interleaved; those are retryable, not failures.
+func (s *Service) SendControl(c byte) error {
+	label, ok := protocol.ControlLabel(c)
+	if !ok {
+		return fmt.Errorf("service: unsupported control character %#x", c)
+	}
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, label)
+	err := s.arb.SendControl(c)
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+	}
+	return err
 }
 
 // Delete enqueues a delete and marks the entry pending_delete.

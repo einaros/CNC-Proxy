@@ -38,7 +38,16 @@ type Conn struct {
 	// pending holds frames already parsed from a read that returned more than
 	// one frame, so the next readFrame call drains them first.
 	pending []protocol.Frame
+	// onStatus, if set, is called with each STATUS_RES payload observed during a
+	// command (e.g. SendGcode's keepalive polls), so the caller's state tracker
+	// stays current even while a long blocking command holds the connection.
+	onStatus func(payload string)
 }
+
+// SetStatusObserver registers a callback invoked with each STATUS_RES payload
+// seen while running a command. Used so keepalive polls during a long move keep
+// the machine-state tracker fresh instead of going stale.
+func (k *Conn) SetStatusObserver(f func(payload string)) { k.onStatus = f }
 
 // Dial connects to a machine at host:port.
 func Dial(addr string, timeout time.Duration) (*Conn, error) {
@@ -224,58 +233,108 @@ func (k *Conn) Ftype(timeout time.Duration) (string, error) {
 	}
 }
 
-// SendGcode sends a single command line (CTRL_MULTI) and collects its response.
+// GcodeOpts tunes how SendGcodeLine waits for a command's response. Defaults
+// (all zero) mean fire-and-forget with no reply read.
+type GcodeOpts struct {
+	// ExpectReply selects the response model. False (default): fire-and-forget —
+	// write the frame and only briefly drain for an immediate error/alarm line.
+	// True: read the prompt reply (an "ok"/"ok <payload>" line, or one-or-more
+	// output lines with no "ok") until quiescence.
+	ExpectReply bool
+	// Settle is how long to wait for more output after the last line before
+	// considering a no-"ok" reply complete (ExpectReply) or how long to drain
+	// for a late error line (fire-and-forget). Defaults to defaultSettle.
+	Settle time.Duration
+	// Cap bounds the whole call as a safety net. Because the firmware replies
+	// promptly or never, this should never actually fire in normal operation;
+	// it only guards against a misbehaving peer. Defaults to defaultCap.
+	Cap time.Duration
+}
+
+const (
+	// defaultSettle: the firmware emits a multi-line reply (e.g. M503, $#) as a
+	// burst; this much silence after the last line means it's done. It also
+	// bounds the fire-and-forget drain (catching a late "error:"/ALARM line).
+	defaultSettle = 400 * time.Millisecond
+	// defaultCap is the hard ceiling on a single SendGcodeLine call.
+	defaultCap = 5 * time.Second
+)
+
+// SendGcodeLine sends a single command line (CTRL_MULTI) and, per opts, collects
+// its response. It is the single send primitive for all injected gcode/console
+// commands; protocol.ClassifyGcode decides which response model a given line
+// needs (and the caller passes that via opts.ExpectReply).
 //
-// Response shapes differ by command kind, so termination is not just "wait for
-// ok": actual G/M codes get a terminating "ok\r\n" (or "ok <payload>", e.g.
-// M114 position) via GcodeDispatch, but console-style commands (version, etc.)
-// reply with output lines and NO "ok". To handle both without hanging, this
-// returns on an "ok"/"error" line if one arrives, otherwise after a short
-// quiescence window once at least one output line has been seen. quietWindow is
-// how long to wait for more output before considering a no-ok command done.
-func (k *Conn) SendGcode(line string, timeout time.Duration) (string, error) {
+// The design rests on a property verified against real hardware (firmware
+// 1.0.5): the Carvera firmware replies PROMPTLY or NEVER over the WiFi protocol.
+//   - Queries (M114, version, $G, M503, …) answer within milliseconds, either as
+//     "ok"/"ok <payload>" or as output line(s) with NO terminating "ok".
+//   - Motion (G0–G3), modal/state sets (G90/G91, M5/M9), blocking waits (M400,
+//     G4 dwell) and unrecognized lines produce NO reply frame at all.
+//
+// Because nothing is "silent then late", a short settle window after the last
+// observed line is a complete and non-hanging termination rule — no per-2s
+// keepalive poll is needed or useful (the old design's keepalive only delayed a
+// guaranteed timeout for the silent commands, which is exactly what caused a
+// fire-and-forget command to block opMu until the command timeout).
+//
+// STATUS_RES frames that arrive interleaved are fed to the status observer (so
+// the tracker stays fresh) and never count as the command's output. A NORMAL_INFO
+// line containing "error"/"alarm" returns a non-nil error with whatever output
+// preceded it. On a connection-level read error with no output yet, that error
+// is surfaced so the arbiter can drop and reconnect.
+func (k *Conn) SendGcodeLine(line string, opts GcodeOpts) (string, error) {
+	if opts.Settle <= 0 {
+		opts.Settle = defaultSettle
+	}
+	if opts.Cap <= 0 {
+		opts.Cap = defaultCap
+	}
 	if len(line) == 0 || line[len(line)-1] != '\n' {
 		line += "\n"
 	}
 	if err := k.writeFrame(protocol.Encode(protocol.CmdCtrlMulti, []byte(line))); err != nil {
 		return "", err
 	}
-	const quietWindow = 400 * time.Millisecond
-	overall := time.Now().Add(timeout)
+
+	hardDeadline := time.Now().Add(opts.Cap)
 	var out []byte
+	haveOutput := false
 	for {
-		// Read deadline is the sooner of the overall timeout and (once we have
-		// output) the quiescence window.
-		rd := overall
-		if len(out) > 0 && time.Now().Add(quietWindow).Before(rd) {
-			rd = time.Now().Add(quietWindow)
+		// Read deadline: the settle window (so a quiescent reply terminates),
+		// capped by the overall hard deadline.
+		rd := time.Now().Add(opts.Settle)
+		if rd.After(hardDeadline) {
+			rd = hardDeadline
 		}
 		f, err := k.readFrame(rd)
 		if err != nil {
-			// Many commands legitimately produce output with no terminating
-			// "ok" (console commands like `version`), or the firmware closes
-			// the stream after the output. Once we've collected any output, a
-			// subsequent read error — whether a quiescence timeout or an
-			// EOF/closed connection — marks the end of that output, not a
-			// failure. Only surface the error when nothing was received at all.
-			if len(out) > 0 {
+			if isTimeout(err) {
+				// Quiescence (or the hard cap): for a reply-expected command this
+				// ends a no-"ok" multi-line reply; for fire-and-forget it is the
+				// normal, expected outcome (nothing more is coming). Either way,
+				// return what we have.
+				return string(out), nil
+			}
+			// A real connection error (EOF/closed). If we already captured output
+			// it just marks the end; otherwise surface it so the conn is dropped.
+			if haveOutput {
 				return string(out), nil
 			}
 			return "", err
 		}
 		switch f.Cmd {
 		case protocol.CmdNormalInfo:
-			text := string(f.Data)
-			trimmed := strings.TrimRight(text, "\r\n")
+			trimmed := strings.TrimRight(string(f.Data), "\r\n")
 			low := strings.ToLower(strings.TrimSpace(trimmed))
 			switch {
 			case low == "ok":
 				return string(out), nil
 			case strings.HasPrefix(low, "ok "):
-				// "ok <payload>" — the firmware appended the command's result to
-				// the ok line (e.g. M114 position). Capture the payload.
+				// "ok <payload>" — the firmware appended the result to the ok line
+				// (e.g. M114 position). Capture the payload and finish.
 				payload := strings.TrimSpace(trimmed[len("ok "):])
-				if len(out) > 0 {
+				if haveOutput {
 					out = append(out, '\n')
 				}
 				out = append(out, payload...)
@@ -283,12 +342,38 @@ func (k *Conn) SendGcode(line string, timeout time.Duration) (string, error) {
 			case strings.Contains(low, "error") || strings.Contains(low, "alarm"):
 				return string(out), fmt.Errorf("machine: %s", trimmed)
 			default:
-				out = append(out, f.Data...)
+				if haveOutput {
+					out = append(out, '\n')
+				}
+				out = append(out, trimmed...)
+				haveOutput = true
+			}
+		case protocol.CmdStatusRes:
+			// Interleaved status report (e.g. a concurrent poll's reply): feed the
+			// observer so the tracker stays fresh, but it's not this command's
+			// output.
+			if k.onStatus != nil {
+				k.onStatus(string(f.Data))
 			}
 		default:
-			// Ignore STATUS_RES and other frames during a gcode command.
+			// Ignore other frames during a gcode command.
 		}
 	}
+}
+
+// SendControl sends a single realtime control character (CTRL_SINGLE): '!'
+// feed-hold, '~' resume, or 0x18 emergency halt. These are out-of-band: the
+// firmware acts on them immediately from its receive path regardless of what
+// the machine is doing, so this is fire-and-forget and never waits for a reply.
+func (k *Conn) SendControl(c byte) error {
+	return k.writeFrame(protocol.Encode(protocol.CmdCtrlSingle, []byte{c}))
+}
+
+// isTimeout reports whether err is a deadline/timeout (net.Error.Timeout),
+// distinguishing a keepalive/quiescence tick from a real connection failure.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // QueryState sends `?` and waits for the next STATUS_RES frame, returning its

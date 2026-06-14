@@ -246,3 +246,135 @@ func TestStatusReflectsArbiter(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// serviceWithMachine wires a service to a real arbiter + fake machine with an
+// explicit tracker so tests can drive machine state for idle gating.
+func serviceWithMachine(t *testing.T) (*Service, *carveratest.FakeMachine, *machine.Tracker) {
+	t.Helper()
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+	})
+	svc, err := New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, m, tr
+}
+
+// TestSendGcodeQueryRunsRegardlessOfState confirms a read-only query (M114)
+// runs even while the machine is in Run state (e.g. a controller program), and
+// returns the machine's payload.
+func TestSendGcodeQueryRunsRegardlessOfState(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	m.SetGcodeReply("M114", "ok C: X:1.000 Y:2.000 Z:3.000")
+	tr.Observe(machine.Run) // a program is running
+
+	out, err := svc.SendGcode("M114")
+	if err != nil {
+		t.Fatalf("M114 during Run should be allowed: %v", err)
+	}
+	if out != "C: X:1.000 Y:2.000 Z:3.000" {
+		t.Errorf("M114 out = %q", out)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "M114" {
+		t.Errorf("machine gcodes = %v", g)
+	}
+}
+
+// TestSendGcodeMotionRequiresIdle confirms a motion command is rejected (and
+// never reaches the machine) while a program runs, but succeeds once Idle.
+func TestSendGcodeMotionRequiresIdle(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+
+	tr.Observe(machine.Run)
+	_, err := svc.SendGcode("G91 G0 X-10")
+	if !session.Retryable(err) {
+		t.Fatalf("motion during Run = %v, want retryable ErrNotIdle", err)
+	}
+	if g := m.Gcodes(); len(g) != 0 {
+		t.Fatalf("motion leaked to machine during Run: %v", g)
+	}
+
+	// Now Idle: the move is accepted and reaches the machine.
+	tr.Observe(machine.Idle)
+	if _, err := svc.SendGcode("G91 G0 X-10"); err != nil {
+		t.Fatalf("motion during Idle: %v", err)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "G91 G0 X-10" {
+		t.Errorf("machine gcodes = %v, want the move", g)
+	}
+}
+
+// TestSendGcodeMotionDoesNotWaitForOk is the regression for the "second move
+// spins forever" bug. The firmware sends NO terminating "ok" for motion gcode
+// over WiFi (verified on hardware), so SendGcode must NOT block waiting for one
+// — if it did, the first move would hold opMu until the command timeout and
+// every later command would queue behind it. This sends several motion commands
+// back-to-back; each must return promptly and all must reach the machine in
+// order. A regression (waiting for ok) makes this hang well past the deadline.
+func TestSendGcodeMotionDoesNotWaitForOk(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	tr.Observe(machine.Idle)
+
+	moves := []string{"G91 G0 X-10", "G91 G0 X10", "G91 G0 X-10", "G91 G0 X10"}
+	done := make(chan error, 1)
+	go func() {
+		for _, mv := range moves {
+			if _, err := svc.SendGcode(mv); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("sequential motion: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("sequential motion commands hung — SendGcode is waiting for an ok the firmware never sends")
+	}
+
+	if g := m.Gcodes(); len(g) != len(moves) {
+		t.Fatalf("machine received %d gcodes, want %d: %v", len(g), len(moves), g)
+	}
+}
+
+// TestSendControlNotIdleGated confirms feed-hold/resume/halt reach the machine
+// even while it is running — that is the whole point of realtime control.
+func TestSendControlNotIdleGated(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	tr.Observe(machine.Run)
+
+	if err := svc.SendControl(ControlFeedHold); err != nil {
+		t.Fatalf("feed-hold during Run: %v", err)
+	}
+	if err := svc.SendControl(ControlHalt); err != nil {
+		t.Fatalf("halt during Run: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(m.Controls()) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := m.Controls(); len(got) != 2 || got[0] != '!' || got[1] != 0x18 {
+		t.Errorf("controls = %v, want [! 0x18]", got)
+	}
+}
+
+// TestSendControlRejectsUnknown guards the action-mapping.
+func TestSendControlRejectsUnknown(t *testing.T) {
+	svc, _, _ := serviceWithMachine(t)
+	if err := svc.SendControl('Q'); err == nil {
+		t.Error("expected error for unsupported control char")
+	}
+}

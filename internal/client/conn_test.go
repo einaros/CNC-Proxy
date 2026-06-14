@@ -213,11 +213,18 @@ func gcodeServer(t *testing.T, reply func(c net.Conn)) *Conn {
 	return conn
 }
 
+// reply is a GcodeOpts for a command we expect the firmware to answer, with a
+// short cap so tests stay fast.
+var reply = GcodeOpts{ExpectReply: true, Settle: 150 * time.Millisecond, Cap: 2 * time.Second}
+
+// fireForget is a GcodeOpts for a silent (motion/modal) command.
+var fireForget = GcodeOpts{ExpectReply: false, Settle: 150 * time.Millisecond, Cap: 2 * time.Second}
+
 func TestSendGcodeOkTerminates(t *testing.T) {
 	conn := gcodeServer(t, func(c net.Conn) {
 		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("ok\r\n")))
 	})
-	out, err := conn.SendGcode("G0 X0", testTimeout)
+	out, err := conn.SendGcodeLine("M400", reply)
 	if err != nil || out != "" {
 		t.Errorf("ok-only: out=%q err=%v", out, err)
 	}
@@ -227,32 +234,82 @@ func TestSendGcodeOkWithPayload(t *testing.T) {
 	conn := gcodeServer(t, func(c net.Conn) {
 		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("ok C: X:1.0 Y:2.0\r\n")))
 	})
-	out, err := conn.SendGcode("M114", testTimeout)
+	out, err := conn.SendGcodeLine("M114", reply)
 	if err != nil || out != "C: X:1.0 Y:2.0" {
 		t.Errorf("ok-payload: out=%q err=%v", out, err)
 	}
 }
 
-func TestSendGcodeOutputThenClose(t *testing.T) {
-	// A console command (e.g. version) that emits output with NO "ok", then the
-	// connection closes. The output must be returned successfully, not as EOF.
+func TestSendGcodeOutputNoOkTerminatesOnSettle(t *testing.T) {
+	// A console command (e.g. version) that emits output with NO "ok". The reader
+	// must return the output once the line goes quiescent, not hang to the cap.
 	conn := gcodeServer(t, func(c net.Conn) {
 		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("version = 1.0.5\n")))
-		c.Close()
+		// Deliberately keep the connection open; termination must come from the
+		// settle window, not an EOF.
+		time.Sleep(time.Second)
 	})
-	out, err := conn.SendGcode("version", testTimeout)
+	t0 := time.Now()
+	out, err := conn.SendGcodeLine("version", reply)
 	if err != nil {
-		t.Errorf("output-then-close: unexpected err=%v (out=%q)", err, out)
+		t.Errorf("output-no-ok: unexpected err=%v (out=%q)", err, out)
 	}
-	if out != "version = 1.0.5\n" {
-		t.Errorf("output-then-close: out=%q", out)
+	if out != "version = 1.0.5" {
+		t.Errorf("output-no-ok: out=%q", out)
+	}
+	if time.Since(t0) > time.Second {
+		t.Errorf("took %v; should terminate on settle window, not block", time.Since(t0))
+	}
+}
+
+func TestSendGcodeMultiLineOutput(t *testing.T) {
+	// A multi-line no-ok reply (e.g. M503) is joined with newlines.
+	conn := gcodeServer(t, func(c net.Conn) {
+		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("line1\n")))
+		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("line2\n")))
+	})
+	out, err := conn.SendGcodeLine("M503", reply)
+	if err != nil || out != "line1\nline2" {
+		t.Errorf("multi-line: out=%q err=%v", out, err)
+	}
+}
+
+func TestSendGcodeFireAndForgetSilent(t *testing.T) {
+	// A silent motion command: the firmware sends nothing. SendGcodeLine must
+	// return promptly (within the settle window), not block to the cap.
+	conn := gcodeServer(t, func(c net.Conn) {
+		time.Sleep(time.Second) // stay connected, stay silent
+	})
+	t0 := time.Now()
+	out, err := conn.SendGcodeLine("G91 G0 X-10", fireForget)
+	if err != nil {
+		t.Fatalf("fire-and-forget motion: %v", err)
+	}
+	if out != "" {
+		t.Errorf("out = %q, want empty", out)
+	}
+	if time.Since(t0) > 700*time.Millisecond {
+		t.Errorf("took %v; fire-and-forget should return after the settle window", time.Since(t0))
+	}
+}
+
+func TestSendGcodeFireAndForgetCatchesError(t *testing.T) {
+	// Even fire-and-forget commands surface an immediate error/alarm line the
+	// firmware emits before halting (e.g. a malformed command).
+	conn := gcodeServer(t, func(c net.Conn) {
+		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("error:Bad command\r\n")))
+	})
+	_, err := conn.SendGcodeLine("G999", fireForget)
+	if err == nil {
+		t.Error("expected error for error: response during drain")
 	}
 }
 
 func TestSendGcodeNoOutputClose(t *testing.T) {
-	// Connection closes with no output at all → a genuine error.
+	// Connection closes with no output at all, before any settle → a genuine
+	// error so the arbiter drops and reconnects.
 	conn := gcodeServer(t, func(c net.Conn) { c.Close() })
-	_, err := conn.SendGcode("G0 X0", testTimeout)
+	_, err := conn.SendGcodeLine("M114", reply)
 	if err == nil {
 		t.Error("no-output close should return an error")
 	}
@@ -262,9 +319,54 @@ func TestSendGcodeError(t *testing.T) {
 	conn := gcodeServer(t, func(c net.Conn) {
 		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("error:Bad command\r\n")))
 	})
-	_, err := conn.SendGcode("G999", testTimeout)
+	_, err := conn.SendGcodeLine("M114", reply)
 	if err == nil {
 		t.Error("expected error for error: response")
+	}
+}
+
+// TestSendGcodeInterleavedStatusIgnored confirms a STATUS_RES frame arriving
+// mid-reply is fed to the observer and does not terminate or corrupt the
+// command's output.
+func TestSendGcodeInterleavedStatusIgnored(t *testing.T) {
+	conn := gcodeServer(t, func(c net.Conn) {
+		c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:0,0,0>")))
+		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("ok C: X:9.0\r\n")))
+	})
+	var observed string
+	conn.SetStatusObserver(func(p string) { observed = p })
+	out, err := conn.SendGcodeLine("M114", reply)
+	if err != nil || out != "C: X:9.0" {
+		t.Errorf("interleaved-status: out=%q err=%v", out, err)
+	}
+	if observed != "<Idle|MPos:0,0,0>" {
+		t.Errorf("observer got %q, want the status payload", observed)
+	}
+}
+
+func TestSendControl(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	conn := dialFake(t, m)
+
+	for _, c := range []byte{'!', '~', 0x18} {
+		if err := conn.SendControl(c); err != nil {
+			t.Fatalf("SendControl(%#x): %v", c, err)
+		}
+	}
+	// Give the fake a moment to record them.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(m.Controls()) == 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := m.Controls(); len(got) != 3 || got[0] != '!' || got[1] != '~' || got[2] != 0x18 {
+		t.Errorf("controls = %v, want [! ~ 0x18]", got)
 	}
 }
 

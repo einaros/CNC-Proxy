@@ -51,6 +51,17 @@ type Injector interface {
 	AcquireMachine() (it InjectTransport, release func(), err error)
 }
 
+// ControlWriter writes a single realtime control character (feed-hold, resume,
+// halt) straight to the machine, out-of-band — without taking the transaction
+// lock. The relay Server implements it for relay mode; an injector that also
+// satisfies this is used by SendControl. A CTRL_SINGLE frame is one atomic
+// socket Write that the firmware acts on immediately from its receive path, so
+// it is safe to emit concurrently with an in-flight transaction and must be, so
+// an emergency halt can preempt a blocking move it would otherwise queue behind.
+type ControlWriter interface {
+	SendControl(c byte) error
+}
+
 // InjectTransport is the byte channel an injected operation drives.
 type InjectTransport interface {
 	Write(p []byte) (int, error)
@@ -73,6 +84,11 @@ type Arbiter struct {
 	// injector, if set, lets owner operations run during relay mode by borrowing
 	// the controller's shared connection between its transactions.
 	injector Injector
+
+	// controlWriter, if set, emits out-of-band realtime control characters to
+	// the machine during relay mode (the relay writes them straight to the
+	// shared socket without taking the injection window).
+	controlWriter ControlWriter
 
 	mu        sync.Mutex
 	mode      Mode
@@ -127,6 +143,14 @@ func (a *Arbiter) SetInjector(inj Injector) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.injector = inj
+}
+
+// SetControlWriter wires the relay's out-of-band control writer after
+// construction, used by SendControl in relay mode.
+func (a *Arbiter) SetControlWriter(cw ControlWriter) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.controlWriter = cw
 }
 
 // Mode returns the current mode.
@@ -232,7 +256,73 @@ func (a *Arbiter) withInjection(inj Injector, fn func(*client.Conn) error) error
 	}
 	defer release()
 	conn := client.NewTransport(it)
+	conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
 	return fn(conn)
+}
+
+// SendControl emits a single realtime control character (feed-hold, resume,
+// halt) out-of-band, WITHOUT taking opMu, so it preempts any in-flight
+// transaction — an emergency halt must not queue behind the blocking move it is
+// meant to abort. This is safe because a CTRL_SINGLE frame is one atomic socket
+// Write (net.Conn writes are concurrency-safe) that the firmware acts on from
+// its receive path regardless of the gcode stream's state.
+//
+// In owner mode it writes to the live owner connection (if one is established).
+// In relay mode it delegates to the relay's out-of-band control writer, which
+// writes straight to the shared machine socket without acquiring the injection
+// window. Returns ErrRelayActive if no path to the machine is available.
+func (a *Arbiter) SendControl(c byte) error {
+	a.mu.Lock()
+	if a.mode != ModeOwner {
+		a.mu.Unlock()
+		return a.sendControlRelay(c)
+	}
+	conn := a.ownerConn
+	a.mu.Unlock()
+	if conn != nil {
+		return conn.SendControl(c)
+	}
+
+	// No live owner connection yet (the poll loop hasn't dialed, or it was
+	// dropped). Establish one so control still reaches the machine — dialing
+	// outside the lock so a slow dial can't block mode transitions.
+	nc, err := a.dial()
+	if err != nil {
+		return err
+	}
+	nc.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
+	a.mu.Lock()
+	switch {
+	case a.mode != ModeOwner:
+		// A controller connected while we were dialing; the machine is
+		// single-conversation, so we must not keep a second owner socket.
+		a.mu.Unlock()
+		nc.Close()
+		return a.sendControlRelay(c)
+	case a.ownerConn != nil:
+		// Lost a race with a concurrent op that established the connection;
+		// reuse theirs and discard ours.
+		conn = a.ownerConn
+		a.mu.Unlock()
+		nc.Close()
+	default:
+		a.ownerConn = nc
+		conn = nc
+		a.mu.Unlock()
+	}
+	return conn.SendControl(c)
+}
+
+// sendControlRelay delegates an out-of-band control character to the relay's
+// control writer (relay mode). Returns ErrRelayActive if none is wired.
+func (a *Arbiter) sendControlRelay(c byte) error {
+	a.mu.Lock()
+	cw := a.controlWriter
+	a.mu.Unlock()
+	if cw == nil {
+		return ErrRelayActive
+	}
+	return cw.SendControl(c)
 }
 
 // acquireConnLocked returns the cached owner connection, dialing if needed. The
@@ -245,6 +335,10 @@ func (a *Arbiter) acquireConnLocked() (*client.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Feed status reports observed mid-command (e.g. SendGcode's keepalive polls
+	// during a long move) into the tracker, so state doesn't go stale while a
+	// blocking command holds opMu and starves the periodic poll loop.
+	conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
 	a.ownerConn = conn
 	return conn, nil
 }

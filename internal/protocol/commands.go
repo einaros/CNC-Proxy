@@ -92,3 +92,180 @@ func QueryStatus() []byte { return Encode(CmdCtrlSingle, []byte{'?'}) }
 func Halt() []byte        { return Encode(CmdCtrlSingle, []byte{0x18}) } // Ctrl-X
 func FeedHold() []byte    { return Encode(CmdCtrlSingle, []byte{'!'}) }
 func Resume() []byte      { return Encode(CmdCtrlSingle, []byte{'~'}) }
+
+// Realtime control characters (CTRL_SINGLE payloads). The firmware acts on
+// these out-of-band, independent of the gcode stream.
+const (
+	CtrlFeedHold = '!'
+	CtrlResume   = '~'
+	CtrlHalt     = 0x18 // Ctrl-X emergency stop
+)
+
+// ControlLabel returns a human-readable label for a realtime control character
+// and whether it is a recognized control. It is the single source of truth for
+// these labels, shared by the relay's sniffing log and the API's injection log.
+func ControlLabel(c byte) (string, bool) {
+	switch c {
+	case CtrlFeedHold:
+		return "! (feed hold)", true
+	case CtrlResume:
+		return "~ (resume)", true
+	case CtrlHalt:
+		return "^X (halt)", true
+	default:
+		return "", false
+	}
+}
+
+// Response classifies how the Carvera firmware replies to a CTRL_MULTI line
+// over the WiFi protocol. This was established empirically against real hardware
+// (firmware 1.0.5), not from the vendored source — the deployed binary does NOT
+// emit the per-line "ok" the source's GcodeDispatch suggests, and a whole class
+// of state-setting commands reply with nothing at all.
+//
+// The load-bearing property, verified on hardware: the firmware replies
+// PROMPTLY or NEVER — there is no "silent for a while, then acks". Queries are
+// answered on the idle loop within milliseconds; motion/modal/dwell commands
+// produce no terminating frame ever. This is why a fire-and-forget command must
+// not wait for an "ok" (it would block until timeout, holding the arbiter's
+// opMu and stalling everything behind it — the original "second move hangs"
+// bug), and why a reply-expected read can safely bound itself with a short
+// settle window instead of a long keepalive loop.
+type Response int
+
+const (
+	// FireAndForget: the firmware sends no terminating reply. The command is
+	// written and we only briefly drain for an immediate error/alarm line.
+	// Covers motion (G0–G3), modal/state sets (G90/G91/G21/G94, M5/M9, …),
+	// blocking waits (M400, G4 dwell), and anything unrecognized.
+	FireAndForget Response = iota
+	// ReplyExpected: the firmware answers promptly, either "ok"/"ok <payload>"
+	// (e.g. M114) or one-or-more output lines with no "ok" (e.g. version, $G).
+	// The reader collects output until quiescence.
+	ReplyExpected
+)
+
+// replyQueries are the gcode/console commands the firmware answers promptly and
+// that only READ state — safe to inject regardless of machine state (even while
+// a controller streams a program) because they neither move the machine nor
+// change modal/persistent state. Verified on hardware to produce a reply.
+//
+// Matched against the lowercased first token, dotted subcodes (e.g. "m114.1")
+// reduced to their base ("m114").
+var replyQueries = map[string]bool{
+	"m114": true, "m115": true, "m119": true, "m105": true,
+	"m503": true, // display live settings — pure read (M500 saves; not here)
+	"version": true, "model": true, "ftype": true,
+	"time": true, "echo": true, "mem": true, "diagnose": true,
+}
+
+// dollarQueries are the read-only grbl '$' commands. '$H' (home) and '$X'
+// (unlock) are intentionally absent: they change machine state.
+var dollarQueries = map[string]bool{
+	"$": true, "$$": true, "$#": true, "$g": true, "$i": true, "$n": true,
+}
+
+// dualNatureReporters REPORT state when given with no setting argument (and
+// then the firmware replies), but MUTATE state when given an argument (and then
+// it is silent). Examples verified/derived: M220 (feed override), M221 (flow),
+// M211 (soft-endstop enable + report), M204 (acceleration), M203 (max feed),
+// M206 (home offset), M301 (PID). With no arg they behave like a query (reply,
+// safe anytime); with an arg they behave like a mutating set (no reply, must be
+// idle). settingLetters are the parameter letters whose presence means "set".
+var dualNatureReporters = map[string]bool{
+	"m220": true, "m221": true, "m211": true, "m204": true,
+	"m203": true, "m206": true, "m301": true,
+}
+
+// normalizeLine lowercases, trims, and strips a leading "Nnnn" line number (the
+// controller and gcode senders may prefix one; the firmware strips it too in
+// GcodeDispatch before parsing). Returns the cleaned line.
+func normalizeLine(line string) string {
+	line = strings.TrimSpace(strings.ToLower(line))
+	if len(line) > 1 && line[0] == 'n' && line[1] >= '0' && line[1] <= '9' {
+		if i := strings.IndexAny(line, " \t"); i >= 0 {
+			line = strings.TrimSpace(line[i+1:])
+		}
+	}
+	return line
+}
+
+// firstToken returns the first whitespace-delimited token of a normalized line.
+func firstToken(line string) string {
+	tok := line
+	if i := strings.IndexAny(tok, " \t"); i >= 0 {
+		tok = tok[:i]
+	}
+	return tok
+}
+
+// hasSettingArg reports whether a dual-nature reporter line carries a setting
+// argument (making it a mutating "set" rather than a bare "report"). It looks
+// for any parameter word after the command token — i.e. a letter+value pair
+// such as "s150", "x640", "p20". A bare "m220" has none; "m220 s150" does.
+func hasSettingArg(line, tok string) bool {
+	rest := strings.TrimSpace(strings.TrimPrefix(line, tok))
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if c >= 'a' && c <= 'z' && i+1 < len(rest) {
+			n := rest[i+1]
+			if (n >= '0' && n <= '9') || n == '-' || n == '+' || n == '.' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ClassifyGcode reports how the firmware will respond to a CTRL_MULTI line and
+// whether the command must be idle-gated (run only on a fresh Idle machine).
+// It is the single source of truth for both decisions:
+//
+//   - resp == ReplyExpected: caller should read the prompt reply (ok / payload /
+//     output lines). resp == FireAndForget: caller writes and moves on.
+//   - requiresIdle == false: safe to inject regardless of machine state (pure
+//     reads). requiresIdle == true: motion/modal/SD-affecting; gate on Idle.
+//
+// The two axes are independent: a bare reporter (M220) is ReplyExpected and not
+// idle-gated; a motion command is FireAndForget and idle-gated; a dual-nature
+// SET (M220 S150) is FireAndForget and idle-gated.
+func ClassifyGcode(line string) (resp Response, requiresIdle bool) {
+	line = normalizeLine(line)
+	if line == "" {
+		return FireAndForget, true
+	}
+	tok := firstToken(line)
+
+	if strings.HasPrefix(tok, "$") {
+		if dollarQueries[tok] {
+			return ReplyExpected, false
+		}
+		return FireAndForget, true // $H, $X, etc.
+	}
+
+	base := tok
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i] // reduce a dotted subcode (m114.1) to its base (m114)
+	}
+
+	if replyQueries[base] {
+		return ReplyExpected, false
+	}
+	if dualNatureReporters[base] {
+		if hasSettingArg(line, tok) {
+			return FireAndForget, true // a "set": mutates, no reply
+		}
+		return ReplyExpected, false // a bare "report": replies, read-only
+	}
+	// Everything else — motion, modal sets, dwell, SD I/O, unknown — is silent
+	// and state-affecting.
+	return FireAndForget, true
+}
+
+// IsStatusQuery reports whether a console/gcode line is a read-only query safe
+// to inject regardless of machine state. Retained as a thin wrapper over
+// ClassifyGcode for callers that only care about the idle-gating axis.
+func IsStatusQuery(line string) bool {
+	_, requiresIdle := ClassifyGcode(line)
+	return !requiresIdle
+}

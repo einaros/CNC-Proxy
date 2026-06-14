@@ -187,6 +187,9 @@ func main() {
 	// Let owner-mode operations (sync engine, API) inject onto the controller's
 	// shared connection during relay mode, between the controller's transactions.
 	arb.SetInjector(injectorAdapter{relaySrv})
+	// And let realtime control (feed-hold/resume/halt) reach the machine
+	// out-of-band during relay mode, so an emergency halt works even mid-program.
+	arb.SetControlWriter(relaySrv)
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *tcpPort))
 	if err != nil {
 		log.Fatalf("cannot listen on tcp/%d: %v", *tcpPort, err)

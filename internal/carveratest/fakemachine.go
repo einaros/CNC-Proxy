@@ -24,6 +24,9 @@ type FakeMachine struct {
 	failCmd           map[string]bool   // command prefixes to fail (for error-path tests)
 	ftype             string            // advertised upload type ("lz" enables compression)
 	compressDownloads bool              // if set, downloads send a .lz container
+	gcodes            []string          // CTRL_MULTI gcode lines received (motion/MDI)
+	controls          []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
+	gcodeReplies      map[string]string // exact line -> "ok <payload>" reply (else bare "ok")
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when
@@ -38,11 +41,12 @@ func NewOn(addr string) (*FakeMachine, error) {
 		return nil, err
 	}
 	m := &FakeMachine{
-		ln:      ln,
-		files:   map[string][]byte{},
-		dirs:    map[string]bool{},
-		status:  "<Idle|MPos:0,0,0|WPos:0,0,0>",
-		failCmd: map[string]bool{},
+		ln:           ln,
+		files:        map[string][]byte{},
+		dirs:         map[string]bool{},
+		status:       "<Idle|MPos:0,0,0|WPos:0,0,0>",
+		failCmd:      map[string]bool{},
+		gcodeReplies: map[string]string{},
 	}
 	go m.serve()
 	return m, nil
@@ -100,6 +104,29 @@ func (m *FakeMachine) HasDir(path string) bool {
 	return m.dirs[path]
 }
 
+// Gcodes returns the CTRL_MULTI gcode/MDI lines the machine has received.
+func (m *FakeMachine) Gcodes() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.gcodes...)
+}
+
+// Controls returns the realtime control characters (!, ~, 0x18) received.
+func (m *FakeMachine) Controls() []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]byte(nil), m.controls...)
+}
+
+// SetGcodeReply makes the machine answer an exact gcode line with the given
+// reply (without trailing CRLF), e.g. "ok C: X:1.0" for an M114. Lines with no
+// configured reply get a bare "ok".
+func (m *FakeMachine) SetGcodeReply(line, reply string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gcodeReplies[line] = reply
+}
+
 func (m *FakeMachine) serve() {
 	for {
 		c, err := m.ln.Accept()
@@ -141,11 +168,22 @@ func (m *FakeMachine) handle(c net.Conn) {
 			for _, f := range scan.Push(buf[:n]) {
 				switch f.Cmd {
 				case protocol.CmdCtrlSingle:
-					if len(f.Data) == 1 && f.Data[0] == '?' {
-						m.mu.Lock()
-						s := m.status
-						m.mu.Unlock()
-						m.send(c, protocol.CmdStatusRes, s)
+					if len(f.Data) == 1 {
+						switch f.Data[0] {
+						case '?':
+							m.mu.Lock()
+							s := m.status
+							m.mu.Unlock()
+							m.send(c, protocol.CmdStatusRes, s)
+						case '!', '~', 0x18:
+							// Realtime control: record it so tests can assert it
+							// arrived. The firmware acts out-of-band and sends no
+							// reply (halt does emit an ALARM line, but we keep the
+							// fake minimal).
+							m.mu.Lock()
+							m.controls = append(m.controls, f.Data[0])
+							m.mu.Unlock()
+						}
 					}
 				case protocol.CmdCtrlMulti:
 					m.handleManaged(c, string(f.Data))
@@ -360,7 +398,51 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		m.dirs[path] = true
 		m.mu.Unlock()
 		m.send(c, protocol.CmdLoadFinish, "ok\r\n")
+	case isGcodeLine(line):
+		// Motion / MDI / console gcode. The firmware dispatches it and replies
+		// with NORMAL_INFO, not LOAD framing. Record it so tests can assert what
+		// reached the machine. Reply behavior mirrors hardware (verified on a
+		// real Carvera):
+		//   - read-only queries (M114, version, …) DO get a reply line, e.g.
+		//     "ok C: X:..." for M114 or "version = 1.0.5";
+		//   - motion / state-changing gcode (G0/G1, $H, …) gets NO reply at all —
+		//     the move just executes. The proxy must NOT wait for an "ok" on
+		//     these, so the fake stays silent unless a reply is explicitly set.
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		reply, ok := m.gcodeReplies[line]
+		m.mu.Unlock()
+		resp, _ := protocol.ClassifyGcode(line)
+		if ok {
+			m.send(c, protocol.CmdNormalInfo, reply+"\r\n")
+		} else if resp == protocol.ReplyExpected {
+			// A reply-expected command with no explicitly-configured reply still
+			// gets a bare ok, as the firmware answers these promptly.
+			m.send(c, protocol.CmdNormalInfo, "ok\r\n")
+		}
+		// Otherwise (fire-and-forget: motion/modal/dwell): silent, like hardware.
 	default:
 		m.send(c, protocol.CmdLoadError, "unknown\r\n")
 	}
+}
+
+// isGcodeLine reports whether a console line is a gcode/MDI command (G/M/T/S
+// codes, a grbl '$' command, an N-numbered line, or a console-word query the
+// firmware answers with NORMAL_INFO), as opposed to the filesystem/management
+// commands handled explicitly above. It mirrors the real firmware closely
+// enough that anything the proxy will send as CTRL_MULTI gets a NORMAL_INFO
+// reply rather than a LOAD_ERROR (which the client ignores, hanging to timeout).
+func isGcodeLine(line string) bool {
+	if line == "" {
+		return false
+	}
+	switch line[0] {
+	case 'G', 'M', 'T', 'S', '$', 'g', 'm', 't', 's', 'N', 'n':
+		return true
+	}
+	// Console-word queries (version, model, ftype, time, echo, mem, diagnose).
+	if protocol.IsStatusQuery(line) {
+		return true
+	}
+	return false
 }

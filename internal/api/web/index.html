@@ -54,6 +54,9 @@
   .job:last-child { border-bottom: 0; }
   .job-kind { color: var(--accent); font-weight: 650; }
   #console { background: var(--panel); border: 1px solid var(--border); }
+  #controls { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
+  #controls button.danger { border-color: rgba(232,106,95,.5); color: var(--err); }
+  #controls button.danger:hover { border-color: var(--err); }
   #gcode-log { height: 240px; overflow-y: auto; padding: 10px 12px; margin: 0; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
   #gcode-log .send { color: var(--accent); }
   #gcode-log .recv { color: var(--text); }
@@ -100,6 +103,11 @@
 
   <h2>Gcode Console</h2>
   <div id="console">
+    <div id="controls">
+      <button type="button" id="ctl-hold" title="Feed hold — pause motion">⏸ Hold</button>
+      <button type="button" id="ctl-resume" title="Resume from feed hold">▶ Resume</button>
+      <button type="button" id="ctl-halt" class="danger" title="Emergency stop (halt)">⏹ Halt</button>
+    </div>
     <pre id="gcode-log"></pre>
     <form id="gcode-form">
       <input id="gcode-input" type="text" placeholder="Send gcode or console command" autocomplete="off" spellcheck="false">

@@ -86,10 +86,31 @@ Known firmware quirks (verified on hardware, don't "fix" symptoms of these):
 - Firmware does NOT verify CRC on receive; the controller DOES.
 - `md5sum` has no LOAD framing and doesn't parse `-e`; replies NORMAL_INFO.
 - Console commands like `version` produce output but no `ok` (socket may EOF).
-- Sending a bare motion gcode (G4/M400) as CTRL_MULTI resets the connection —
-  even without the proxy. Injected gcode is informational/query only.
+- A blocking motion gcode (G4 dwell, M400, a long G0/G1) produces no output
+  until it finishes. The firmware's WiFi TCP server auto-disconnects a client
+  that is silent for ~10s (`tcp_timeout_s`, default 10), so a naive
+  "send then block on ok" reset the connection (the old EOF). `client.SendGcode`
+  now polls `?` every 2s while waiting (mirroring how the official controller
+  keeps polling during MDI), which keeps the socket alive through long moves.
+  Injected gcode is therefore NOT limited to queries — any command works, but
+  motion/state-changing commands are idle-gated (see below).
 - Immediately md5sum-ing after an upload races the firmware's cache flush;
   post-upload verification is intentionally non-fatal.
+
+Injection & control model (both modes — proxy alone OR with controller attached):
+- **gcode/MDI** (`service.SendGcode`): read-only queries (`protocol.IsStatusQuery`
+  — M114/M115/M119, version/model/ftype, `$`/`$G`/…, N-number tolerated) run
+  regardless of state; everything else is idle-gated via
+  `WithMachine(requireIdle)` and returns ErrNotIdle (HTTP 503, retryable) while a
+  program runs — so the proxy can never disturb a controller-driven job. The
+  tracker reflects controller-driven Run state via sniffed STATUS_RES.
+- **realtime control** `!`/`~`/0x18 (`service.SendControl` → `arbiter.SendControl`)
+  is OUT-OF-BAND: it does NOT take `opMu`, so an emergency halt preempts an
+  in-flight blocking move instead of queuing behind it (a CTRL_SINGLE frame is
+  one atomic socket write the firmware acts on from its receive path). Owner mode
+  writes the live owner conn (dialing if needed); relay mode delegates to the
+  relay's `SendControl`, which writes the shared machine socket without taking
+  the injection window. `POST /api/control {action: hold|resume|halt}`.
 
 ## Engineering practices in force
 

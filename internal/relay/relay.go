@@ -90,6 +90,25 @@ func (s *Server) AcquireMachine() (InjectTransport, func(), error) {
 	return it, release, nil
 }
 
+// SendControl writes a single realtime control character (CTRL_SINGLE) straight
+// to the shared machine socket, out-of-band — without taking the injection
+// window. The firmware acts on '!'/'~'/0x18 immediately from its receive path
+// regardless of any in-flight transaction, so this lets an emergency halt
+// preempt even a controller program. Returns ErrNoSession if no controller (and
+// thus no machine connection) is currently active. The injected control byte is
+// the proxy's own; the controller's responses are unaffected (the firmware
+// sends no reply to these, save an ALARM line on halt which flows to the
+// controller as normal and correctly reflects the new machine state).
+func (s *Server) SendControl(c byte) error {
+	s.mu.Lock()
+	m := s.curMux
+	s.mu.Unlock()
+	if m == nil {
+		return ErrNoSession
+	}
+	return m.writeControl(c)
+}
+
 // Serve accepts connections on ln and relays each to the machine. It returns
 // when ln is closed.
 func (s *Server) Serve(ln net.Listener) error {
@@ -243,15 +262,10 @@ func (s *Server) logControllerCommand(f protocol.Frame) {
 		if len(f.Data) != 1 {
 			return
 		}
-		switch f.Data[0] {
-		case '!':
-			s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, "! (feed hold)")
-		case '~':
-			s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, "~ (resume)")
-		case 0x18:
-			s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, "^X (halt)")
+		// '?' status polls are deliberately not logged; other control chars are.
+		if label, ok := protocol.ControlLabel(f.Data[0]); ok {
+			s.GcodeLog.Append(gcodelog.DirSend, gcodelog.SourceController, label)
 		}
-		// '?' status polls are deliberately not logged.
 	}
 }
 

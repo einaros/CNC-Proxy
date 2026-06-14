@@ -207,3 +207,63 @@ func TestConnDroppedOnError(t *testing.T) {
 		t.Error("expected a fresh connection after an error")
 	}
 }
+
+// TestSendControlPreemptsBlockingOp is the safety test for the fix: a realtime
+// control character must reach the machine WITHOUT waiting on opMu, so an
+// emergency halt is not queued behind an in-flight blocking gcode that holds
+// the transaction lock for its whole (potentially minutes-long) duration.
+func TestSendControlPreemptsBlockingOp(t *testing.T) {
+	addr := miniMachine(t, func() string { return "<Idle>" })
+	tr := machine.NewTracker()
+	tr.Observe(machine.Idle)
+	a := newArbiter(t, addr, tr)
+
+	// Occupy opMu with a long-running WithMachine callback, as a blocking move
+	// would. It must NOT block SendControl.
+	started := make(chan struct{})
+	releaseOp := make(chan struct{})
+	go func() {
+		a.WithMachine(false, func(*client.Conn) error {
+			close(started)
+			<-releaseOp
+			return nil
+		})
+	}()
+	<-started
+
+	done := make(chan error, 1)
+	go func() { done <- a.SendControl(protocol.CtrlHalt) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SendControl while op holds opMu: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendControl blocked behind the in-flight op — emergency halt cannot preempt")
+	}
+	close(releaseOp)
+}
+
+// TestSendControlRelayUsesControlWriter confirms relay-mode control delegates to
+// the out-of-band control writer rather than the injector (which would block on
+// a controller transaction).
+func TestSendControlRelayUsesControlWriter(t *testing.T) {
+	addr := miniMachine(t, func() string { return "<Idle>" })
+	tr := machine.NewTracker()
+	tr.Observe(machine.Idle)
+	cw := &fakeControlWriter{}
+	a := New(Config{Tracker: tr, Dial: func() (*client.Conn, error) { return client.Dial(addr, time.Second) }})
+	a.SetControlWriter(cw)
+	a.EnterRelay()
+
+	if err := a.SendControl(protocol.CtrlFeedHold); err != nil {
+		t.Fatalf("relay SendControl: %v", err)
+	}
+	if len(cw.got) != 1 || cw.got[0] != protocol.CtrlFeedHold {
+		t.Errorf("control writer got %v, want [!]", cw.got)
+	}
+}
+
+type fakeControlWriter struct{ got []byte }
+
+func (f *fakeControlWriter) SendControl(c byte) error { f.got = append(f.got, c); return nil }

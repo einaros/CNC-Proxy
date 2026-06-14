@@ -36,6 +36,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.getJobs)
 	mux.HandleFunc("POST /api/gcode", s.postGcode)      // body: {line}
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog) // recent gcode I/O lines
+	mux.HandleFunc("POST /api/control", s.postControl)  // body: {action: hold|resume|halt}
 	mux.HandleFunc("GET /api/events", s.events)
 	// Everything not under /api/ is the embedded web UI.
 	mux.Handle("/", webHandler())
@@ -198,6 +199,37 @@ func (s *Server) postGcode(w http.ResponseWriter, r *http.Request) {
 // can backfill history before following the live SSE stream.
 func (s *Server) getGcodeLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.GcodeLog().Recent())
+}
+
+// postControl injects a realtime control action: feed-hold, resume, or halt.
+// These are out-of-band and intentionally work even while the machine is
+// moving (including a controller-driven program), so the proxy can always pause
+// or emergency-stop.
+func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	var c byte
+	switch body.Action {
+	case "hold", "feedhold", "pause":
+		c = service.ControlFeedHold
+	case "resume":
+		c = service.ControlResume
+	case "halt", "stop", "estop":
+		c = service.ControlHalt
+	default:
+		writeErr(w, http.StatusBadRequest, "action must be one of: hold, resume, halt")
+		return
+	}
+	if err := s.svc.SendControl(c); err != nil {
+		s.mapError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // events streams catalog/job/machine changes as Server-Sent Events.

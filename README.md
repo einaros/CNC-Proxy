@@ -114,10 +114,18 @@ Then:
 - Web UI: <http://127.0.0.1:8420/>
 - API: `POST /api/files?path=part.nc` (raw body or multipart), `GET /api/files`,
   `DELETE /api/files/{path}`, `POST /api/files/rename`, `GET /api/machine`,
-  `GET /api/jobs`, `POST /api/gcode` (body `{"line":"M114"}`), `GET
-  /api/gcode/log` (recent gcode I/O), `GET /api/events` (SSE: catalog/job
-  changes plus all gcode I/O — both API-submitted and controller traffic
-  observed by the relay).
+  `GET /api/jobs`, `POST /api/gcode` (body `{"line":"G0 X10"}`), `POST
+  /api/control` (body `{"action":"hold|resume|halt"}`), `GET /api/gcode/log`
+  (recent gcode I/O), `GET /api/events` (SSE: catalog/job changes plus all gcode
+  I/O — both API-submitted and controller traffic observed by the relay).
+  - **Injecting gcode** works whether the proxy runs alone (owner mode) or with
+    the official controller attached (relay mode — injected between the
+    controller's transactions). Read-only queries (`M114`, `M115`, `version`,
+    `$G`, …) run any time; motion and other state-changing commands require the
+    machine to be Idle and return **503** while a program runs, so the proxy can
+    never disturb a controller-driven job. Realtime control (`hold`/`resume`/
+    `halt`) is out-of-band and always works, even mid-move — use `halt` as an
+    emergency stop.
 - WebDAV mount: macOS Finder → Go → Connect to Server → `http://127.0.0.1:8421/`;
   Windows → Map network drive; Linux → `davs?://…` in the file manager.
 

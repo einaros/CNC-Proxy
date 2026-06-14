@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
@@ -103,6 +104,75 @@ func TestInjectionIsolatesResponses(t *testing.T) {
 		if cmd == protocol.CmdLoadInfo || cmd == protocol.CmdLoadFinish || cmd == protocol.CmdLoadError {
 			t.Errorf("controller wrongly received injected LOAD frame cmd=%#x", cmd)
 		}
+	}
+}
+
+// TestInjectionMotionDoesNotLeakToController is the safety test for injecting a
+// motion command while a controller is connected. Motion is fire-and-forget:
+// the firmware sends no reply, so the injected command produces no NORMAL_INFO
+// frame — and even if it did (e.g. an error line), it must be diverted to the
+// injector and never leak to the controller, whose ok-accounting would corrupt.
+// The injected send must also return promptly (not block), so the injection
+// window releases and the controller's traffic resumes.
+func TestInjectionMotionDoesNotLeakToController(t *testing.T) {
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd == protocol.CmdCtrlSingle && len(f.Data) == 1 && f.Data[0] == '?' {
+			c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Run|MPos:0,0,0>")))
+		}
+		// CTRL_MULTI motion: the firmware is silent, like real hardware.
+	}
+	srv, addr := startRelay(t, m)
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	drainController(controller)
+	controller.Write(protocol.QueryStatus())
+	time.Sleep(150 * time.Millisecond)
+
+	it, release, err := srv.AcquireMachine()
+	if err != nil {
+		t.Fatalf("AcquireMachine: %v", err)
+	}
+	defer release()
+
+	// Watch the controller for any leaked injected output.
+	go func() {
+		var sc protocol.Scanner
+		buf := make([]byte, 4096)
+		for {
+			controller.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := controller.Read(buf)
+			for _, f := range sc.Push(buf[:n]) {
+				if f.Cmd == protocol.CmdNormalInfo {
+					t.Errorf("controller wrongly received injected NORMAL_INFO: %q", f.Data)
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Drive a motion command over the injector via the real client. It must
+	// return promptly (fire-and-forget), not block waiting for an ack.
+	conn := client.NewTransport(it)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.SendGcodeLine("G91 G0 X-10", client.GcodeOpts{
+			ExpectReply: false,
+			Settle:      200 * time.Millisecond,
+			Cap:         2 * time.Second,
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("injected motion command did not return promptly")
 	}
 }
 

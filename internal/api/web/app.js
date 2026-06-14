@@ -253,6 +253,21 @@ async function sendGcode(line) {
   }
 }
 
+// sendControl injects a realtime control action (hold/resume/halt). The action
+// and any error are echoed via the gcode log/SSE stream, so we only surface a
+// transport/HTTP failure locally.
+async function sendControl(action) {
+  try {
+    await request("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+  }
+}
+
 function applySnapshot(snap) {
   state.machine = snap.machine || state.machine;
   state.files = new Map((snap.files || []).map((f) => [f.path, f]));
@@ -321,6 +336,12 @@ function init() {
     if (!line) return;
     gcodeInput.value = "";
     sendGcode(line);
+  };
+
+  document.getElementById("ctl-hold").onclick = () => sendControl("hold");
+  document.getElementById("ctl-resume").onclick = () => sendControl("resume");
+  document.getElementById("ctl-halt").onclick = () => {
+    if (confirm("Emergency halt the machine? This stops all motion and enters Alarm.")) sendControl("halt");
   };
 
   connectSSE();

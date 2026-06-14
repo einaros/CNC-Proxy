@@ -11,8 +11,12 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
+	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/httpauth"
+	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -237,6 +241,105 @@ func TestWebUIServed(t *testing.T) {
 	js.Body.Close()
 	if js.StatusCode != http.StatusOK || !strings.Contains(string(jsBody), "EventSource") {
 		t.Errorf("app.js status=%d", js.StatusCode)
+	}
+}
+
+// serverWithMachine wires the API to a real fake machine + tracker so gcode and
+// control endpoints can be exercised end to end with controllable state.
+func serverWithMachine(t *testing.T) (*httptest.Server, *carveratest.FakeMachine, *machine.Tracker) {
+	t.Helper()
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(svc).Handler())
+	t.Cleanup(srv.Close)
+	return srv, m, tr
+}
+
+func postJSON(t *testing.T, url string, body any) *http.Response {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	return do(t, req)
+}
+
+func TestPostGcodeMotionGatedByState(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+
+	// Running: a motion command is rejected with 503 and never reaches the machine.
+	tr.Observe(machine.Run)
+	resp := postJSON(t, srv.URL+"/api/gcode", map[string]string{"line": "G91 G0 X-10"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("motion during Run: status = %d, want 503", resp.StatusCode)
+	}
+	if g := m.Gcodes(); len(g) != 0 {
+		t.Fatalf("motion leaked to machine: %v", g)
+	}
+
+	// Idle: accepted.
+	tr.Observe(machine.Idle)
+	resp2 := postJSON(t, srv.URL+"/api/gcode", map[string]string{"line": "G91 G0 X-10"})
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("motion during Idle: status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+func TestPostGcodeQueryNotGated(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	m.SetGcodeReply("M114", "ok C: X:1.0")
+	tr.Observe(machine.Run) // still running
+
+	resp := postJSON(t, srv.URL+"/api/gcode", map[string]string{"line": "M114"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("query during Run: status = %d, want 200", resp.StatusCode)
+	}
+	var out map[string]string
+	json.NewDecoder(resp.Body).Decode(&out)
+	if out["output"] != "C: X:1.0" {
+		t.Errorf("output = %q", out["output"])
+	}
+}
+
+func TestPostControl(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	tr.Observe(machine.Run) // control works even while running
+
+	for _, action := range []string{"hold", "resume", "halt"} {
+		resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": action})
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("control %q: status = %d, want 202", action, resp.StatusCode)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(m.Controls()) < 3 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := m.Controls(); len(got) != 3 || got[0] != '!' || got[1] != '~' || got[2] != 0x18 {
+		t.Errorf("controls = %v, want [! ~ 0x18]", got)
+	}
+
+	// Unknown action → 400.
+	resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": "wiggle"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("unknown action: status = %d, want 400", resp.StatusCode)
 	}
 }
 
