@@ -240,8 +240,17 @@ func TestStatusReflectsArbiter(t *testing.T) {
 	if st.Mode != "owner" {
 		t.Errorf("mode = %q, want owner", st.Mode)
 	}
+	if !st.Reconnecting {
+		t.Error("owner mode with no fresh status should report reconnecting")
+	}
+	if !svc.arb.Tracker().ObserveStatusPayload("<Idle|MPos:0,0,0|WPos:0,0,0>") {
+		t.Fatal("status should parse")
+	}
+	if st := svc.Status(); st.Reconnecting || st.Stale {
+		t.Errorf("fresh owner status should not reconnect/stale: %+v", st)
+	}
 	svc.arb.EnterRelay()
-	if svc.Status().Mode != "relay" {
+	if st := svc.Status(); st.Mode != "relay" || st.Reconnecting {
 		t.Error("expected relay mode after EnterRelay")
 	}
 	_ = time.Now

@@ -259,6 +259,29 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="tab-files"`) || !strings.Contains(string(body), `id="control-view"`) {
 		t.Errorf("index missing lazy tab markup")
 	}
+	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
+		t.Errorf("index missing jog visualization or connection status")
+	}
+	for _, want := range []string{`id="status-fields"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing %s", want)
+		}
+	}
+	for _, want := range []string{`id="file-browser"`, `id="folder-tree"`, `id="breadcrumbs"`, `id="folder-up"`, `id="folder-new"`, `id="current-folder"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing %s", want)
+		}
+	}
+	for _, want := range []string{`id="macro-toolbar"`, `id="macro-panel"`, `id="macro-manager"`, `id="macro-save"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing %s", want)
+		}
+	}
+	for _, want := range []string{`id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`, `id="jog-buttons"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing %s", want)
+		}
+	}
 
 	js := get(t, srv.URL+"/app.js")
 	jsBody, _ := io.ReadAll(js.Body)
@@ -268,6 +291,118 @@ func TestWebUIServed(t *testing.T) {
 	}
 	if !strings.Contains(string(jsBody), "/api/events?scope=control") || !strings.Contains(string(jsBody), "/api/events?scope=files") {
 		t.Errorf("app.js missing scoped event streams")
+	}
+	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "/api/machine/status") {
+		t.Errorf("app.js missing jog plot or cache-only status polling")
+	}
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderStatusFields", "renderFileSummary", "lineMatchesFilter"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing %s", want)
+		}
+	}
+	for _, want := range []string{"directoryRows", "renderFolderTree", "renderFolderChrome", "openDir", "doMkdir", "joinRelPath"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing %s", want)
+		}
+	}
+	for _, want := range []string{"loadUISettings", "saveUISettings", "renderMacroButtons", "runMacro", "/api/ui/settings"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing %s", want)
+		}
+	}
+	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "pressedButtonList"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing %s", want)
+		}
+	}
+}
+
+func TestUISettingsAPI(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	resp := get(t, srv.URL+"/api/ui/settings")
+	var initial store.UISettings
+	json.NewDecoder(resp.Body).Decode(&initial)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || initial.Log.Filter != "all" || !initial.Log.Autoscroll {
+		t.Fatalf("initial settings status=%d value=%+v", resp.StatusCode, initial)
+	}
+	if initial.Macros == nil || initial.MacroButtons == nil || initial.Gamepad.SlowButtons == nil || initial.Gamepad.MacroButtons == nil {
+		t.Fatalf("initial settings should use empty arrays, got %+v", initial)
+	}
+	if initial.Gamepad.Axes.Y.Axis != 1 || !initial.Gamepad.Axes.Y.Invert || initial.Gamepad.Axes.Z.Axis != 3 {
+		t.Fatalf("initial gamepad defaults = %+v", initial.Gamepad)
+	}
+
+	body := `{
+		"macros":[{"id":"m1","name":"Probe","lines":["G38.2 Z-5 F50","G10 L20 P1 Z0"],"color":"#44c27b"}],
+		"macro_buttons":[{"id":"b1","macro_id":"m1","region":"toolbar","order":2}],
+		"log":{"filter":"jog","autoscroll":false},
+		"gamepad":{
+			"axes":{
+				"x":{"axis":2,"invert":false,"scale":0.5},
+				"y":{"axis":1,"invert":false,"scale":0.75},
+				"z":{"axis":3,"invert":true,"scale":0.25}
+			},
+			"deadman_button":7,
+			"slow_buttons":[6],
+			"macro_buttons":[{"id":"gp1","button":1,"macro_id":"m1"}]
+		}
+	}`
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp = do(t, req)
+	var saved store.UISettings
+	json.NewDecoder(resp.Body).Decode(&saved)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(saved.Macros) != 1 || len(saved.MacroButtons) != 1 {
+		t.Fatalf("saved settings status=%d value=%+v", resp.StatusCode, saved)
+	}
+	if saved.Log.Filter != "jog" || saved.Log.Autoscroll {
+		t.Fatalf("saved log settings = %+v", saved.Log)
+	}
+	if saved.Gamepad.Axes.X.Axis != 2 || saved.Gamepad.Axes.X.Scale != 0.5 || saved.Gamepad.DeadmanButton != 7 {
+		t.Fatalf("saved gamepad settings = %+v", saved.Gamepad)
+	}
+	if len(saved.Gamepad.MacroButtons) != 1 || saved.Gamepad.MacroButtons[0].Button != 1 {
+		t.Fatalf("saved gamepad macro buttons = %+v", saved.Gamepad.MacroButtons)
+	}
+
+	resp = get(t, srv.URL+"/api/ui/settings")
+	var got store.UISettings
+	json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	if len(got.Macros) != 1 || got.Macros[0].Name != "Probe" || got.MacroButtons[0].Region != "toolbar" {
+		t.Fatalf("round trip settings = %+v", got)
+	}
+	if got.Gamepad.Axes.Z.Scale != 0.25 || len(got.Gamepad.SlowButtons) != 1 || got.Gamepad.SlowButtons[0] != 6 {
+		t.Fatalf("round trip gamepad settings = %+v", got.Gamepad)
+	}
+}
+
+func TestUISettingsAPIRejectsInvalidMacro(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(`{"macros":[{"id":"bad","name":"Bad","lines":["   "]}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestUISettingsAPIRejectsInvalidGamepad(t *testing.T) {
+	srv, _ := newTestServer(t)
+	body := `{
+		"macros":[{"id":"m1","name":"Position","lines":["M114"]}],
+		"gamepad":{"axes":{"x":{"axis":99,"scale":1}}}
+	}`
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 }
 

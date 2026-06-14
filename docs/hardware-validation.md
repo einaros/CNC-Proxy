@@ -57,19 +57,33 @@ Carvera, official controller, LAN discovery, and WebDAV clients.
    fresh Idle state and parsed `MPos`.
 2. Connect a browser-supported gamepad. Arm jogging in the UI, hold the deadman
    button, and jog small XYZ moves at slow speed first.
-3. Release the deadman and confirm motion stops within the configured timeout.
-4. While jogging, press Halt in the UI and confirm the machine halts promptly.
-5. Confirm `$G` or the controller's modal display still reports the expected
+3. Confirm the XY movement plot, lead readout, `MPos`, and `WPos` update while
+   jogging.
+4. Confirm source `jog` motion entries appear in the live gcode log without
+   flooding it during continuous movement.
+5. Create a read-only gcode macro such as `M114`, assign it to the toolbar,
+   restart the proxy, and confirm the macro button and log preferences persist.
+6. In Gamepad Settings, change one axis speed scale, set the deadman/slow
+   buttons, and bind a gamepad button to the `M114` macro. Restart the proxy and
+   confirm all gamepad settings persist.
+7. Arm jog, hold the deadman, press the bound gamepad macro button once, and
+   confirm exactly one macro execution goes through the normal gcode console
+   path and appears in the live log.
+8. Release the deadman and confirm motion stops within the configured timeout.
+9. While jogging, press Halt in the UI and confirm the machine halts promptly.
+10. Confirm `$G` or the controller's modal display still reports the expected
    distance mode after jogging; jog commands must not leave the machine in
    relative mode.
-6. Connect the official controller through the proxy, wait for relay mode and
+11. Disconnect the fake/real machine path in owner mode and confirm the status
+   panel reports reconnecting/stale, then restores after the machine returns.
+12. Connect the official controller through the proxy, wait for relay mode and
    Idle, then repeat a short jog. Confirm the controller remains connected and
    receives status responses.
-7. Start a controller-run job or otherwise make the machine non-Idle. Confirm
+13. Start a controller-run job or otherwise make the machine non-Idle. Confirm
    arming jog is rejected and no jog command reaches the machine.
-8. Start a controller file transfer and confirm arming jog is rejected or an
+14. Start a controller file transfer and confirm arming jog is rejected or an
    active jog lease aborts before controller file frames continue.
-9. Record observed status latency, jog responsiveness, and any controller log
+15. Record observed status latency, jog responsiveness, and any controller log
    anomalies.
 
 ## Reconcile And Durability

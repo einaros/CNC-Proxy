@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +22,7 @@ type Store struct {
 	entries map[string]*Entry // keyed by Path
 	jobs    []*Job
 	nextJob int64
+	ui      UISettings
 	subs    map[int]chan Event
 	nextSub int
 }
@@ -36,6 +38,7 @@ type persisted struct {
 	Entries map[string]*Entry `json:"entries"`
 	Jobs    []*Job            `json:"jobs"`
 	NextJob int64             `json:"next_job"`
+	UI      *UISettings       `json:"ui,omitempty"`
 }
 
 // Open loads a store from path, creating an empty one if the file is absent.
@@ -46,6 +49,7 @@ func Open(path string) (*Store, error) {
 		entries: map[string]*Entry{},
 		subs:    map[int]chan Event{},
 		nextJob: 1,
+		ui:      defaultUISettings(),
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -65,6 +69,9 @@ func Open(path string) (*Store, error) {
 	if p.NextJob > 0 {
 		s.nextJob = p.NextJob
 	}
+	if p.UI != nil {
+		s.ui = normalizeUISettings(*p.UI, s.now())
+	}
 	return s, nil
 }
 
@@ -77,7 +84,7 @@ func (s *Store) flushLocked() error {
 	if s.path == "" {
 		return nil // in-memory only (tests)
 	}
-	p := persisted{Entries: s.entries, Jobs: s.jobs, NextJob: s.nextJob}
+	p := persisted{Entries: s.entries, Jobs: s.jobs, NextJob: s.nextJob, UI: &s.ui}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
@@ -333,8 +340,213 @@ func (s *Store) PruneDoneJobs(olderThan time.Duration) error {
 	return s.flushLocked()
 }
 
+// UISettings returns a copy of the durable operator UI settings.
+func (s *Store) UISettings() UISettings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return copyUISettings(s.ui)
+}
+
+// SetUISettings replaces the durable operator UI settings.
+func (s *Store) SetUISettings(ui UISettings) (UISettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ui = normalizeUISettings(ui, s.now())
+	if err := s.flushLocked(); err != nil {
+		return UISettings{}, err
+	}
+	return copyUISettings(s.ui), nil
+}
+
 // CacheDir returns the directory where cached file contents should live,
 // alongside the store file.
 func (s *Store) CacheDir() string {
 	return filepath.Join(filepath.Dir(s.path), "cache")
+}
+
+func normalizeUISettings(in UISettings, now time.Time) UISettings {
+	out := UISettings{
+		Macros:       []Macro{},
+		MacroButtons: []MacroSlot{},
+		Log: LogSettings{
+			Filter:     in.Log.Filter,
+			Autoscroll: in.Log.Autoscroll,
+		},
+	}
+	if out.Log.Filter == "" {
+		out.Log.Filter = "all"
+	}
+	seenMacros := map[string]bool{}
+	for i, m := range in.Macros {
+		if m.ID == "" {
+			m.ID = fmt.Sprintf("macro-%d", i+1)
+		}
+		if seenMacros[m.ID] {
+			continue
+		}
+		seenMacros[m.ID] = true
+		m.Lines = compactLines(m.Lines)
+		if m.CreatedAt.IsZero() {
+			m.CreatedAt = now
+		}
+		if m.UpdatedAt.IsZero() {
+			m.UpdatedAt = now
+		}
+		out.Macros = append(out.Macros, m)
+	}
+	seenSlots := map[string]bool{}
+	seenSlotMacros := map[string]bool{}
+	for i, slot := range in.MacroButtons {
+		if slot.MacroID == "" || !seenMacros[slot.MacroID] {
+			continue
+		}
+		if seenSlotMacros[slot.MacroID] {
+			continue
+		}
+		if slot.ID == "" {
+			slot.ID = fmt.Sprintf("slot-%d", i+1)
+		}
+		if seenSlots[slot.ID] {
+			continue
+		}
+		seenSlots[slot.ID] = true
+		seenSlotMacros[slot.MacroID] = true
+		if slot.Region != "toolbar" && slot.Region != "panel" {
+			slot.Region = "panel"
+		}
+		out.MacroButtons = append(out.MacroButtons, slot)
+	}
+	sort.SliceStable(out.MacroButtons, func(i, j int) bool {
+		if out.MacroButtons[i].Region != out.MacroButtons[j].Region {
+			return out.MacroButtons[i].Region < out.MacroButtons[j].Region
+		}
+		return out.MacroButtons[i].Order < out.MacroButtons[j].Order
+	})
+	out.Gamepad = normalizeGamepadSettings(in.Gamepad, seenMacros)
+	return out
+}
+
+func defaultUISettings() UISettings {
+	return UISettings{
+		Macros:       []Macro{},
+		MacroButtons: []MacroSlot{},
+		Log:          LogSettings{Filter: "all", Autoscroll: true},
+		Gamepad:      defaultGamepadSettings(),
+	}
+}
+
+func defaultGamepadSettings() Gamepad {
+	return Gamepad{
+		Axes: GamepadAxes{
+			X: GamepadAxis{Axis: 0, Scale: 1},
+			Y: GamepadAxis{Axis: 1, Invert: true, Scale: 1},
+			Z: GamepadAxis{Axis: 3, Invert: true, Scale: 1},
+		},
+		DeadmanButton: 0,
+		SlowButtons:   []int{4, 5},
+		MacroButtons:  []GamepadMacroButton{},
+	}
+}
+
+func normalizeGamepadSettings(in Gamepad, macros map[string]bool) Gamepad {
+	d := defaultGamepadSettings()
+	out := Gamepad{
+		Axes: GamepadAxes{
+			X: normalizeGamepadAxis(in.Axes.X, d.Axes.X),
+			Y: normalizeGamepadAxis(in.Axes.Y, d.Axes.Y),
+			Z: normalizeGamepadAxis(in.Axes.Z, d.Axes.Z),
+		},
+		DeadmanButton: normalizeGamepadButton(in.DeadmanButton, d.DeadmanButton),
+		MacroButtons:  []GamepadMacroButton{},
+	}
+	if in.SlowButtons == nil {
+		out.SlowButtons = append([]int(nil), d.SlowButtons...)
+	} else {
+		seen := map[int]bool{}
+		for _, btn := range in.SlowButtons {
+			if btn < 0 || btn > 63 || seen[btn] {
+				continue
+			}
+			seen[btn] = true
+			out.SlowButtons = append(out.SlowButtons, btn)
+		}
+	}
+	seenMacroButtons := map[string]bool{}
+	seenButtons := map[int]bool{}
+	for i, binding := range in.MacroButtons {
+		if binding.MacroID == "" || !macros[binding.MacroID] || binding.Button < 0 || binding.Button > 63 || seenButtons[binding.Button] {
+			continue
+		}
+		if binding.ID == "" {
+			binding.ID = fmt.Sprintf("gamepad-macro-%d", i+1)
+		}
+		if seenMacroButtons[binding.ID] {
+			continue
+		}
+		seenMacroButtons[binding.ID] = true
+		seenButtons[binding.Button] = true
+		out.MacroButtons = append(out.MacroButtons, binding)
+	}
+	sort.SliceStable(out.MacroButtons, func(i, j int) bool {
+		return out.MacroButtons[i].Button < out.MacroButtons[j].Button
+	})
+	return out
+}
+
+func normalizeGamepadAxis(in, def GamepadAxis) GamepadAxis {
+	if in.Axis == 0 && !in.Invert && in.Scale == 0 {
+		return def
+	}
+	if in.Scale <= 0 {
+		in.Scale = def.Scale
+	}
+	if in.Scale > 1 {
+		in.Scale = 1
+	}
+	if in.Axis < 0 {
+		in.Axis = def.Axis
+	}
+	return in
+}
+
+func normalizeGamepadButton(in, def int) int {
+	if in < 0 || in > 63 {
+		return def
+	}
+	return in
+}
+
+func compactLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln != "" {
+			out = append(out, ln)
+		}
+	}
+	return out
+}
+
+func copyUISettings(in UISettings) UISettings {
+	out := in
+	out.Macros = append([]Macro(nil), in.Macros...)
+	if out.Macros == nil {
+		out.Macros = []Macro{}
+	}
+	for i := range out.Macros {
+		out.Macros[i].Lines = append([]string(nil), in.Macros[i].Lines...)
+	}
+	out.MacroButtons = append([]MacroSlot(nil), in.MacroButtons...)
+	if out.MacroButtons == nil {
+		out.MacroButtons = []MacroSlot{}
+	}
+	out.Gamepad.SlowButtons = append([]int(nil), in.Gamepad.SlowButtons...)
+	if out.Gamepad.SlowButtons == nil {
+		out.Gamepad.SlowButtons = []int{}
+	}
+	out.Gamepad.MacroButtons = append([]GamepadMacroButton(nil), in.Gamepad.MacroButtons...)
+	if out.Gamepad.MacroButtons == nil {
+		out.Gamepad.MacroButtons = []GamepadMacroButton{}
+	}
+	return out
 }

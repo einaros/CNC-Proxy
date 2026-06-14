@@ -24,6 +24,7 @@ const (
 const (
 	SourceController = "controller" // official controller traffic, via the relay
 	SourceAPI        = "api"        // proxy API (web console) traffic
+	SourceJog        = "jog"        // proxy-generated gamepad jog motion/control
 )
 
 // Line is one logged gcode I/O line.

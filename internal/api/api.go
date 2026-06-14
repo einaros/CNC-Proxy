@@ -52,6 +52,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gcode", s.postGcode)      // body: {line}
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog) // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)  // body: {action: hold|resume|halt}
+	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
+	mux.HandleFunc("PUT /api/ui/settings", s.putUISettings)
 	mux.HandleFunc("GET /api/jog/capabilities", s.getJogCapabilities)
 	mux.HandleFunc("GET /api/jog/ws", s.jogWS)
 	mux.HandleFunc("GET /api/events", s.events)
@@ -216,6 +218,24 @@ func (s *Server) postGcode(w http.ResponseWriter, r *http.Request) {
 // can backfill history before following the live SSE stream.
 func (s *Server) getGcodeLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.GcodeLog().Recent())
+}
+
+func (s *Server) getUISettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.svc.UISettings())
+}
+
+func (s *Server) putUISettings(w http.ResponseWriter, r *http.Request) {
+	var body store.UISettings
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	ui, err := s.svc.SetUISettings(body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ui)
 }
 
 // postControl injects a realtime control action: feed-hold, resume, or halt.

@@ -28,10 +28,19 @@
   .tab { border-bottom: 0; border-radius: 6px 6px 0 0; padding: 7px 12px; }
   .tab.active { color: var(--accent); border-color: var(--accent); background: var(--panel); }
   .view[hidden] { display: none; }
+  details { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; }
+  summary { cursor: pointer; color: var(--muted); padding: 8px 10px; font-weight: 650; }
+  .detail-body { border-top: 1px solid var(--border); padding: 10px; display: grid; gap: 10px; }
+  #status-raw { margin: 0; padding: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #status-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; }
+  .field { display: flex; justify-content: space-between; gap: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; min-width: 0; }
+  .field .key { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .field .val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
   #drop { flex: 1; border: 1px dashed var(--border); border-radius: 6px; padding: 14px; text-align: center; color: var(--muted); cursor: pointer; background: var(--panel); }
   #drop.over { border-color: var(--accent); color: var(--accent); }
-  input[type="search"], #gcode-input { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  input[type="search"], input[type="text"], textarea, #gcode-input, select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  textarea { min-height: 104px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   input[type="search"] { width: 260px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 8px; }
   table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); }
@@ -61,6 +70,24 @@
   #controls { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
   #controls button.danger { border-color: rgba(232,106,95,.5); color: var(--err); }
   #controls button.danger:hover { border-color: var(--err); }
+  #console-tools { display: grid; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
+  #quick-commands, #macro-toolbar, #log-tools, #gcode-history, #macro-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  #log-tools { justify-content: space-between; }
+  #gcode-history { padding: 8px; border-top: 1px solid var(--border); min-height: 41px; }
+  .chip { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .macro-button { border-color: rgba(87,166,214,.35); }
+  .macro-button.panel { min-width: 120px; justify-content: center; }
+  #macro-panel { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
+  #macro-manager { border-radius: 0; border-left: 0; border-right: 0; border-bottom: 1px solid var(--border); margin: 0; }
+  #macro-editor { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 10px; }
+  #macro-list { display: grid; gap: 6px; align-content: start; }
+  .macro-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+  .macro-row.active { border-color: var(--accent); }
+  .macro-form { display: grid; gap: 8px; }
+  .macro-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+  .macro-form label span { text-transform: uppercase; letter-spacing: .04em; }
+  .macro-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .log-left, .log-right { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   #gcode-log { height: 240px; overflow-y: auto; padding: 10px 12px; margin: 0; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
   #gcode-log .send { color: var(--accent); }
   #gcode-log .recv { color: var(--text); }
@@ -74,16 +101,55 @@
   .jog-cell { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; min-width: 0; }
   .jog-cell .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .jog-cell .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .jog-visual { display: grid; grid-template-columns: minmax(180px, 1fr) 160px; gap: 8px; align-items: stretch; }
+  #jog-plot { width: 100%; min-height: 180px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+  #jog-plot text { fill: var(--muted); font: 5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #jog-path { fill: none; stroke: var(--accent); stroke-width: 1.3; }
+  #jog-observed { fill: var(--ok); }
+  #jog-target { fill: none; stroke: var(--warn); stroke-width: 1.5; }
   #jog-arm.armed { border-color: rgba(68,194,123,.55); color: var(--ok); }
   #jog-deadman.on { color: var(--ok); }
   #jog-error { color: var(--err); }
+  #gamepad-settings .detail-body { gap: 12px; }
+  .gamepad-axis-config, .gamepad-button-config { display: grid; gap: 8px; }
+  .gamepad-axis-row { display: grid; grid-template-columns: 34px minmax(90px, 130px) minmax(90px, 120px) minmax(160px, 1fr); gap: 8px; align-items: center; }
+  .gamepad-axis-row > span { color: var(--accent); font-weight: 650; }
+  .gamepad-axis-row label, .gamepad-button-config label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+  .gamepad-axis-row input[type="number"], .gamepad-button-config input[type="number"], .gamepad-binding input[type="number"] { width: 100%; }
+  .gamepad-axis-row input[type="range"] { width: 100%; }
+  .gamepad-speed { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px; align-items: center; }
+  .gamepad-bindings-head, .gamepad-binding { display: grid; grid-template-columns: 84px minmax(150px, 1fr) auto; gap: 8px; align-items: center; }
+  .gamepad-bindings-head { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  #gamepad-macro-bindings { display: grid; gap: 6px; }
+  .empty.compact { padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+  #file-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+  .summary-pill { background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; color: var(--muted); font-size: 12px; }
+  #file-browser { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 12px; align-items: start; }
+  #folder-sidebar { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  #folder-sidebar .side-title { padding: 8px 10px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); }
+  #folder-tree { display: grid; max-height: 520px; overflow: auto; padding: 6px; gap: 2px; }
+  .folder-tree-item { width: 100%; text-align: left; border-color: transparent; background: transparent; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .folder-tree-item:hover, .folder-tree-item.active { color: var(--text); background: var(--panel-2); border-color: var(--border); }
+  #file-main { min-width: 0; }
+  #folder-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
+  #breadcrumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
+  #breadcrumbs button { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crumb-sep { color: var(--muted); }
+  #folder-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  #current-folder { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-name { display: inline; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
+  .file-name:hover { color: var(--accent); border: 0; }
+  .folder-name { color: var(--accent); font-weight: 650; }
   @media (max-width: 760px) {
-    header, .toolbar, #machine { grid-auto-flow: row; display: grid; align-items: stretch; }
+    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     input[type="search"] { width: 100%; }
     th:nth-child(4), td:nth-child(4) { display: none; }
     .job { grid-template-columns: 1fr; gap: 3px; }
-    .status-grid, .jog-grid { grid-template-columns: 1fr; }
+    .status-grid, .jog-grid, .jog-visual { grid-template-columns: 1fr; }
+    #file-browser { grid-template-columns: 1fr; }
+    #folder-bar { align-items: stretch; display: grid; }
+    #folder-actions { justify-content: stretch; }
   }
 </style>
 </head>
@@ -113,7 +179,15 @@
       <div class="jog-cell"><div class="label">Spindle</div><div id="status-spindle" class="value">-</div></div>
       <div class="jog-cell"><div class="label">Tool</div><div id="status-tool" class="value">-</div></div>
       <div class="jog-cell"><div class="label">Status Age</div><div id="status-age" class="value">-</div></div>
+      <div class="jog-cell"><div class="label">Connection</div><div id="status-connection" class="value">-</div></div>
     </div>
+    <details id="status-detail">
+      <summary>Status Details</summary>
+      <div class="detail-body">
+        <pre id="status-raw">-</pre>
+        <div id="status-fields"></div>
+      </div>
+    </details>
 
     <h2>Gcode Console</h2>
     <div id="console">
@@ -122,7 +196,70 @@
         <button type="button" id="ctl-resume" title="Resume from feed hold">▶ Resume</button>
         <button type="button" id="ctl-halt" class="danger" title="Emergency stop (halt)">⏹ Halt</button>
       </div>
+      <div id="console-tools">
+        <div id="quick-commands">
+          <button type="button" data-gcode="M114" title="Position">M114</button>
+          <button type="button" data-gcode="$G" title="Modal state">$G</button>
+          <button type="button" data-gcode="M115" title="Firmware info">M115</button>
+          <button type="button" data-gcode="version" title="Version">version</button>
+        </div>
+        <div id="macro-toolbar"></div>
+        <div id="log-tools">
+          <div class="log-left">
+            <select id="log-filter" aria-label="Log filter">
+              <option value="all">All</option>
+              <option value="send">Sent</option>
+              <option value="recv">Received</option>
+              <option value="api">API</option>
+              <option value="controller">Controller</option>
+              <option value="jog">Jog</option>
+              <option value="error">Errors</option>
+            </select>
+            <input id="log-search" type="search" placeholder="Search log">
+            <label><input type="checkbox" id="log-autoscroll"> Autoscroll</label>
+            <label><input type="checkbox" id="log-pause"> Pause</label>
+          </div>
+          <div class="log-right">
+            <button type="button" id="log-copy">Copy</button>
+            <button type="button" id="log-export">Export</button>
+            <button type="button" id="log-clear">Clear</button>
+          </div>
+        </div>
+      </div>
+      <div id="macro-panel"></div>
+      <details id="macro-manager">
+        <summary>Macros</summary>
+        <div class="detail-body">
+          <div id="macro-editor">
+            <div id="macro-list"></div>
+            <div class="macro-form">
+              <div class="macro-grid">
+                <label><span>Name</span><input id="macro-name" type="text" maxlength="80"></label>
+                <label><span>Color</span><input id="macro-color" type="text" maxlength="32" placeholder="#57a6d6"></label>
+                <label><span>Placement</span>
+                  <select id="macro-placement">
+                    <option value="none">None</option>
+                    <option value="toolbar">Toolbar</option>
+                    <option value="panel">Panel</option>
+                  </select>
+                </label>
+              </div>
+              <label><span>Description</span><input id="macro-description" type="text" maxlength="240"></label>
+              <label><span>Lines</span><textarea id="macro-lines" spellcheck="false"></textarea></label>
+              <div id="macro-actions">
+                <button type="button" id="macro-new">New</button>
+                <button type="button" id="macro-save">Save</button>
+                <button type="button" id="macro-run">Run</button>
+                <button type="button" id="macro-up">Up</button>
+                <button type="button" id="macro-down">Down</button>
+                <button type="button" id="macro-delete">Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
       <pre id="gcode-log"></pre>
+      <div id="gcode-history"></div>
       <form id="gcode-form">
         <input id="gcode-input" type="text" placeholder="Send gcode or console command" autocomplete="off" spellcheck="false">
         <button type="submit">Send</button>
@@ -140,8 +277,58 @@
       </div>
       <div class="jog-grid">
         <div class="jog-cell"><div class="label">Axes</div><div id="jog-axes" class="value">X 0.00 Y 0.00 Z 0.00</div></div>
+        <div class="jog-cell"><div class="label">Buttons</div><div id="jog-buttons" class="value">-</div></div>
         <div class="jog-cell"><div class="label">MPos</div><div id="jog-mpos" class="value">-</div></div>
         <div class="jog-cell"><div class="label">WPos</div><div id="jog-wpos" class="value">-</div></div>
+      </div>
+      <details id="gamepad-settings">
+        <summary>Gamepad Settings</summary>
+        <div class="detail-body">
+          <div class="gamepad-axis-config">
+            <div class="gamepad-axis-row">
+              <span>X</span>
+              <label><span>Axis</span><input id="gamepad-axis-x" type="number" min="0" max="31"></label>
+              <label><span>Invert</span><input id="gamepad-invert-x" type="checkbox"></label>
+              <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-x" type="range" min="5" max="100" step="5"><b id="gamepad-speed-x-value">100%</b></span></label>
+            </div>
+            <div class="gamepad-axis-row">
+              <span>Y</span>
+              <label><span>Axis</span><input id="gamepad-axis-y" type="number" min="0" max="31"></label>
+              <label><span>Invert</span><input id="gamepad-invert-y" type="checkbox"></label>
+              <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-y" type="range" min="5" max="100" step="5"><b id="gamepad-speed-y-value">100%</b></span></label>
+            </div>
+            <div class="gamepad-axis-row">
+              <span>Z</span>
+              <label><span>Axis</span><input id="gamepad-axis-z" type="number" min="0" max="31"></label>
+              <label><span>Invert</span><input id="gamepad-invert-z" type="checkbox"></label>
+              <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-z" type="range" min="5" max="100" step="5"><b id="gamepad-speed-z-value">100%</b></span></label>
+            </div>
+          </div>
+          <div class="gamepad-button-config">
+            <div class="macro-grid">
+              <label><span>Deadman Button</span><input id="gamepad-deadman-button" type="number" min="0" max="63"></label>
+              <label><span>Slow Button A</span><input id="gamepad-slow-button-0" type="number" min="0" max="63"></label>
+              <label><span>Slow Button B</span><input id="gamepad-slow-button-1" type="number" min="0" max="63"></label>
+            </div>
+            <div class="gamepad-bindings-head"><span>Button</span><span>Macro</span><span></span></div>
+            <div id="gamepad-macro-bindings"></div>
+            <div><button type="button" id="gamepad-add-macro">Add Macro Button</button></div>
+          </div>
+        </div>
+      </details>
+      <div class="jog-visual">
+        <svg id="jog-plot" viewBox="0 0 100 100" role="img" aria-label="Jog XY movement">
+          <line x1="50" y1="0" x2="50" y2="100" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
+          <line x1="0" y1="50" x2="100" y2="50" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
+          <polyline id="jog-path" points=""></polyline>
+          <circle id="jog-observed" cx="50" cy="50" r="2"></circle>
+          <circle id="jog-target" cx="50" cy="50" r="3"></circle>
+          <text x="3" y="8">XY</text>
+        </svg>
+        <div class="jog-cell">
+          <div class="label">Lead</div>
+          <div id="jog-lead" class="value">X 0.000 Y 0.000 Z 0.000</div>
+        </div>
       </div>
       <div id="jog-error"></div>
     </div>
@@ -149,17 +336,34 @@
 
   <section id="files-view" class="view" hidden>
     <div class="toolbar">
-      <div id="drop">Drop files here or click to upload to <span class="name">/sd/gcodes</span></div>
+      <div id="drop">Drop files here or click to upload to <span class="name">the current folder</span></div>
       <input id="filter" type="search" placeholder="Filter files or states">
     </div>
     <input id="file" type="file" multiple hidden>
 
     <h2>Files</h2>
-    <table>
-      <thead><tr><th>Path</th><th>Type</th><th class="num">Size</th><th>Modified</th><th>Status</th><th></th></tr></thead>
-      <tbody id="files"></tbody>
-    </table>
-    <div id="files-empty" class="empty">Files load when this tab opens.</div>
+    <div id="file-summary"></div>
+    <div id="file-browser">
+      <aside id="folder-sidebar">
+        <div class="side-title">Folders</div>
+        <div id="folder-tree"></div>
+      </aside>
+      <div id="file-main">
+        <div id="folder-bar">
+          <nav id="breadcrumbs" aria-label="Folder path"></nav>
+          <div id="folder-actions">
+            <span id="current-folder">/</span>
+            <button type="button" id="folder-up">Up</button>
+            <button type="button" id="folder-new">New Folder</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>Name</th><th>Type</th><th class="num">Size / Items</th><th>Modified</th><th>Status</th><th></th></tr></thead>
+          <tbody id="files"></tbody>
+        </table>
+        <div id="files-empty" class="empty">Files load when this tab opens.</div>
+      </div>
+    </div>
 
     <h2>Activity (<span id="active-jobs">0</span>)</h2>
     <div id="jobs"></div>

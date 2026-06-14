@@ -42,8 +42,11 @@ runs a 30s reconcile sweep to fold in out-of-band changes. The **store**
 (`internal/store`) persists the catalog (desired state of `/sd/gcodes`, sync
 states like `pending_upload`/`synced`/`remote_only`) and the FIFO job queue, so
 writes are accepted instantly (Google-Drive-style deferred sync) and survive
-restarts. **service** is the app core; **api** (HTTP/REST + SSE + embedded SPA)
-and **davfs** (WebDAV) sit on top of it.
+restarts. It also stores durable web UI settings such as gcode macros, macro
+button placement, log preferences, and gamepad mappings/macro buttons; these
+are local proxy UI state and never cause machine I/O by themselves. **service**
+is the app core; **api** (HTTP/REST + SSE + embedded SPA) and **davfs**
+(WebDAV) sit on top of it.
 
 ## Build, test, run
 
@@ -128,7 +131,12 @@ Injection & control model (both modes — proxy alone OR with controller attache
   for relay jogging because that would mutate modal distance state behind the
   controller. The operator must arm the UI/API session and continuously hold the
   gamepad deadman. Stale/Unknown/non-Idle states stop or reject motion; realtime
-  `halt` still bypasses the jog lease.
+  `halt` still bypasses the jog lease. Jog sessions emit best-effort `motion`
+  WebSocket events for visualization and rate-limit source `jog` entries into
+  the shared gcode log so operational visibility does not flood the ring buffer.
+  Browser gamepad axis/button mappings are durable UI settings; they scale and
+  map normalized client input before it reaches the jog WebSocket but do not
+  change the server-side jog speed limits or lease policy.
 
 ## Engineering practices in force
 
@@ -151,6 +159,12 @@ Injection & control model (both modes — proxy alone OR with controller attache
   for everything else. The relay/injection path has been validated against a
   real Carvera (no leaked frames, heartbeat intact) — preserve those
   invariants if you touch `relay/mux.go`.
+- **Never use Chrome via Playwright in this workspace.** Chrome/Chromium
+  Playwright launches are a hard limit here, not a fallback to retry with
+  different cache paths or flags. For browser-level checks, use a non-Chrome
+  Playwright browser only if it is already available and permitted; otherwise
+  fall back to static JS checks, HTTP validation, screenshots from another
+  approved tool, or manual/browser validation by the user.
 
 ## Layout
 

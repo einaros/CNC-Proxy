@@ -38,6 +38,19 @@ import (
 // relative to it.
 const GcodeRoot = "/sd/gcodes"
 
+const (
+	maxUIMacros      = 48
+	maxMacroLines    = 40
+	maxMacroLineLen  = 240
+	maxMacroNameLen  = 80
+	maxMacroDescLen  = 240
+	maxMacroButtons  = 96
+	maxMacroColorLen = 32
+	maxGamepadAxis   = 31
+	maxGamepadButton = 63
+	maxGamepadMacros = 32
+)
+
 // Service wires the store, arbiter (for machine state), and local cache.
 type Service struct {
 	store    *store.Store
@@ -71,43 +84,47 @@ func (s *Service) GcodeLog() *gcodelog.Log { return s.gcodeLog }
 
 // MachineStatus is the snapshot returned to clients.
 type MachineStatus struct {
-	State      machine.State       `json:"state"`
-	Mode       string              `json:"mode"`
-	Connected  bool                `json:"connected"`
-	AgeMs      int64               `json:"age_ms"`
-	ObservedAt time.Time           `json:"observed_at,omitempty"`
-	Stale      bool                `json:"stale"`
-	Raw        string              `json:"raw,omitempty"`
-	Fields     map[string]string   `json:"fields,omitempty"`
-	MPos       machine.AxisValues  `json:"mpos,omitempty"`
-	WPos       machine.AxisValues  `json:"wpos,omitempty"`
-	Feed       *machine.Triple     `json:"feed,omitempty"`
-	Spindle    *machine.Spindle    `json:"spindle,omitempty"`
-	Tool       *machine.ToolStatus `json:"tool,omitempty"`
-	Progress   []float64           `json:"progress,omitempty"`
-	Machine    []float64           `json:"machine,omitempty"`
+	State        machine.State       `json:"state"`
+	Mode         string              `json:"mode"`
+	Connected    bool                `json:"connected"`
+	Reconnecting bool                `json:"reconnecting"`
+	AgeMs        int64               `json:"age_ms"`
+	ObservedAt   time.Time           `json:"observed_at,omitempty"`
+	Stale        bool                `json:"stale"`
+	Raw          string              `json:"raw,omitempty"`
+	Fields       map[string]string   `json:"fields,omitempty"`
+	MPos         machine.AxisValues  `json:"mpos,omitempty"`
+	WPos         machine.AxisValues  `json:"wpos,omitempty"`
+	Feed         *machine.Triple     `json:"feed,omitempty"`
+	Spindle      *machine.Spindle    `json:"spindle,omitempty"`
+	Tool         *machine.ToolStatus `json:"tool,omitempty"`
+	Progress     []float64           `json:"progress,omitempty"`
+	Machine      []float64           `json:"machine,omitempty"`
 }
 
 // Status returns the current machine state and proxy mode.
 func (s *Service) Status() MachineStatus {
 	st, age := s.arb.Tracker().Current()
 	observed := !st.ObservedAt.IsZero()
+	mode := s.arb.Mode().String()
+	stale := !s.arb.Tracker().Fresh(s.arb.StateMaxAge())
 	return MachineStatus{
-		State:      st.State,
-		Mode:       s.arb.Mode().String(),
-		Connected:  observed && st.State != machine.Unknown,
-		AgeMs:      age.Milliseconds(),
-		ObservedAt: st.ObservedAt,
-		Stale:      !s.arb.Tracker().Fresh(s.arb.StateMaxAge()),
-		Raw:        st.Raw,
-		Fields:     st.Fields,
-		MPos:       st.MPos,
-		WPos:       st.WPos,
-		Feed:       st.Feed,
-		Spindle:    st.Spindle,
-		Tool:       st.Tool,
-		Progress:   st.Progress,
-		Machine:    st.Machine,
+		State:        st.State,
+		Mode:         mode,
+		Connected:    observed && st.State != machine.Unknown,
+		Reconnecting: mode == session.ModeOwner.String() && stale,
+		AgeMs:        age.Milliseconds(),
+		ObservedAt:   st.ObservedAt,
+		Stale:        stale,
+		Raw:          st.Raw,
+		Fields:       st.Fields,
+		MPos:         st.MPos,
+		WPos:         st.WPos,
+		Feed:         st.Feed,
+		Spindle:      st.Spindle,
+		Tool:         st.Tool,
+		Progress:     st.Progress,
+		Machine:      st.Machine,
 	}
 }
 
@@ -176,6 +193,91 @@ func (s *Service) Jobs() []store.Job { return s.store.ListJobs() }
 
 // Subscribe proxies the store's event subscription for SSE.
 func (s *Service) Subscribe() (<-chan store.Event, func()) { return s.store.Subscribe() }
+
+// UISettings returns durable web UI preferences. It is cache-only and never
+// touches the machine.
+func (s *Service) UISettings() store.UISettings { return s.store.UISettings() }
+
+// SetUISettings validates and persists durable web UI preferences.
+func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
+	if len(ui.Macros) > maxUIMacros {
+		return store.UISettings{}, fmt.Errorf("service: at most %d macros are allowed", maxUIMacros)
+	}
+	if len(ui.MacroButtons) > maxMacroButtons {
+		return store.UISettings{}, fmt.Errorf("service: at most %d macro buttons are allowed", maxMacroButtons)
+	}
+	for i, m := range ui.Macros {
+		if strings.TrimSpace(m.Name) == "" {
+			return store.UISettings{}, fmt.Errorf("service: macro %d requires a name", i+1)
+		}
+		if len(m.Name) > maxMacroNameLen {
+			return store.UISettings{}, fmt.Errorf("service: macro %q name is too long", m.Name)
+		}
+		if len(m.Description) > maxMacroDescLen {
+			return store.UISettings{}, fmt.Errorf("service: macro %q description is too long", m.Name)
+		}
+		if len(m.Color) > maxMacroColorLen {
+			return store.UISettings{}, fmt.Errorf("service: macro %q color is too long", m.Name)
+		}
+		if len(m.Lines) > maxMacroLines {
+			return store.UISettings{}, fmt.Errorf("service: macro %q has too many lines", m.Name)
+		}
+		nonBlank := 0
+		for _, line := range m.Lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			nonBlank++
+			if len(line) > maxMacroLineLen {
+				return store.UISettings{}, fmt.Errorf("service: macro %q has a line longer than %d bytes", m.Name, maxMacroLineLen)
+			}
+		}
+		if nonBlank == 0 {
+			return store.UISettings{}, fmt.Errorf("service: macro %q requires at least one line", m.Name)
+		}
+	}
+	if err := validateGamepadSettings(ui.Gamepad); err != nil {
+		return store.UISettings{}, err
+	}
+	if ui.Log.Filter == "" {
+		ui.Log.Filter = "all"
+		current := s.store.UISettings()
+		ui.Log.Autoscroll = current.Log.Autoscroll
+	}
+	return s.store.SetUISettings(ui)
+}
+
+func validateGamepadSettings(g store.Gamepad) error {
+	for name, axis := range map[string]store.GamepadAxis{"x": g.Axes.X, "y": g.Axes.Y, "z": g.Axes.Z} {
+		// Scale 0 means "not supplied" and is normalized to the default by the
+		// store. Any explicit non-zero value must stay within the client-side
+		// multiplier range.
+		if axis.Scale < 0 || axis.Scale > 1 {
+			return fmt.Errorf("service: gamepad axis %s scale must be between 0 and 1", name)
+		}
+		if axis.Axis < 0 || axis.Axis > maxGamepadAxis {
+			return fmt.Errorf("service: gamepad axis %s index must be between 0 and %d", name, maxGamepadAxis)
+		}
+	}
+	if g.DeadmanButton < 0 || g.DeadmanButton > maxGamepadButton {
+		return fmt.Errorf("service: gamepad deadman button must be between 0 and %d", maxGamepadButton)
+	}
+	for _, btn := range g.SlowButtons {
+		if btn < 0 || btn > maxGamepadButton {
+			return fmt.Errorf("service: gamepad slow button must be between 0 and %d", maxGamepadButton)
+		}
+	}
+	if len(g.MacroButtons) > maxGamepadMacros {
+		return fmt.Errorf("service: at most %d gamepad macro buttons are allowed", maxGamepadMacros)
+	}
+	for _, binding := range g.MacroButtons {
+		if binding.Button < 0 || binding.Button > maxGamepadButton {
+			return fmt.Errorf("service: gamepad macro button must be between 0 and %d", maxGamepadButton)
+		}
+	}
+	return nil
+}
 
 // normalizeRemote converts a user-supplied relative or absolute path into a
 // machine-absolute path under GcodeRoot, rejecting traversal outside the root.

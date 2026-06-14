@@ -120,6 +120,7 @@ Then:
   `GET /api/events` (SSE: catalog/job changes plus all gcode I/O — both
   API-submitted and controller traffic observed by the relay; optional
   `?scope=control` omits catalog/jobs and `?scope=files` omits gcode),
+  `GET|PUT /api/ui/settings` (durable web UI macros/layout/log/gamepad preferences),
   `GET /api/jog/capabilities`, and authenticated `GET /api/jog/ws` WebSocket
   for low-latency gamepad jogging.
   - **Injecting gcode** works whether the proxy runs alone (owner mode) or with
@@ -138,9 +139,21 @@ Then:
     abort/reject jogging. Realtime `halt` remains out-of-band.
     WebSocket client messages are `arm`, `input`, `control`, and `disarm`:
     `{"type":"input","seq":2,"deadman":true,"axes":{"x":0,"y":0,"z":0},"slow":false}`.
-    Server messages are `hello`, `state`, `status`, `ack`, and `error`; stable
-    error codes include `disabled`, `not_idle`, `busy`, `stale_status`,
-    `bad_input`, `controller_waiting`, `machine_error`, and `unauthorized`.
+    Server messages are `hello`, `state`, `status`, `motion`, `ack`, and
+    `error`; stable error codes include `disabled`, `not_idle`, `busy`,
+    `stale_status`, `bad_input`, `controller_waiting`, `machine_error`, and
+    `unauthorized`. Jog motion is attributed as source `jog` in the gcode log
+    at a rate-limited cadence so the operator can audit motion without flooding
+    the live console. The web UI persists gamepad axis mapping, inversion,
+    client-side speed scaling, deadman/slow buttons, and gamepad macro-button
+    bindings through `/api/ui/settings`; these mappings reduce the normalized
+    input before it reaches the jog WebSocket and cannot raise the server's
+    configured jog speed limits.
+  - **Gcode macros** are stored server-side in the proxy data store via
+    `/api/ui/settings`, including macro lines, button placement, gamepad button
+    bindings, and log preferences. Macro buttons execute through the same
+    `/api/gcode` endpoint as manual console input, so existing idle gating and
+    relay safety behavior still apply.
 - WebDAV mount: macOS Finder → Go → Connect to Server → `http://127.0.0.1:8421/`;
   Windows → Map network drive; Linux → `davs?://…` in the file manager.
 

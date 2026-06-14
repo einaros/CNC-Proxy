@@ -173,6 +173,7 @@ func main() {
 		Tick:           *jogTick,
 		StatusInterval: *jogStatus,
 		DeadmanTimeout: *jogDeadman,
+		Log:            svc.GcodeLog(),
 	})
 
 	authCfg := httpauth.Config{User: *authUser, Token: *authToken}

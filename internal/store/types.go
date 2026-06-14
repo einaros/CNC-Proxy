@@ -82,3 +82,74 @@ type Job struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// UISettings is durable operator UI configuration. It is intentionally kept in
+// the store file with the catalog/queue so a deployment restart preserves the
+// control console layout without requiring browser-local state.
+type UISettings struct {
+	Macros       []Macro     `json:"macros"`
+	MacroButtons []MacroSlot `json:"macro_buttons"`
+	Log          LogSettings `json:"log"`
+	Gamepad      Gamepad     `json:"gamepad"`
+}
+
+// Macro is a named sequence of gcode/console lines that can be assigned to a
+// button in the web console.
+type Macro struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	Lines       []string  `json:"lines"`
+	Color       string    `json:"color,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+// MacroSlot places a macro button in a named UI region.
+type MacroSlot struct {
+	ID      string `json:"id"`
+	MacroID string `json:"macro_id"`
+	Region  string `json:"region"` // "toolbar" | "panel"
+	Order   int    `json:"order"`
+}
+
+// LogSettings stores operator preferences for the log console.
+type LogSettings struct {
+	Filter     string `json:"filter,omitempty"`
+	Autoscroll bool   `json:"autoscroll"`
+}
+
+// Gamepad stores browser gamepad mapping and speed preferences for the jog UI.
+// The server still enforces the configured jog speed limits; these settings only
+// scale and map the normalized client input before it is sent to the jog
+// WebSocket.
+type Gamepad struct {
+	Axes          GamepadAxes          `json:"axes"`
+	DeadmanButton int                  `json:"deadman_button"`
+	SlowButtons   []int                `json:"slow_buttons"`
+	MacroButtons  []GamepadMacroButton `json:"macro_buttons"`
+}
+
+// GamepadAxes maps physical browser axes into machine axes.
+type GamepadAxes struct {
+	X GamepadAxis `json:"x"`
+	Y GamepadAxis `json:"y"`
+	Z GamepadAxis `json:"z"`
+}
+
+// GamepadAxis configures one physical axis. Scale is 0..1, applied client-side
+// before the normalized axis value is sent to the jog engine.
+type GamepadAxis struct {
+	Axis   int     `json:"axis"`
+	Invert bool    `json:"invert"`
+	Scale  float64 `json:"scale"`
+}
+
+// GamepadMacroButton maps one physical gamepad button to a saved gcode macro.
+// The web UI fires these edge-triggered while jog is armed and the deadman is
+// held; execution still goes through the normal /api/gcode path.
+type GamepadMacroButton struct {
+	ID      string `json:"id"`
+	Button  int    `json:"button"`
+	MacroID string `json:"macro_id"`
+}
