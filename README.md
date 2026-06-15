@@ -75,6 +75,8 @@ status CLI by default, or a native menu-bar app with `-tags tray`).
 ```sh
 go build -mod=mod -o cnc-proxy ./cmd/proxy
 go build -mod=mod -o discoverybeacon ./cmd/discoverybeacon
+go build -mod=mod -o deploy ./cmd/deploy
+go build -mod=mod -tags tray -o cnc-tray ./cmd/tray
 ```
 
 (`-mod=mod` is needed because the vendored Makera suite lives in `vendor/`,
@@ -236,6 +238,87 @@ Every flag can also be set through the environment as `CNC_<NAME>` with `-`
 mapped to `_` (e.g. `CNC_MACHINE=192.168.1.42:2222`, `CNC_NAME="Shop CNC"`,
 `CNC_AUTH_TOKEN=...`, `CNC_ADVERTISE=true`). Explicit command-line flags win
 over the environment.
+
+## Windows Tray Manager
+
+Build the tray app with `-tags tray`. On Windows it runs from the system tray,
+serves a local manager UI, can supervise/restart `cnc-proxy`, and can receive
+authenticated notification/deployment requests:
+
+```sh
+go build -mod=mod -tags tray -o cnc-tray.exe ./cmd/tray
+cnc-tray.exe
+```
+
+The manager UI defaults to `http://127.0.0.1:8430/`. It stores config in the OS
+user config directory and keeps manager settings separate from proxy settings.
+For remote access, set a manager token before binding beyond loopback; remote
+manager binds without a token are rejected. When bound to `0.0.0.0`, the manager
+UI shows the concrete LAN URLs to try; if those URLs fail from another computer,
+check the Windows Firewall inbound rule for `cnc-tray.exe` or the selected TCP
+port.
+
+Tray manager endpoints:
+
+- `PUT /api/manager/config` updates manager settings and restarts the manager HTTP listener.
+- `PUT /api/proxy/config` updates proxy flags without changing manager settings.
+- `POST /api/manager/restart` restarts only the manager HTTP listener inside the tray app.
+- `POST /api/notify` with JSON `{"title":"CNC Proxy","message":"...","level":"info|warning|error"}` shows a tray/Windows notification.
+- `POST /api/proxy/start|stop|restart|build` controls the supervised proxy.
+- `POST /api/deploy` accepts a source zip, builds in `source_dir`, and restarts the proxy unless `?restart=false`.
+
+Send deployments from a development machine with:
+
+```sh
+go build -mod=mod -o deploy ./cmd/deploy
+deploy -target http://192.168.1.50:8430 -token "$CNC_TRAY_TOKEN" -source .
+```
+
+### Build A Windows Installer From macOS
+
+The tray app uses cgo, so building the Windows tray binary from macOS needs a
+Windows C toolchain. The repo includes a Docker-based builder with MinGW:
+
+```sh
+scripts/build-windows-installer.sh
+```
+
+Artifacts are written to `dist/windows/`:
+
+- `cnc-proxy-installer.exe` — self-contained installer to run on the target PC.
+- `cnc-proxy-installer-stub.exe` — installer without the appended payload.
+- `cnc-proxy-windows-payload.zip` — raw payload containing `cnc-tray.exe`, `cnc-proxy.exe`, and `deploy.exe`.
+- `payload/` — unpacked Windows binaries.
+
+On the target PC, run:
+
+```powershell
+.\cnc-proxy-installer.exe -remote
+```
+
+`-remote` binds the tray manager to `0.0.0.0:8430` and generates a manager token
+if one is not supplied with `-manager-token`. `-admin-token` remains as a
+deprecated alias. Keep that token; remote deploys use it:
+
+```sh
+deploy -target http://<target-ip>:8430 -token "<printed-token>" -source .
+```
+
+The installer includes the initial Windows `cnc-proxy.exe` and `cnc-tray.exe`.
+Later source-code deployments run the tray manager's `build_command` on the
+target PC, so the target must have Go available in `PATH` unless you change the
+manager build command to a site-specific updater.
+
+Remote source deployments rebuild and restart `cnc-proxy.exe`; they do not
+replace the tray manager that receives the deployment. Tray/manager fixes
+therefore require running a newly built `cnc-proxy-installer.exe` on the target
+PC. If Windows keeps the existing tray executable locked, exit the tray app
+before rerunning the installer.
+
+The manager-owned Windows proxy build is staged beside the installed binary,
+then promoted after a successful compile. It also builds the proxy with the
+Windows GUI subsystem so the supervised background process does not open a
+console window. Custom build commands remain custom and are run as supplied.
 
 ## Run in Docker
 

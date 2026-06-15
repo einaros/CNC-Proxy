@@ -17,6 +17,7 @@ coverage.out
 # (default -data-dir is the OS config dir, but allow a repo-local one too).
 /.cnc-proxy/
 /data/
+/dist/
 
 # Machine-specific Claude Code settings (contains local IPs, /tmp paths, and
 # per-session permission grants). The shared .claude/settings.json IS tracked.
