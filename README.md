@@ -7,9 +7,10 @@ a mountable WebDAV filesystem — without modifying the controller or firmware.
 ## What it does
 
 - **Transparent relay (TCP 2222):** forwards the official controller to the
-  machine byte-for-byte, and answers UDP discovery so the controller finds the
-  proxy. Frames are observed (for machine state) but never altered, so the CRCs
-  the controller validates stay intact.
+  machine byte-for-byte over either TCP/WiFi or USB/FTDI on the machine side,
+  and answers UDP discovery so the controller finds the proxy. Frames are
+  observed (for machine state) but never altered, so the CRCs the controller
+  validates stay intact.
 - **Owns the machine when idle:** the firmware is single-conversation, so the
   proxy holds the connection only when no controller is attached. It polls
   status and runs queued file operations while the machine is `Idle`.
@@ -25,7 +26,7 @@ a mountable WebDAV filesystem — without modifying the controller or firmware.
 ## Architecture
 
 ```
-controller ──TCP 2222──▶ relay ──▶ machine        (relay mode: controller present)
+controller ──TCP 2222──▶ relay ──TCP/USB──▶ machine   (relay mode: controller present)
                           │
 CAD app ──WebDAV──▶ davfs ─┤
 browser ──HTTP───▶ api  ───┤
@@ -33,7 +34,7 @@ browser ──HTTP───▶ api  ───┤
                   service ──▶ store (catalog + durable job queue)
                           ▲          │
                           │          ▼
-                     sync engine ──▶ arbiter ──▶ machine   (owner mode: no controller)
+                     sync engine ──▶ arbiter ──TCP/USB──▶ machine   (owner mode: no controller)
 ```
 
 The **arbiter** enforces the single-conversation rule: at most one of
@@ -47,6 +48,7 @@ The **sync engine** drains the queue only in owner mode while the machine is
 | Package | Role |
 |---------|------|
 | `internal/protocol` | Wire frames (CRC16-CCITT), commands, ls/md5 parsing |
+| `internal/machinetransport` | Machine-side TCP or USB/serial transport opener |
 | `internal/client` | Owner-mode machine connection: ls/rm/mv/mkdir/md5/ftype + upload & download handshakes |
 | `internal/machine` | Run-state (`Idle`/`Run`/…) parsing and tracking |
 | `internal/discovery` | UDP discovery listen + re-advertise |
@@ -64,13 +66,15 @@ The **sync engine** drains the queue only in owner mode while the machine is
 | `internal/carveratest` | Fake machine for tests (and `cmd/fakemachine`) |
 
 Commands: `cmd/proxy` (the service), `cmd/fakemachine` (test machine),
-`cmd/tray` (status companion: a dependency-free status CLI by default, or a
-native menu-bar app with `-tags tray`).
+`cmd/discoverybeacon` (native UDP discovery announcer + machine bridge for
+Docker Desktop deployments), and `cmd/tray` (status companion: a dependency-free
+status CLI by default, or a native menu-bar app with `-tags tray`).
 
 ## Build
 
 ```sh
 go build -mod=mod -o cnc-proxy ./cmd/proxy
+go build -mod=mod -o discoverybeacon ./cmd/discoverybeacon
 ```
 
 (`-mod=mod` is needed because the vendored Makera suite lives in `vendor/`,
@@ -101,6 +105,21 @@ the auto-derived advertise addresses on a multi-homed host):
 ./cnc-proxy -machine 192.168.1.42:2222 -advertise \
   -proxy-ip 192.168.1.50 -broadcast 192.168.1.255
 ```
+
+To connect the proxy to the machine over USB/FTDI while keeping the official
+controller connected to the proxy over TCP/WiFi, run the proxy natively and
+select USB as the machine-side transport:
+
+```sh
+./cnc-proxy -machine-transport=usb -usb-device /dev/cu.usbserial-XXXX \
+  -advertise -name "Shop CNC"
+```
+
+USB mode uses the same framed Carvera protocol at 115200 8N1, no flow control,
+and 128-byte file packets. DTR reset is off by default; pass
+`-usb-reset-on-open` only when you explicitly want the controller-style DTR
+toggle. With `-advertise`, USB mode requires `-name`; if this host has multiple
+active LAN/VPN interfaces, also pass `-proxy-ip` and `-broadcast` explicitly.
 
 Loopback testing against the bundled fake machine:
 
@@ -136,12 +155,14 @@ Then:
     never disturb a controller-driven job. Realtime control (`hold`/`resume`/
     `halt`) is out-of-band and always works, even mid-move — use `halt` as an
     emergency stop.
-  - **Gamepad jogging** uses short `G53 G0` machine-coordinate segments generated
-    server-side from fresh cached `MPos`. It requires the web UI to be armed and
-    a held gamepad deadman button. In relay mode, jog motion is allowed only
-    while the official controller is connected but the machine is freshly Idle;
-    controller jobs, file transfers, unknown/stale state, or controller traffic
-    abort/reject jogging. Realtime `halt` remains out-of-band.
+  - **Gamepad jogging** uses the firmware `$J` instant-jog command by default
+    for short server-generated XYZ deltas without touching modal distance state;
+    `-jog-motion=g53` keeps the older `G53 G0` machine-coordinate fallback. It
+    requires the web UI to be armed and a held gamepad deadman button. In relay
+    mode, jog motion is allowed only while the official controller is connected
+    but the machine is freshly Idle; controller jobs, file transfers,
+    unknown/stale state, or controller traffic abort/reject jogging. Realtime
+    `halt` remains out-of-band.
     WebSocket client messages are `arm`, `input`, `control`, and `disarm`:
     `{"type":"input","seq":2,"deadman":true,"axes":{"x":0,"y":0,"z":0},"slow":false}`.
     Server messages are `hello`, `state`, `status`, `motion`, `ack`, and
@@ -181,7 +202,11 @@ password; default user `cnc`) or explicitly pass `-allow-insecure-http`.
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `-tcp-port` | 2222 | port the relay listens on for the controller |
-| `-machine` | (discover) | fixed machine `host:port`; empty = learn via UDP |
+| `-machine-transport` | `tcp` | machine-side transport: `tcp` or `usb` |
+| `-machine` | (discover) | fixed machine TCP `host:port`; empty = learn via UDP in TCP mode |
+| `-usb-device` | (empty) | USB/serial device for `-machine-transport=usb` |
+| `-usb-baud` | 115200 | USB serial baud rate |
+| `-usb-reset-on-open` | false | toggle DTR when opening the USB serial device |
 | `-advertise` | false | transparent mode: re-advertise so the controller connects through the proxy |
 | `-proxy-ip` | (auto) | IP the controller should connect to; auto-derived if empty |
 | `-broadcast` | (auto) | broadcast (or unicast) address to advertise on; auto-derived if empty |
@@ -202,6 +227,7 @@ password; default user `cnc`) or explicitly pass `-allow-insecure-http`.
 | `-jog-tick` | 50ms | gamepad jog motion tick interval |
 | `-jog-status-interval` | 100ms | status polling interval while a jog lease is armed |
 | `-jog-deadman-timeout` | 150ms | maximum age of held-deadman input before motion stops |
+| `-jog-motion` | instant | gamepad jog motion primitive: `instant` (`$J`) or `g53` |
 
 (`-no-advertise` still exists as a deprecated no-op so older invocations don't
 break; advertising is now opt-in via `-advertise`.)
@@ -214,7 +240,8 @@ over the environment.
 ## Run in Docker
 
 The recommended deployment is Docker on the same computer that runs the
-official Carvera Controller:
+official Carvera Controller. Docker deployments use TCP/WiFi machine access;
+USB/FTDI machine access is native-host only for now:
 
 ```sh
 CNC_MACHINE=192.168.1.42:2222 CNC_NAME="Shop CNC" CNC_AUTH_TOKEN="$(openssl rand -hex 24)" docker compose up -d
@@ -230,20 +257,57 @@ Two LAN realities shape the container configuration (already encoded in
 `docker-compose.yml`):
 
 - **Discovery doesn't reach the container.** The machine's UDP broadcasts
-  don't traverse Docker's NAT, so the machine address must be pinned with
-  `CNC_MACHINE` (find the IP in the controller's machine list or your router).
+  don't traverse Docker's NAT. Either pin `CNC_MACHINE` to the machine's
+  `ip:port`, or run the native discovery beacon below and point `CNC_MACHINE`
+  at the beacon's local bridge.
 - **Advertising is unicast to the host.** The container can't usefully
   broadcast to the LAN either, so it sends the discovery record straight to
   `host.docker.internal` — the controller listening on UDP 3333 on the same
   computer receives it. `CNC_NAME` is required here: without the machine's
   broadcasts the proxy never learns the real name to derive one from.
-  Controllers on *other* computers won't see this advertisement; they'd keep
-  connecting to the machine directly (which then refuses the proxy's relay —
-  one client at a time).
+  Controllers on *other* computers won't see this in-container advertisement;
+  without the native beacon below, they'd keep connecting to the machine
+  directly (which then refuses the proxy's relay — one client at a time).
 
 A side benefit of the container's own network namespace: the proxy's UDP 3333
 listener can't collide with the controller's, which it would when both run
 natively on the same host (the controller binds without `SO_REUSEPORT`).
+
+To make a Docker Desktop proxy discover the real CNC and become visible to
+controllers on other computers, run the native discovery beacon on the host
+while compose is up. In discovery mode it binds UDP 3333, learns the real
+machine from its broadcasts, opens a local TCP bridge for the Docker proxy, and
+broadcasts discovery records pointing controllers at the host's Docker-published
+relay port. Disable the container's host-only announcer so the native beacon is
+the only discovery advertisement:
+
+```sh
+CNC_ADVERTISE=false CNC_MACHINE=host.docker.internal:12222 CNC_NAME="Shop CNC" CNC_AUTH_TOKEN="$(openssl rand -hex 24)" docker compose up -d
+go build -mod=mod -o discoverybeacon ./cmd/discoverybeacon
+CNC_NAME="Shop CNC" ./discoverybeacon
+```
+
+The proxy dials `host.docker.internal:12222`; the native beacon forwards that
+TCP stream to the latest discovered real machine. The advertised record is
+`CNC_NAME,<host-lan-ip>,2222,0`, so controllers connect to the proxy at the
+host's LAN IP instead of the real machine. If the host has multiple LAN/VPN
+interfaces, pin the addresses explicitly:
+
+```sh
+./discoverybeacon -name "Shop CNC" \
+  -proxy-ip 192.168.1.50 -broadcast 192.168.1.255 -proxy-port 2222
+```
+
+If the real machine IP is already known, the beacon can skip UDP discovery and
+act as an announce-and-bridge helper:
+
+```sh
+./discoverybeacon -name "Shop CNC" -machine 192.168.1.42:2222
+```
+
+Discovery mode cannot run beside a same-host official controller that already
+owns UDP 3333. In that case, either use the fixed `-machine` form above or run
+the discovery beacon on a different LAN host.
 
 The compose file binds API/WebDAV to host loopback (`127.0.0.1`) while the
 container itself listens on `0.0.0.0` so Docker port publishing works. Publishing

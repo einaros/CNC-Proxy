@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	fyne.io/systray v1.12.2
 	github.com/coder/websocket v1.8.14
+	go.bug.st/serial v1.7.1
 	golang.org/x/net v0.56.0
 )
 

@@ -61,10 +61,11 @@ type InteractiveInjector interface {
 // ControlWriter writes a single realtime control character (feed-hold, resume,
 // halt) straight to the machine, out-of-band — without taking the transaction
 // lock. The relay Server implements it for relay mode; an injector that also
-// satisfies this is used by SendControl. A CTRL_SINGLE frame is one atomic
-// socket Write that the firmware acts on immediately from its receive path, so
-// it is safe to emit concurrently with an in-flight transaction and must be, so
-// an emergency halt can preempt a blocking move it would otherwise queue behind.
+// satisfies this is used by SendControl. The active transport must serialize
+// Write calls so the CTRL_SINGLE frame cannot byte-interleave with another
+// frame. The firmware acts on it immediately from its receive path, so it must
+// be emitted concurrently with an in-flight transaction to let an emergency
+// halt preempt a blocking move it would otherwise queue behind.
 type ControlWriter interface {
 	SendControl(c byte) error
 }
@@ -118,7 +119,7 @@ type Arbiter struct {
 
 	// controlWriter, if set, emits out-of-band realtime control characters to
 	// the machine during relay mode (the relay writes them straight to the
-	// shared socket without taking the injection window).
+	// shared transport without taking the injection window).
 	controlWriter ControlWriter
 
 	mu        sync.Mutex
@@ -136,15 +137,20 @@ type Arbiter struct {
 	pollInterval time.Duration
 	// stateMaxAge bounds how old an observed state may be and still gate ops.
 	stateMaxAge time.Duration
+	// filePacketSize is used when relay-mode injections wrap the shared
+	// machine transport in a client.Conn. Owner-mode conns receive this through
+	// their Dial function.
+	filePacketSize int
 }
 
 // Config configures an Arbiter.
 type Config struct {
-	Dial         func() (*client.Conn, error)
-	Tracker      *machine.Tracker
-	Injector     Injector
-	PollInterval time.Duration
-	StateMaxAge  time.Duration
+	Dial           func() (*client.Conn, error)
+	Tracker        *machine.Tracker
+	Injector       Injector
+	PollInterval   time.Duration
+	StateMaxAge    time.Duration
+	FilePacketSize int
 }
 
 // New creates an Arbiter in owner mode.
@@ -158,13 +164,17 @@ func New(cfg Config) *Arbiter {
 	if cfg.Tracker == nil {
 		cfg.Tracker = machine.NewTracker()
 	}
+	if cfg.FilePacketSize <= 0 {
+		cfg.FilePacketSize = client.WifiPacketSize
+	}
 	return &Arbiter{
-		tracker:      cfg.Tracker,
-		dial:         cfg.Dial,
-		injector:     cfg.Injector,
-		mode:         ModeOwner,
-		pollInterval: cfg.PollInterval,
-		stateMaxAge:  cfg.StateMaxAge,
+		tracker:        cfg.Tracker,
+		dial:           cfg.Dial,
+		injector:       cfg.Injector,
+		mode:           ModeOwner,
+		pollInterval:   cfg.PollInterval,
+		stateMaxAge:    cfg.StateMaxAge,
+		filePacketSize: cfg.FilePacketSize,
 	}
 }
 
@@ -275,7 +285,7 @@ func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) err
 
 // AcquireJog acquires a long-lived exclusive machine I/O lease for interactive
 // jogging. It requires fresh Idle state before acquiring the machine path; the
-// caller should still query status before each motion tick.
+// caller should still refresh status while the lease is active.
 func (a *Arbiter) AcquireJog(ctx context.Context) (*JogLease, error) {
 	if err := a.lockOp(ctx); err != nil {
 		return nil, err
@@ -311,7 +321,7 @@ func (a *Arbiter) AcquireJog(ctx context.Context) (*JogLease, error) {
 				return nil, err
 			}
 		}
-		conn := client.NewTransport(it)
+		conn := client.NewTransport(it, client.WithFilePacketSize(a.filePacketSize))
 		conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
 		locked = false
 		return &JogLease{
@@ -377,7 +387,7 @@ func (a *Arbiter) withInjection(inj Injector, fn func(*client.Conn) error) error
 		}
 	}
 	defer release()
-	conn := client.NewTransport(it)
+	conn := client.NewTransport(it, client.WithFilePacketSize(a.filePacketSize))
 	conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
 	return fn(conn)
 }
@@ -385,13 +395,14 @@ func (a *Arbiter) withInjection(inj Injector, fn func(*client.Conn) error) error
 // SendControl emits a single realtime control character (feed-hold, resume,
 // halt) out-of-band, WITHOUT taking opMu, so it preempts any in-flight
 // transaction — an emergency halt must not queue behind the blocking move it is
-// meant to abort. This is safe because a CTRL_SINGLE frame is one atomic socket
-// Write (net.Conn writes are concurrency-safe) that the firmware acts on from
-// its receive path regardless of the gcode stream's state.
+// meant to abort. This is safe when the active machine transport serializes
+// Write calls, so the CTRL_SINGLE frame cannot byte-interleave with another
+// frame; the firmware acts on it from its receive path regardless of the gcode
+// stream's state.
 //
 // In owner mode it writes to the live owner connection (if one is established).
 // In relay mode it delegates to the relay's out-of-band control writer, which
-// writes straight to the shared machine socket without acquiring the injection
+// writes straight to the shared machine transport without acquiring the injection
 // window. Returns ErrRelayActive if no path to the machine is available.
 func (a *Arbiter) SendControl(c byte) error {
 	a.mu.Lock()

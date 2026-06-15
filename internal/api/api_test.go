@@ -441,6 +441,9 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing %s", want)
 		}
 	}
+	if strings.Contains(string(jsBody), "Emergency halt the machine?") {
+		t.Errorf("app.js must not confirm emergency halt")
+	}
 	for _, want := range []string{"directoryRows", "renderFolderTree", "renderFolderChrome", "openDir", "doMkdir", "joinRelPath"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
@@ -687,7 +690,7 @@ func TestJogWebSocketArmAndInput(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range m.Gcodes() {
-			if strings.HasPrefix(line, "G53 G0 X") {
+			if strings.HasPrefix(line, "$J X") {
 				return
 			}
 		}

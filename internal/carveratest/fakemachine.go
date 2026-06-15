@@ -24,9 +24,11 @@ type FakeMachine struct {
 	failCmd            map[string]bool   // command prefixes to fail (for error-path tests)
 	ftype              string            // advertised upload type ("lz" enables compression)
 	compressDownloads  bool              // if set, downloads send a .lz container
+	downloadPacketSize int               // packet size reported/sent for downloads
 	gcodes             []string          // CTRL_MULTI gcode lines received (motion/MDI)
 	controls           []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
 	gcodeReplies       map[string]string // exact line -> textual reply payload
+	uploadPacketSizes  []int             // packet sizes advertised by upload senders
 	unlockDoesNotClear bool              // test hook: $X replies but leaves status unchanged
 	m999DoesNotClear   bool              // test hook: M999 replies but leaves status unchanged
 }
@@ -43,12 +45,13 @@ func NewOn(addr string) (*FakeMachine, error) {
 		return nil, err
 	}
 	m := &FakeMachine{
-		ln:           ln,
-		files:        map[string][]byte{},
-		dirs:         map[string]bool{},
-		status:       "<Idle|MPos:0,0,0|WPos:0,0,0>",
-		failCmd:      map[string]bool{},
-		gcodeReplies: map[string]string{},
+		ln:                 ln,
+		files:              map[string][]byte{},
+		dirs:               map[string]bool{},
+		status:             "<Idle|MPos:0,0,0|WPos:0,0,0>",
+		failCmd:            map[string]bool{},
+		gcodeReplies:       map[string]string{},
+		downloadPacketSize: 8192,
 	}
 	go m.serve()
 	return m, nil
@@ -82,6 +85,16 @@ func (m *FakeMachine) SetCompressDownloads(v bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.compressDownloads = v
+}
+
+// SetDownloadPacketSize sets the FILE_VIEW packet size used when the fake
+// machine sends downloads. Real firmware uses 8192 over WiFi and 128 over USB.
+func (m *FakeMachine) SetDownloadPacketSize(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n > 0 {
+		m.downloadPacketSize = n
+	}
 }
 
 // FailCommand makes management commands with the given prefix return LOAD_ERROR.
@@ -118,6 +131,14 @@ func (m *FakeMachine) Controls() []byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]byte(nil), m.controls...)
+}
+
+// UploadPacketSizes returns packet sizes advertised by upload senders in
+// FILE_VIEW frames.
+func (m *FakeMachine) UploadPacketSizes() []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]int(nil), m.uploadPacketSizes...)
 }
 
 // SetGcodeReply makes the machine answer an exact gcode line with the given
@@ -177,7 +198,7 @@ func (m *FakeMachine) handle(c net.Conn) {
 		received  []byte
 		sendData  []byte // contents being sent during a download
 	)
-	const pktSize = 8192
+	pktSize := 8192
 
 	for {
 		c.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -221,6 +242,7 @@ func (m *FakeMachine) handle(c net.Conn) {
 						plain := append([]byte(nil), m.files[xferPath]...)
 						_, exists := m.files[xferPath]
 						compress := m.compressDownloads
+						pktSize = m.downloadPacketSize
 						m.mu.Unlock()
 						if !exists {
 							m.send(c, protocol.CmdFileCancel, "not found")
@@ -252,6 +274,10 @@ func (m *FakeMachine) handle(c net.Conn) {
 					case modeUpload:
 						if len(f.Data) >= 6 {
 							totalPkts = uint32(f.Data[0])<<24 | uint32(f.Data[1])<<16 | uint32(f.Data[2])<<8 | uint32(f.Data[3])
+							ps := int(f.Data[4])<<8 | int(f.Data[5])
+							m.mu.Lock()
+							m.uploadPacketSizes = append(m.uploadPacketSizes, ps)
+							m.mu.Unlock()
 							nextSeq = 1
 							m.requestSeq(c, nextSeq)
 						}

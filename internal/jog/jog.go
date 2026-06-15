@@ -35,14 +35,28 @@ const (
 
 // Config controls the jog engine.
 type Config struct {
-	Enabled        bool
-	MaxXYMMMin     float64
-	MaxZMMMin      float64
-	Tick           time.Duration
-	StatusInterval time.Duration
-	DeadmanTimeout time.Duration
-	Log            Logger
+	Enabled         bool
+	MaxXYMMMin      float64
+	MaxZMMMin       float64
+	Tick            time.Duration
+	StatusInterval  time.Duration
+	DeadmanTimeout  time.Duration
+	MotionPrimitive MotionPrimitive
+	Log             Logger
 }
+
+// MotionPrimitive selects the wire command used for one jog segment.
+type MotionPrimitive string
+
+const (
+	// MotionPrimitiveInstant uses the firmware SimpleShell `$J` path. It plans a
+	// relative XYZ delta without touching modal G90/G91 state and force-starts
+	// the conveyor queue, which makes gamepad jogs lower latency than normal G0.
+	MotionPrimitiveInstant MotionPrimitive = "instant"
+	// MotionPrimitiveG53 keeps the older absolute machine-coordinate G53 G0
+	// segment path as a fallback.
+	MotionPrimitiveG53 MotionPrimitive = "g53"
+)
 
 // Logger records operational jog activity without coupling the jog engine to
 // the API/service layer.
@@ -53,12 +67,13 @@ type Logger interface {
 // DefaultConfig returns production-safe defaults.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:        true,
-		MaxXYMMMin:     1200,
-		MaxZMMMin:      300,
-		Tick:           50 * time.Millisecond,
-		StatusInterval: 100 * time.Millisecond,
-		DeadmanTimeout: 150 * time.Millisecond,
+		Enabled:         true,
+		MaxXYMMMin:      1200,
+		MaxZMMMin:       300,
+		Tick:            50 * time.Millisecond,
+		StatusInterval:  100 * time.Millisecond,
+		DeadmanTimeout:  150 * time.Millisecond,
+		MotionPrimitive: MotionPrimitiveInstant,
 	}
 }
 
@@ -78,6 +93,13 @@ func (c Config) normalize() Config {
 	}
 	if c.DeadmanTimeout <= 0 {
 		c.DeadmanTimeout = d.DeadmanTimeout
+	}
+	switch c.MotionPrimitive {
+	case "", MotionPrimitiveInstant:
+		c.MotionPrimitive = MotionPrimitiveInstant
+	case MotionPrimitiveG53:
+	default:
+		c.MotionPrimitive = d.MotionPrimitive
 	}
 	return c
 }
@@ -552,7 +574,7 @@ func (s *Session) motionTick() {
 	target["x"] += delta.X
 	target["y"] += delta.Y
 	target["z"] += delta.Z
-	cmd := jogCommand(target, delta)
+	cmd := jogCommand(target, delta, s.mgr.cfg.MotionPrimitive)
 
 	s.mu.Lock()
 	lease := s.lease
@@ -612,7 +634,28 @@ func response(v float64) float64 {
 	return sign * n * n * n
 }
 
-func jogCommand(target machine.AxisValues, delta Axes) string {
+func jogCommand(target machine.AxisValues, delta Axes, primitive MotionPrimitive) string {
+	if primitive == MotionPrimitiveG53 {
+		return g53JogCommand(target, delta)
+	}
+	return instantJogCommand(delta)
+}
+
+func instantJogCommand(delta Axes) string {
+	parts := "$J"
+	if delta.X != 0 {
+		parts += fmt.Sprintf(" X%.4f", delta.X)
+	}
+	if delta.Y != 0 {
+		parts += fmt.Sprintf(" Y%.4f", delta.Y)
+	}
+	if delta.Z != 0 {
+		parts += fmt.Sprintf(" Z%.4f", delta.Z)
+	}
+	return parts
+}
+
+func g53JogCommand(target machine.AxisValues, delta Axes) string {
 	parts := "G53 G0"
 	if delta.X != 0 {
 		parts += fmt.Sprintf(" X%.4f", target["x"])

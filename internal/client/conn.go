@@ -1,5 +1,5 @@
-// Package client speaks the Carvera wire protocol to a machine over a TCP
-// connection the proxy owns (owner mode). It implements the management commands
+// Package client speaks the Carvera framed protocol to a machine over the
+// proxy-owned machine-side transport. It implements the management commands
 // (ls/rm/mv/mkdir/md5sum), a status query, and the upload handshake.
 //
 // This is the execution path the sync engine uses; it is only ever active when
@@ -14,27 +14,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
 // WifiPacketSize is the upload chunk size used over WiFi, matching the
 // controller (XMODEM.py wifiMode).
-const WifiPacketSize = 8192
+const WifiPacketSize = machinetransport.TCPPacketSize
 
-// transport is the minimal byte channel Conn needs. A net.Conn satisfies it
-// directly (owner mode), and the relay's injection mux provides an
-// implementation that shares the controller's machine socket (relay mode).
-type transport interface {
-	Write(p []byte) (int, error)
-	Read(p []byte) (int, error)
-	SetReadDeadline(t time.Time) error
-	Close() error
+// USBPacketSize is the upload chunk size used over the firmware's USB serial
+// console, matching the controller (XMODEM.py USBMode) and staying below the
+// SerialConsole frame-length limit.
+const USBPacketSize = machinetransport.USBPacketSize
+
+// Option tunes a protocol connection.
+type Option func(*Conn)
+
+// WithFilePacketSize sets the FILE_VIEW packet size advertised during uploads.
+// Values <= 0 keep the default WiFi/TCP size.
+func WithFilePacketSize(n int) Option {
+	return func(k *Conn) {
+		if n > 0 {
+			k.filePacketSize = n
+		}
+	}
 }
 
 // Conn wraps a frame transport with frame-level read/write and a resync scanner.
 type Conn struct {
-	c    transport
-	scan protocol.Scanner
+	c              machinetransport.Conn
+	filePacketSize int
+	scan           protocol.Scanner
 	// pending holds frames already parsed from a read that returned more than
 	// one frame, so the next readFrame call drains them first.
 	pending []protocol.Frame
@@ -48,20 +58,35 @@ type Conn struct {
 // seen while running a command.
 func (k *Conn) SetStatusObserver(f func(payload string)) { k.onStatus = f }
 
-// Dial connects to a machine at host:port.
-func Dial(addr string, timeout time.Duration) (*Conn, error) {
+// Dial connects to a machine at host:port over TCP.
+func Dial(addr string, timeout time.Duration, opts ...Option) (*Conn, error) {
 	c, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return nil, err
 	}
-	return &Conn{c: c}, nil
+	return New(c, opts...), nil
 }
 
 // New wraps an existing connection (useful for tests).
-func New(c net.Conn) *Conn { return &Conn{c: c} }
+func New(c net.Conn, opts ...Option) *Conn { return newConn(c, opts...) }
 
 // NewTransport wraps any frame transport, e.g. the relay injection mux.
-func NewTransport(t transport) *Conn { return &Conn{c: t} }
+func NewTransport(t machinetransport.Conn, opts ...Option) *Conn {
+	return newConn(t, opts...)
+}
+
+func newConn(t machinetransport.Conn, opts ...Option) *Conn {
+	k := &Conn{c: t, filePacketSize: WifiPacketSize}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(k)
+		}
+	}
+	if k.filePacketSize <= 0 {
+		k.filePacketSize = WifiPacketSize
+	}
+	return k
+}
 
 // Close closes the underlying connection.
 func (k *Conn) Close() error { return k.c.Close() }
@@ -454,7 +479,7 @@ func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex strin
 		return err
 	}
 
-	packetSize := int64(WifiPacketSize)
+	packetSize := int64(k.filePacketSize)
 	totalPackets := uint32((size + packetSize - 1) / packetSize)
 	if totalPackets == 0 {
 		totalPackets = 1 // an empty file is still one (empty) packet to view
@@ -477,9 +502,10 @@ func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex strin
 				return err
 			}
 		case protocol.CmdFileView:
+			ps := k.filePacketSize
 			view := []byte{
 				byte(totalPackets >> 24), byte(totalPackets >> 16), byte(totalPackets >> 8), byte(totalPackets),
-				byte(WifiPacketSize >> 8), byte(WifiPacketSize & 0xFF),
+				byte(ps >> 8), byte(ps & 0xFF),
 			}
 			if err := k.writeFrame(protocol.Encode(protocol.CmdFileView, view)); err != nil {
 				return err

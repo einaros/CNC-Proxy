@@ -145,6 +145,38 @@ func TestUploadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUploadAdvertisesConfiguredPacketSize(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []Option
+		want int
+	}{
+		{name: "tcp default", want: WifiPacketSize},
+		{name: "usb", opts: []Option{WithFilePacketSize(USBPacketSize)}, want: USBPacketSize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := carveratest.New()
+			defer m.Close()
+			conn, err := Dial(m.Addr(), testTimeout, tc.opts...)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+
+			content := make([]byte, USBPacketSize*2+17)
+			rand.Read(content)
+			sum := md5.Sum(content)
+			if err := conn.Upload("/sd/gcodes/pkt.nc", bytes.NewReader(content), int64(len(content)), hex.EncodeToString(sum[:]), testTimeout, nil); err != nil {
+				t.Fatalf("Upload: %v", err)
+			}
+			sizes := m.UploadPacketSizes()
+			if len(sizes) != 1 || sizes[0] != tc.want {
+				t.Fatalf("upload packet sizes = %v, want [%d]", sizes, tc.want)
+			}
+		})
+	}
+}
+
 func TestDownloadRoundTrip(t *testing.T) {
 	m, _ := carveratest.New()
 	defer m.Close()
@@ -156,6 +188,33 @@ func TestDownloadRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	var lastRecv, lastTotal uint32
 	gotMD5, written, err := conn.Download("/sd/gcodes/dl.nc", &buf, testTimeout,
+		func(recv, total uint32) { lastRecv, lastTotal = recv, total })
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if written != int64(len(content)) || !bytes.Equal(buf.Bytes(), content) {
+		t.Errorf("downloaded %d bytes, want %d (equal=%v)", written, len(content), bytes.Equal(buf.Bytes(), content))
+	}
+	sum := md5.Sum(content)
+	if gotMD5 != hex.EncodeToString(sum[:]) {
+		t.Errorf("download md5 = %q, want %q", gotMD5, hex.EncodeToString(sum[:]))
+	}
+	if lastRecv != lastTotal || lastTotal != 3 {
+		t.Errorf("progress final = %d/%d, want 3/3", lastRecv, lastTotal)
+	}
+}
+
+func TestDownloadHandlesUSBPacketSize(t *testing.T) {
+	m, _ := carveratest.New()
+	defer m.Close()
+	m.SetDownloadPacketSize(USBPacketSize)
+	conn := dialFake(t, m)
+
+	content := uploadFixture(t, conn, "/sd/gcodes/usb-dl.nc", USBPacketSize*2+33)
+
+	var buf bytes.Buffer
+	var lastRecv, lastTotal uint32
+	gotMD5, written, err := conn.Download("/sd/gcodes/usb-dl.nc", &buf, testTimeout,
 		func(recv, total uint32) { lastRecv, lastTotal = recv, total })
 	if err != nil {
 		t.Fatalf("Download: %v", err)

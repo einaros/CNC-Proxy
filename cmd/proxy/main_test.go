@@ -2,6 +2,47 @@ package main
 
 import "testing"
 
+func TestValidateMachineTransport(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		device    string
+		baud      int
+		advertise bool
+		advName   string
+		wantErr   bool
+	}{
+		{name: "tcp default", kind: "tcp", baud: 115200},
+		{name: "usb ok no advertise", kind: "usb", device: "/dev/cu.usbserial-test", baud: 115200},
+		{name: "usb ok advertise with name", kind: "usb", device: "/dev/cu.usbserial-test", baud: 115200, advertise: true, advName: "Carvera USB"},
+		{name: "bad kind", kind: "serial", baud: 115200, wantErr: true},
+		{name: "usb missing device", kind: "usb", baud: 115200, wantErr: true},
+		{name: "usb bad baud", kind: "usb", device: "/dev/cu.usbserial-test", wantErr: true},
+		{name: "usb advertise missing name", kind: "usb", device: "/dev/cu.usbserial-test", baud: 115200, advertise: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMachineTransport(tc.kind, tc.device, tc.baud, tc.advertise, tc.advName)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateMachineTransport() err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestResolveUSBAdvertiseAddrsExplicit(t *testing.T) {
+	pip, bcast, err := resolveUSBAdvertiseAddrs("192.168.1.50", "192.168.1.255")
+	if err != nil {
+		t.Fatalf("resolveUSBAdvertiseAddrs explicit: %v", err)
+	}
+	if pip != "192.168.1.50" || bcast != "192.168.1.255" {
+		t.Fatalf("resolveUSBAdvertiseAddrs = %q %q", pip, bcast)
+	}
+	if _, _, err := resolveUSBAdvertiseAddrs("not-an-ip", ""); err == nil {
+		t.Fatal("invalid proxy IP should fail")
+	}
+}
+
 func TestIsLoopbackBind(t *testing.T) {
 	for _, tc := range []struct {
 		addr string

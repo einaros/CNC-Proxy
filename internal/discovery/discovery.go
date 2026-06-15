@@ -125,6 +125,10 @@ type Advertiser struct {
 	ProxyPort  int    // proxy's TCP listen port
 	Name       string // advertised machine name; empty = real name + NameSuffix
 	NameSuffix string // appended to the real machine name when Name is empty
+	Interval   time.Duration
+	// RequireMachine waits for a real machine broadcast before advertising, even
+	// when Name is set explicitly.
+	RequireMachine bool
 }
 
 // advertisedName returns the name to broadcast for the real machine realName.
@@ -135,12 +139,13 @@ func (a *Advertiser) advertisedName(realName string) string {
 	return realName + a.NameSuffix
 }
 
-// Run broadcasts once per second to the given destination (a directed-broadcast
-// address, or a unicast host such as host.docker.internal when broadcasts can't
-// traverse the network) until stop is closed. With an explicit Name it
-// advertises immediately; otherwise it waits until a real machine has been
-// learned, since the advertised name is derived from the real one. The busy
-// flag is copied from the machine's own broadcasts when available.
+// Run broadcasts at Interval, or once per second when Interval is unset, to the
+// given destination (a directed-broadcast address, or a unicast host such as
+// host.docker.internal when broadcasts can't traverse the network) until stop
+// is closed. With an explicit Name it advertises immediately; otherwise it waits
+// until a real machine has been learned, since the advertised name is derived
+// from the real one. The busy flag is copied from the machine's own broadcasts
+// when available.
 func (a *Advertiser) Run(broadcast string, stop <-chan struct{}) error {
 	// SO_BROADCAST is required to send to a broadcast address on Linux (and is
 	// harmless for unicast destinations); Go does not set it by default.
@@ -151,7 +156,11 @@ func (a *Advertiser) Run(broadcast string, stop <-chan struct{}) error {
 	}
 	defer conn.Close()
 
-	ticker := time.NewTicker(time.Second)
+	interval := a.Interval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -159,7 +168,7 @@ func (a *Advertiser) Run(broadcast string, stop <-chan struct{}) error {
 			return nil
 		case <-ticker.C:
 			m, ok := a.Listener.Latest()
-			if !ok && a.Name == "" {
+			if !ok && (a.Name == "" || a.RequireMachine) {
 				continue
 			}
 			adv := Machine{
@@ -262,4 +271,63 @@ func AutoAdvertiseAddrs(machineHostPort string) (proxyIP, broadcast string, err 
 		return "", "", err
 	}
 	return lip.String(), b.String(), nil
+}
+
+// SingleActiveLANAdvertiseAddrs derives advertise addresses from the only
+// active non-loopback broadcast-capable IPv4 interface. It is used when the
+// machine is reached over USB and there is no machine IP to route toward.
+func SingleActiveLANAdvertiseAddrs() (proxyIP, broadcast string, err error) {
+	type candidate struct {
+		ip    net.IP
+		bcast net.IP
+		iface string
+	}
+	var candidates []candidate
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", "", err
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagBroadcast == 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipn.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+				continue
+			}
+			mask := ipn.Mask
+			if len(mask) != 4 {
+				if len(mask) < 4 {
+					continue
+				}
+				mask = mask[len(mask)-4:]
+			}
+			b := make(net.IP, 4)
+			for i := 0; i < 4; i++ {
+				b[i] = ip[i] | ^mask[i]
+			}
+			candidates = append(candidates, candidate{ip: append(net.IP(nil), ip...), bcast: b, iface: ifc.Name})
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return "", "", fmt.Errorf("discovery: no active non-loopback IPv4 LAN interface found")
+	case 1:
+		return candidates[0].ip.String(), candidates[0].bcast.String(), nil
+	default:
+		names := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			names = append(names, c.iface+"="+c.ip.String())
+		}
+		return "", "", fmt.Errorf("discovery: multiple active IPv4 LAN interfaces (%s)", strings.Join(names, ", "))
+	}
 }

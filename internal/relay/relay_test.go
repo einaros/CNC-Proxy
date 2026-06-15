@@ -5,10 +5,12 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
+	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
@@ -118,6 +120,50 @@ func TestRelayForwardsFramesVerbatim(t *testing.T) {
 	rf := m.recvFrames()
 	if len(rf) != 1 || !bytes.Equal(rf[0].Raw, gcode) {
 		t.Fatalf("machine received %d frames; first matches gcode=%v", len(rf), len(rf) == 1 && bytes.Equal(rf[0].Raw, gcode))
+	}
+}
+
+func TestRelayUsesGenericMachineTransport(t *testing.T) {
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd == protocol.CmdCtrlSingle && len(f.Data) == 1 && f.Data[0] == '?' {
+			c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:0,0,0>")))
+		}
+	}
+	var dials atomic.Int32
+	srv := &Server{
+		MachineDial: func() (*machinetransport.Opened, error) {
+			dials.Add(1)
+			c, err := net.Dial("tcp", m.ln.Addr().String())
+			if err != nil {
+				return nil, err
+			}
+			return &machinetransport.Opened{
+				Conn:       c,
+				Label:      "fake-usb",
+				Kind:       machinetransport.KindUSB,
+				PacketSize: machinetransport.USBPacketSize,
+			}, nil
+		},
+	}
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { proxyLn.Close() })
+	go srv.Serve(proxyLn)
+
+	controller, err := net.Dial("tcp", proxyLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	if _, err := controller.Write(protocol.QueryStatus()); err != nil {
+		t.Fatal(err)
+	}
+	readControllerFrame(t, controller, protocol.CmdStatusRes)
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("MachineDial calls = %d, want 1", got)
 	}
 }
 

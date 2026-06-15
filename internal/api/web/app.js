@@ -1646,8 +1646,6 @@ function controlErrorText(action, message) {
 
 function confirmControl(action) {
   switch (action) {
-  case "halt":
-    return confirm("Emergency halt the machine? This stops all motion and enters Alarm.");
   case "recover":
     return confirm("Recover this alarm? Clear the physical cause first. For soft limits, the proxy will unlock and verify status; home before moving afterward.");
   case "unlock":
@@ -2084,9 +2082,7 @@ function init() {
 
   document.getElementById("ctl-hold").onclick = () => sendControl("hold");
   document.getElementById("ctl-resume").onclick = () => sendControl("resume");
-  document.getElementById("ctl-halt").onclick = () => {
-    if (confirm("Emergency halt the machine? This stops all motion and enters Alarm.")) sendControl("halt");
-  };
+  document.getElementById("ctl-halt").onclick = () => sendControl("halt");
   bindDataControlButtons();
   document.getElementById("jog-arm").onclick = () => sendJog({ type: state.jog.armed ? "disarm" : "arm" });
 

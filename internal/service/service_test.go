@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/machine"
+	"github.com/uwin/cnc-proxy/internal/protocol"
+	"github.com/uwin/cnc-proxy/internal/relay"
 	"github.com/uwin/cnc-proxy/internal/runhistory"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -412,6 +415,81 @@ func TestRecoverAlarmSoftLimitUnlocksAndVerifies(t *testing.T) {
 	if g := m.Gcodes(); len(g) != 1 || g[0] != "$X" {
 		t.Fatalf("recovery gcodes = %v, want [$X]", g)
 	}
+}
+
+func TestRecoverAlarmViaRelayInjectionVerifiesStatus(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	status := "<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>"
+	m.SetStatus(status)
+
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+	})
+	relaySrv := &relay.Server{
+		Dial:     func() (string, error) { return m.Addr(), nil },
+		Observer: arb,
+	}
+	arb.SetInjector(relayAdapter{relaySrv})
+	arb.SetControlWriter(relaySrv)
+	svc, err := New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go relaySrv.Serve(ln)
+
+	controller, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { controller.Close() })
+	if _, err := controller.Write(protocol.QueryStatus()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		st, _ := tr.Current()
+		if arb.Mode() == session.ModeRelay && st.State == machine.Alarm {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("relay did not observe initial alarm status; mode=%s status=%+v", arb.Mode(), st)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	res, err := svc.RecoverAlarm("recover")
+	if err != nil {
+		t.Fatalf("recover via relay: %v", err)
+	}
+	if !res.Recovered || res.State != machine.Idle || !res.NeedsHome {
+		t.Fatalf("recovery result = %+v, want recovered Idle with needs_home", res)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "$X" {
+		t.Fatalf("recovery gcodes = %v, want [$X]", g)
+	}
+}
+
+type relayAdapter struct{ srv *relay.Server }
+
+func (a relayAdapter) AcquireMachine() (session.InjectTransport, func(), error) {
+	it, release, err := a.srv.AcquireMachine()
+	if err != nil {
+		return nil, nil, err
+	}
+	return it, release, nil
 }
 
 func TestRecoverAlarmSoftLimitFallsBackToM999(t *testing.T) {

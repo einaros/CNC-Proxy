@@ -72,7 +72,7 @@ func TestActiveSessionAvailabilityIgnoresItself(t *testing.T) {
 	}
 }
 
-func TestJogOwnerEmitsG53Segments(t *testing.T) {
+func TestJogOwnerEmitsInstantSegments(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
 
@@ -90,13 +90,22 @@ func TestJogOwnerEmitsG53Segments(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range fm.Gcodes() {
-			if strings.HasPrefix(line, "G53 G0 X") && !strings.Contains(line, "G91") {
+			if strings.HasPrefix(line, "$J X") && !strings.Contains(line, "G91") {
 				return
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("no G53 jog command observed; gcodes=%v", fm.Gcodes())
+	t.Fatalf("no instant jog command observed; gcodes=%v", fm.Gcodes())
+}
+
+func TestJogG53FallbackCommand(t *testing.T) {
+	target := machine.AxisValues{"x": 1.25, "y": -2.5, "z": 3.75}
+	delta := Axes{X: 0.5, Z: -0.25}
+	got := jogCommand(target, delta, MotionPrimitiveG53)
+	if got != "G53 G0 X1.2500 Z3.7500" {
+		t.Fatalf("G53 fallback command = %q", got)
+	}
 }
 
 func TestJogEmitsMotionEventAndLog(t *testing.T) {
@@ -116,14 +125,14 @@ func TestJogEmitsMotionEventAndLog(t *testing.T) {
 	drainUntil(t, s, "ack")
 	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1, Y: -0.5}, At: time.Now()})
 	ev := drainUntil(t, s, "motion")
-	if ev.Motion == nil || !strings.HasPrefix(ev.Motion.Command, "G53 G0") || ev.Motion.Target["x"] == 0 {
+	if ev.Motion == nil || !strings.HasPrefix(ev.Motion.Command, "$J") || ev.Motion.Target["x"] == 0 {
 		t.Fatalf("motion event = %+v", ev.Motion)
 	}
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		for _, ln := range log.Recent() {
-			if ln.Source == gcodelog.SourceJog && ln.Dir == gcodelog.DirSend && strings.HasPrefix(ln.Text, "G53 G0") {
+			if ln.Source == gcodelog.SourceJog && ln.Dir == gcodelog.DirSend && strings.HasPrefix(ln.Text, "$J") {
 				return
 			}
 		}
@@ -157,7 +166,7 @@ func TestJogLogsAlarmWithLastMotion(t *testing.T) {
 			if ln.Source == gcodelog.SourceJog && ln.Dir == gcodelog.DirRecv &&
 				strings.Contains(ln.Text, "alarm status:") &&
 				strings.Contains(ln.Text, "H:10 Soft limit triggered") &&
-				strings.Contains(ln.Text, "after G53 G0") {
+				strings.Contains(ln.Text, "after $J") {
 				return
 			}
 		}
@@ -337,13 +346,13 @@ func TestJogRelayIdleController(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range fm.Gcodes() {
-			if strings.HasPrefix(line, "G53 G0 X") {
+			if strings.HasPrefix(line, "$J X") {
 				return
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("no relay jog command observed; gcodes=%v", fm.Gcodes())
+	t.Fatalf("no relay instant jog command observed; gcodes=%v", fm.Gcodes())
 }
 
 func newJogManager(t *testing.T) (*Manager, *carveratest.FakeMachine, func()) {

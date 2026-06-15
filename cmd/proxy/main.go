@@ -2,8 +2,9 @@
 // proxy plus a file-handling API for the machine.
 //
 // It does several things at once:
-//   - Relays the official controller to the machine on TCP 2222, byte-for-byte,
-//     and answers UDP discovery so the controller finds the proxy.
+//   - Relays the official controller's TCP 2222 session byte-for-byte to the
+//     machine over TCP or USB, and answers UDP discovery so the controller finds
+//     the proxy.
 //   - Owns the machine connection whenever no controller is attached, polling
 //     status and draining a durable job queue while the machine is idle.
 //   - Serves an HTTP API + web UI for uploading and managing files, with
@@ -41,6 +42,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/discovery"
 	"github.com/uwin/cnc-proxy/internal/httpauth"
 	"github.com/uwin/cnc-proxy/internal/jog"
+	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/relay"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
@@ -51,38 +53,50 @@ import (
 func main() {
 	jogDefaults := jog.DefaultConfig()
 	var (
-		tcpPort      = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
-		machineAddr  = flag.String("machine", "", "machine host:port; if empty, learned via UDP discovery")
-		advertise    = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
-		proxyIP      = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
-		broadcast    = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
-		name         = flag.String("name", "", "advertised machine name; replaces the real name entirely (default: real name + -name-suffix)")
-		nameSuffix   = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name when -name is not set")
-		noAdvertise  = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
-		apiAddr      = flag.String("api-addr", "127.0.0.1:8420", "address for the HTTP API + web UI")
-		davAddr      = flag.String("dav-addr", "127.0.0.1:8421", "address for the WebDAV filesystem server")
-		authUser     = flag.String("auth-user", "cnc", "HTTP Basic Auth username for API/WebDAV when -auth-token is set")
-		authToken    = flag.String("auth-token", "", "HTTP Basic Auth token/password for API/WebDAV")
-		insecureHTTP = flag.Bool("allow-insecure-http", false, "allow API/WebDAV to bind beyond loopback without -auth-token")
-		dataDir      = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
-		apiUploadMB  = flag.Int64("api-max-upload-mb", 512, "maximum API/WebDAV upload body size in MiB")
-		apiJSONKB    = flag.Int64("api-max-json-kb", 1024, "maximum API JSON request body size in KiB")
-		apiBackupMB  = flag.Int64("api-max-backup-mb", 64, "maximum API backup import body size in MiB")
-		jogEnabled   = flag.Bool("jog-enabled", jogDefaults.Enabled, "enable low-latency gamepad jogging API/UI")
-		jogMaxXY     = flag.Float64("jog-max-xy-mm-min", jogDefaults.MaxXYMMMin, "maximum XY jog speed in mm/min")
-		jogMaxZ      = flag.Float64("jog-max-z-mm-min", jogDefaults.MaxZMMMin, "maximum Z jog speed in mm/min")
-		jogTick      = flag.Duration("jog-tick", jogDefaults.Tick, "gamepad jog motion tick interval")
-		jogStatus    = flag.Duration("jog-status-interval", jogDefaults.StatusInterval, "status polling interval while a jog lease is armed")
-		jogDeadman   = flag.Duration("jog-deadman-timeout", jogDefaults.DeadmanTimeout, "maximum age of held-deadman gamepad input before motion stops")
+		tcpPort          = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
+		machineTransport = flag.String("machine-transport", machinetransport.KindTCP, "machine-side transport: tcp or usb")
+		machineAddr      = flag.String("machine", "", "machine TCP host:port; if empty in TCP mode, learned via UDP discovery")
+		usbDevice        = flag.String("usb-device", "", "USB/serial device for -machine-transport=usb (for example /dev/cu.usbserial-...)")
+		usbBaud          = flag.Int("usb-baud", 115200, "USB serial baud rate")
+		usbResetOnOpen   = flag.Bool("usb-reset-on-open", false, "toggle DTR when opening the USB serial device")
+		advertise        = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
+		proxyIP          = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
+		broadcast        = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
+		name             = flag.String("name", "", "advertised machine name; replaces the real name entirely (default: real name + -name-suffix)")
+		nameSuffix       = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name when -name is not set")
+		noAdvertise      = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
+		apiAddr          = flag.String("api-addr", "127.0.0.1:8420", "address for the HTTP API + web UI")
+		davAddr          = flag.String("dav-addr", "127.0.0.1:8421", "address for the WebDAV filesystem server")
+		authUser         = flag.String("auth-user", "cnc", "HTTP Basic Auth username for API/WebDAV when -auth-token is set")
+		authToken        = flag.String("auth-token", "", "HTTP Basic Auth token/password for API/WebDAV")
+		insecureHTTP     = flag.Bool("allow-insecure-http", false, "allow API/WebDAV to bind beyond loopback without -auth-token")
+		dataDir          = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
+		apiUploadMB      = flag.Int64("api-max-upload-mb", 512, "maximum API/WebDAV upload body size in MiB")
+		apiJSONKB        = flag.Int64("api-max-json-kb", 1024, "maximum API JSON request body size in KiB")
+		apiBackupMB      = flag.Int64("api-max-backup-mb", 64, "maximum API backup import body size in MiB")
+		jogEnabled       = flag.Bool("jog-enabled", jogDefaults.Enabled, "enable low-latency gamepad jogging API/UI")
+		jogMaxXY         = flag.Float64("jog-max-xy-mm-min", jogDefaults.MaxXYMMMin, "maximum XY jog speed in mm/min")
+		jogMaxZ          = flag.Float64("jog-max-z-mm-min", jogDefaults.MaxZMMMin, "maximum Z jog speed in mm/min")
+		jogTick          = flag.Duration("jog-tick", jogDefaults.Tick, "gamepad jog motion tick interval")
+		jogStatus        = flag.Duration("jog-status-interval", jogDefaults.StatusInterval, "status polling interval while a jog lease is armed")
+		jogDeadman       = flag.Duration("jog-deadman-timeout", jogDefaults.DeadmanTimeout, "maximum age of held-deadman gamepad input before motion stops")
+		jogMotion        = flag.String("jog-motion", string(jogDefaults.MotionPrimitive), "gamepad jog motion primitive: instant or g53")
 	)
 	applyEnvDefaults()
 	flag.Parse()
 
+	transportKind := machinetransport.NormalizeKind(*machineTransport)
+	if err := validateMachineTransport(transportKind, *usbDevice, *usbBaud, *advertise, *name); err != nil {
+		log.Fatal(err)
+	}
 	if strings.Contains(*name, ",") || strings.Contains(*nameSuffix, ",") {
 		log.Fatal("-name/-name-suffix must not contain ',' (the discovery wire format is comma-separated)")
 	}
 	if err := validateHTTPExposure(*apiAddr, *davAddr, *authToken, *insecureHTTP); err != nil {
 		log.Fatal(err)
+	}
+	if *jogMotion != string(jog.MotionPrimitiveInstant) && *jogMotion != string(jog.MotionPrimitiveG53) {
+		log.Fatalf("-jog-motion must be %q or %q", jog.MotionPrimitiveInstant, jog.MotionPrimitiveG53)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -91,21 +105,42 @@ func main() {
 	_ = *noAdvertise // deprecated flag, kept so old invocations don't error
 
 	// --- Discovery ---
-	// Always listen: discovery is how we learn the machine when -machine is
-	// omitted, and how the advertiser learns the machine name to re-broadcast.
+	// In TCP mode, always listen: discovery is how we learn the machine when
+	// -machine is omitted, and how the advertiser learns the machine name to
+	// re-broadcast. In USB mode there is no machine UDP broadcast to learn, and
+	// the operator must provide -name when advertising, so we avoid binding
+	// udp/3333 unnecessarily.
 	disc := &discovery.Listener{}
-	udp, err := discovery.OpenListenSocket()
-	if err != nil {
-		log.Fatalf("cannot bind UDP discovery port %d: %v", discovery.Port, err)
+	if transportKind == machinetransport.KindTCP {
+		udp, err := discovery.OpenListenSocket()
+		if err != nil {
+			log.Fatalf("cannot bind UDP discovery port %d: %v", discovery.Port, err)
+		}
+		defer udp.Close()
+		go disc.Listen(udp)
+		log.Printf("discovery: listening on udp/%d", discovery.Port)
+	} else {
+		log.Printf("discovery: machine discovery disabled in USB transport mode")
 	}
-	defer udp.Close()
-	go disc.Listen(udp)
-	log.Printf("discovery: listening on udp/%d", discovery.Port)
 
 	dialAddr := machineDialer(*machineAddr, disc)
+	machineOpen := machineOpener(transportKind, dialAddr, *usbDevice, *usbBaud, *usbResetOnOpen)
+	filePacketSize := machinetransport.PacketSizeForKind(transportKind)
 
 	stop := make(chan struct{})
 	if *advertise {
+		if transportKind == machinetransport.KindUSB && (*proxyIP == "" || *broadcast == "") {
+			autoIP, autoBcast, derr := resolveUSBAdvertiseAddrs(*proxyIP, *broadcast)
+			if derr != nil {
+				log.Fatalf("discovery: cannot auto-select advertise addresses for USB mode (%v); pass -proxy-ip and -broadcast explicitly", derr)
+			}
+			if *proxyIP == "" {
+				*proxyIP = autoIP
+			}
+			if *broadcast == "" {
+				*broadcast = autoBcast
+			}
+		}
 		// Transparent mode: re-advertise so the official controller connects
 		// through us. Resolve the addresses to advertise; auto-derive any that
 		// the user didn't pin via flags. Run in a goroutine because in pure
@@ -113,6 +148,10 @@ func main() {
 		go func() {
 			pip, bcast := *proxyIP, *broadcast
 			if pip == "" || bcast == "" {
+				if transportKind == machinetransport.KindUSB {
+					log.Printf("discovery: USB mode requires -proxy-ip and -broadcast when auto-selection is unavailable")
+					return
+				}
 				machine := resolveMachineForAdvertise(*machineAddr, disc, stop)
 				if machine == "" {
 					return // shutting down before a machine appeared
@@ -149,12 +188,13 @@ func main() {
 
 	arb := session.New(session.Config{
 		Dial: func() (*client.Conn, error) {
-			addr, err := dialAddr()
+			opened, err := machineOpen()
 			if err != nil {
 				return nil, err
 			}
-			return client.Dial(addr, 5*time.Second)
+			return client.NewTransport(opened.Conn, client.WithFilePacketSize(opened.PacketSize)), nil
 		},
+		FilePacketSize: filePacketSize,
 	})
 	go arb.Poll(ctx, 5*time.Second)
 
@@ -171,13 +211,14 @@ func main() {
 	}
 	go svc.RunMaintenance(ctx, 10*time.Minute, 24*time.Hour, 24*time.Hour)
 	jogMgr := jog.New(arb, jog.Config{
-		Enabled:        *jogEnabled,
-		MaxXYMMMin:     *jogMaxXY,
-		MaxZMMMin:      *jogMaxZ,
-		Tick:           *jogTick,
-		StatusInterval: *jogStatus,
-		DeadmanTimeout: *jogDeadman,
-		Log:            svc.GcodeLog(),
+		Enabled:         *jogEnabled,
+		MaxXYMMMin:      *jogMaxXY,
+		MaxZMMMin:       *jogMaxZ,
+		Tick:            *jogTick,
+		StatusInterval:  *jogStatus,
+		DeadmanTimeout:  *jogDeadman,
+		MotionPrimitive: jog.MotionPrimitive(*jogMotion),
+		Log:             svc.GcodeLog(),
 	})
 
 	authCfg := httpauth.Config{User: *authUser, Token: *authToken}
@@ -204,8 +245,9 @@ func main() {
 
 	// --- Relay (with arbiter as observer + injection source) ---
 	relaySrv := &relay.Server{
-		Dial:     dialAddr,
-		Observer: arb,
+		Dial:        dialAddr,
+		MachineDial: machineOpen,
+		Observer:    arb,
 		// Sniff the controller's gcode/console traffic into the shared log the
 		// API streams to web clients (read-only; frames are never altered).
 		GcodeLog: svc.GcodeLog(),
@@ -276,6 +318,64 @@ func machineDialer(fixed string, l *discovery.Listener) func() (string, error) {
 		}
 		return net.JoinHostPort(m.IP, strconv.Itoa(m.Port)), nil
 	}
+}
+
+func machineOpener(kind string, tcpAddr func() (string, error), usbDevice string, usbBaud int, usbResetOnOpen bool) func() (*machinetransport.Opened, error) {
+	return func() (*machinetransport.Opened, error) {
+		return machinetransport.Open(machinetransport.Config{
+			Kind:           kind,
+			TCPAddr:        tcpAddr,
+			USBDevice:      usbDevice,
+			USBBaud:        usbBaud,
+			USBResetOnOpen: usbResetOnOpen,
+			DialTimeout:    5 * time.Second,
+		})
+	}
+}
+
+func validateMachineTransport(kind, usbDevice string, usbBaud int, advertise bool, name string) error {
+	kind = machinetransport.NormalizeKind(kind)
+	if err := machinetransport.ValidateKind(kind); err != nil {
+		return err
+	}
+	if kind != machinetransport.KindUSB {
+		return nil
+	}
+	if usbDevice == "" {
+		return errors.New("-usb-device is required when -machine-transport=usb")
+	}
+	if usbBaud <= 0 {
+		return errors.New("-usb-baud must be positive")
+	}
+	if advertise && strings.TrimSpace(name) == "" {
+		return errors.New("-name is required with -advertise when -machine-transport=usb")
+	}
+	return nil
+}
+
+func resolveUSBAdvertiseAddrs(proxyIP, broadcast string) (string, string, error) {
+	if proxyIP != "" && broadcast != "" {
+		return proxyIP, broadcast, nil
+	}
+	if proxyIP != "" {
+		ip := net.ParseIP(proxyIP)
+		if ip == nil {
+			return "", "", fmt.Errorf("invalid -proxy-ip %q", proxyIP)
+		}
+		b, err := discovery.BroadcastFor(ip)
+		if err != nil {
+			return "", "", err
+		}
+		return proxyIP, b.String(), nil
+	}
+	autoIP, autoBcast, err := discovery.SingleActiveLANAdvertiseAddrs()
+	if err != nil {
+		return "", "", err
+	}
+	if broadcast != "" {
+		autoBcast = broadcast
+	}
+	return autoIP, autoBcast, nil
 }
 
 func validateHTTPExposure(apiAddr, davAddr, authToken string, allowInsecure bool) error {

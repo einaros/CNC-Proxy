@@ -1,17 +1,19 @@
 // Package relay implements a byte-transparent TCP proxy between the Carvera
-// controller and the machine firmware on port 2222.
+// controller and the machine-side transport.
 //
 // The firmware is effectively single-session (it sends responses to "the latest
 // connected remote" and uploads take a global lock), so the relay admits only
 // one controller at a time. Additional connections are refused until the active
 // one closes, mirroring how the machine itself behaves.
 //
-// Bytes are forwarded verbatim in both directions; frames are only sniffed for
-// logging and never altered, so CRCs the controller validates stay intact.
+// Controller-facing TCP bytes are forwarded verbatim in both directions; frames
+// are only sniffed for logging and never altered, so CRCs the controller
+// validates stay intact.
 package relay
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
+	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
@@ -41,6 +44,11 @@ type Server struct {
 	// MachineAddr is resolved lazily per-connection via Dial so the proxy can
 	// start before the machine is discovered.
 	Dial func() (string, error)
+
+	// MachineDial opens the machine-side transport. When set, it supersedes
+	// Dial and may return either TCP or USB/serial. The controller-facing side
+	// of the relay remains TCP.
+	MachineDial func() (*machinetransport.Opened, error)
 
 	// Observer, if set, receives session lifecycle and state-observation hooks.
 	Observer Observer
@@ -108,7 +116,7 @@ func (s *Server) AcquireInteractive() (InjectTransport, <-chan struct{}, func(),
 }
 
 // SendControl writes a single realtime control character (CTRL_SINGLE) straight
-// to the shared machine socket, out-of-band — without taking the injection
+// to the shared machine transport, out-of-band — without taking the injection
 // window. The firmware acts on '!'/'~'/0x18 immediately from its receive path
 // regardless of any in-flight transaction, including controller file transfers,
 // so this lets an emergency halt preempt even a controller program. Returns
@@ -161,18 +169,14 @@ func (s *Server) handle(client net.Conn) {
 		defer s.Observer.ExitRelay()
 	}
 
-	addr, err := s.Dial()
+	opened, err := s.openMachine()
 	if err != nil {
 		log.Printf("relay: no machine to dial for %s: %v", peer, err)
 		return
 	}
-	machine, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		log.Printf("relay: dial machine %s failed: %v", addr, err)
-		return
-	}
+	machine := opened.Conn
 	defer machine.Close()
-	log.Printf("relay: session up %s <-> machine %s", peer, addr)
+	log.Printf("relay: session up %s <-> machine %s", peer, opened.Label)
 
 	m := newMux(machine)
 	s.mu.Lock()
@@ -201,10 +205,46 @@ func (s *Server) handle(client net.Conn) {
 	log.Printf("relay: session closed %s", peer)
 }
 
+func (s *Server) openMachine() (*machinetransport.Opened, error) {
+	if s.MachineDial != nil {
+		opened, err := s.MachineDial()
+		if err != nil {
+			return nil, err
+		}
+		if opened == nil || opened.Conn == nil {
+			return nil, errors.New("machine dialer returned nil connection")
+		}
+		if opened.Label == "" {
+			opened.Label = opened.Kind
+		}
+		if opened.PacketSize <= 0 {
+			opened.PacketSize = machinetransport.PacketSizeForKind(opened.Kind)
+		}
+		return opened, nil
+	}
+	if s.Dial == nil {
+		return nil, errors.New("no machine dialer configured")
+	}
+	addr, err := s.Dial()
+	if err != nil {
+		return nil, err
+	}
+	machine, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial machine %s: %w", addr, err)
+	}
+	return &machinetransport.Opened{
+		Conn:       machine,
+		Label:      addr,
+		Kind:       machinetransport.KindTCP,
+		PacketSize: machinetransport.TCPPacketSize,
+	}, nil
+}
+
 // pumpControllerToMachine forwards controller frames to the machine, except
 // while an injection holds the mux, when most frames are buffered for replay and
 // status polls are answered locally from the cached status.
-func (s *Server) pumpControllerToMachine(client, machine net.Conn, m *mux) {
+func (s *Server) pumpControllerToMachine(client net.Conn, machine machinetransport.Conn, m *mux) {
 	var sc protocol.Scanner
 	buf := make([]byte, 32*1024)
 	for {
@@ -238,7 +278,7 @@ func (s *Server) pumpControllerToMachine(client, machine net.Conn, m *mux) {
 // to the active injector during an injection window. Status reports are always
 // forwarded to the controller (and observed) so its state and heartbeat stay
 // current.
-func (s *Server) pumpMachineToController(machine, client net.Conn, m *mux) {
+func (s *Server) pumpMachineToController(machine machinetransport.Conn, client net.Conn, m *mux) {
 	var sc protocol.Scanner
 	buf := make([]byte, 32*1024)
 	for {

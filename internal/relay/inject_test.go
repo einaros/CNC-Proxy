@@ -240,6 +240,48 @@ func TestInjectionAnswersControllerPollsFromCache(t *testing.T) {
 	release()
 }
 
+// TestInjectionStatusPollDeliveredToInjector verifies that a proxy status poll
+// sent inside a normal injection window receives its STATUS_RES. Controller
+// polls are still answered from cache by TestInjectionAnswersControllerPollsFromCache.
+func TestInjectionStatusPollDeliveredToInjector(t *testing.T) {
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd == protocol.CmdCtrlSingle && len(f.Data) == 1 && f.Data[0] == '?' {
+			c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:4,5,6>")))
+		}
+	}
+	srv, addr := startRelay(t, m)
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	controller.Write(protocol.QueryStatus())
+	readControllerFrame(t, controller, protocol.CmdStatusRes)
+
+	it, release, err := srv.AcquireMachine()
+	if err != nil {
+		t.Fatalf("AcquireMachine: %v", err)
+	}
+	defer release()
+
+	if _, err := it.Write(protocol.QueryStatus()); err != nil {
+		t.Fatal(err)
+	}
+	f := readTransportFrame(t, it, protocol.CmdStatusRes)
+	if string(f.Data) != "<Idle|MPos:4,5,6>" {
+		t.Fatalf("injector status = %q", f.Data)
+	}
+
+	controller.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	buf := make([]byte, 256)
+	if n, err := controller.Read(buf); err == nil && n > 0 {
+		t.Fatalf("controller received proxy-injected status frame: %x", buf[:n])
+	}
+}
+
 func TestRelayControlAllowedDuringControllerFileTransfer(t *testing.T) {
 	m := newFrameMachine(t)
 	srv, addr := startRelay(t, m)

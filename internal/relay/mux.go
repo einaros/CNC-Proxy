@@ -2,10 +2,10 @@ package relay
 
 import (
 	"errors"
-	"net"
 	"sync"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
@@ -17,20 +17,21 @@ var ErrBusy = errors.New("relay: machine busy with controller transaction")
 // connection) is currently active.
 var ErrNoSession = errors.New("relay: no active controller session")
 
-// mux owns the single machine socket during a controller session and
+// mux owns the single machine-side transport during a controller session and
 // multiplexes two producers onto it: the controller (default) and an injected
 // proxy operation (upload, gcode) that briefly takes over.
 //
 // Only one injection runs at a time, and only while the controller is between
 // transactions. While an injection holds the mux:
 //   - controller->machine frames are buffered and replayed when it releases;
-//   - machine->controller frames are diverted to the injector (so the stateful
-//     LOAD_*/FILE_*/DIAG responses of the injected op never reach the
-//     controller and corrupt its state);
+//   - machine->controller frames produced by the injected op are diverted to the
+//     injector (so stateful LOAD_*/FILE_*/DIAG responses, plus STATUS_RES
+//     replies to injected `?` polls, never reach the controller and corrupt its
+//     state);
 //   - the controller's status `?` polls are answered from the cached last
 //     status report, keeping its heartbeat alive with no time pressure.
 type mux struct {
-	machine net.Conn
+	machine machinetransport.Conn
 
 	mu sync.Mutex
 	// injecting is true while an injected operation owns the reply stream.
@@ -40,6 +41,10 @@ type mux struct {
 	interactive bool
 	// injectCh delivers machine frames to the active injector.
 	injectCh chan protocol.Frame
+	// injectStatusPolls counts STATUS_RES replies owed to non-interactive
+	// injected `?` polls. Controller polls are answered from cache and never
+	// increment this.
+	injectStatusPolls int
 	// abortCh is closed when an interactive lease must release promptly.
 	abortCh chan struct{}
 	// heldController accumulates controller->machine frames during injection,
@@ -53,7 +58,7 @@ type mux struct {
 	controllerMidXfer bool
 }
 
-func newMux(machine net.Conn) *mux {
+func newMux(machine machinetransport.Conn) *mux {
 	return &mux{machine: machine}
 }
 
@@ -106,11 +111,10 @@ func (m *mux) cachedStatusFrame() []byte {
 	return protocol.Encode(protocol.CmdStatusRes, m.lastStatus)
 }
 
-// writeControl writes a single realtime control character to the machine socket
-// out-of-band, without taking the injection window. net.Conn writes are
-// concurrency-safe, and a CTRL_SINGLE frame is one atomic Write, so this is safe
-// to call concurrently with an active injection, controller file transfer, or
-// the relay's own pumps.
+// writeControl writes a single realtime control character to the machine
+// transport out-of-band, without taking the injection window. Transports must
+// serialize Write calls so a CTRL_SINGLE frame cannot byte-interleave with an
+// active injection, controller file transfer, or the relay's own pumps.
 func (m *mux) writeControl(c byte) error {
 	_, err := m.machine.Write(protocol.Encode(protocol.CmdCtrlSingle, []byte{c}))
 	return err
@@ -174,6 +178,7 @@ func (m *mux) releaseInjection() {
 	m.heldController = nil
 	m.injecting = false
 	m.interactive = false
+	m.injectStatusPolls = 0
 	ch := m.injectCh
 	m.injectCh = nil
 	abortCh := m.abortCh
@@ -203,27 +208,32 @@ func (m *mux) routeMachineFrame(f protocol.Frame) (forward bool) {
 	if !m.injecting {
 		return true
 	}
-	if m.interactive && f.Cmd == protocol.CmdStatusRes {
-		if m.injectCh != nil {
-			select {
-			case m.injectCh <- f:
-			default:
-			}
-		}
-		return false
-	}
-	// Status reports during injection still go to the controller too, so its
-	// heartbeat stays fed; everything else is the injected op's response.
 	if f.Cmd == protocol.CmdStatusRes {
+		if m.interactive {
+			m.deliverInjectLocked(f)
+			return false
+		}
+		if m.injectStatusPolls > 0 {
+			m.injectStatusPolls--
+			m.deliverInjectLocked(f)
+			return false
+		}
+		// Stray status reports during injection still go to the controller; its
+		// own polls are answered from cache and never hit the machine.
 		return true
 	}
-	if m.injectCh != nil {
-		select {
-		case m.injectCh <- f:
-		default:
-		}
-	}
+	m.deliverInjectLocked(f)
 	return false
+}
+
+func (m *mux) deliverInjectLocked(f protocol.Frame) {
+	if m.injectCh == nil {
+		return
+	}
+	select {
+	case m.injectCh <- f:
+	default:
+	}
 }
 
 func (m *mux) abortInteractiveLocked() {
@@ -244,11 +254,12 @@ func (m *mux) closeAbort(ch chan struct{}) {
 }
 
 // injectTransport adapts the mux into a client.transport for the duration of an
-// injection: writes go straight to the machine socket, reads come from the
+// injection: writes go straight to the machine transport, reads come from the
 // diverted machine frames.
 type injectTransport struct {
 	m        *mux
 	scanBuf  []byte // leftover bytes from a frame not fully consumed by Read
+	writeSc  protocol.Scanner
 	deadline time.Time
 }
 
@@ -259,7 +270,25 @@ func (t *injectTransport) Write(p []byte) (int, error) {
 	if closed {
 		return 0, errInjectionClosed
 	}
+	t.noteInjectedFrames(p)
 	return t.m.machine.Write(p)
+}
+
+func (t *injectTransport) noteInjectedFrames(p []byte) {
+	polls := 0
+	for _, f := range t.writeSc.Push(p) {
+		if isStatusPoll(f) {
+			polls++
+		}
+	}
+	if polls == 0 {
+		return
+	}
+	t.m.mu.Lock()
+	if t.m.injecting && !t.m.interactive && t.m.injectCh != nil {
+		t.m.injectStatusPolls += polls
+	}
+	t.m.mu.Unlock()
 }
 
 func (t *injectTransport) Read(p []byte) (int, error) {
