@@ -262,10 +262,13 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing jog visualization or connection status")
 	}
-	for _, want := range []string{`id="status-fields"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `/app.js?v=ui-layout-1`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("index Cache-Control = %q, want no-store", got)
 	}
 	for _, want := range []string{`id="file-browser"`, `id="folder-tree"`, `id="breadcrumbs"`, `id="folder-up"`, `id="folder-new"`, `id="current-folder"`} {
 		if !strings.Contains(string(body), want) {
@@ -277,9 +280,14 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`, `id="jog-buttons"`} {
+	for _, want := range []string{`id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`, `id="jog-buttons"`, `id="jog-target-pos"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
+		}
+	}
+	for _, want := range []string{`class="metric-grid"`, `class="jog-body"`, `class="metric metric--primary"`, `class="table-scroll"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing layout marker %s", want)
 		}
 	}
 
@@ -292,10 +300,13 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), "/api/events?scope=control") || !strings.Contains(string(jsBody), "/api/events?scope=files") {
 		t.Errorf("app.js missing scoped event streams")
 	}
-	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "/api/machine/status") {
-		t.Errorf("app.js missing jog plot or cache-only status polling")
+	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "/api/machine/status") {
+		t.Errorf("app.js missing jog plot, jog status messaging, or cache-only status polling")
 	}
-	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderStatusFields", "renderFileSummary", "lineMatchesFilter"} {
+	if got := js.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("app.js Cache-Control = %q, want no-store", got)
+	}
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderStatusFields", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -313,6 +324,11 @@ func TestWebUIServed(t *testing.T) {
 	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "pressedButtonList"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
+		}
+	}
+	for _, want := range []string{"scheduleJogReconnect", "clearJogReconnect", "preferredPadIndex", "visibilitychange"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing jog reconnect behavior %s", want)
 		}
 	}
 }
@@ -498,7 +514,7 @@ func TestJogWebSocketAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close(websocket.StatusNormalClosure, "")
-	if ev := readWSEvent(t, c, "hello"); ev.Type != "hello" {
+	if ev := readWSEvent(t, c, "hello"); ev.Type != "hello" || ev.Capabilities == nil || !ev.Capabilities.Availability.Available {
 		t.Fatalf("event = %+v", ev)
 	}
 }
@@ -676,6 +692,114 @@ func TestPostControl(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("unknown action: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestPostControlAlarmRecovery(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|H:10>")
+
+	resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": "recover"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("recover status = %d, want 202", resp.StatusCode)
+	}
+	var result service.RecoveryResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Recovered || result.State != machine.Idle || !result.NeedsHome {
+		t.Fatalf("recover result = %+v, want recovered Idle with needs_home", result)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if line == "$X" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("unlock did not reach machine: %v", m.Gcodes())
+}
+
+func TestPostControlAlarmRecoveryRejectsWrongAction(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|H:21>")
+
+	resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": "unlock"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("unlock hard fault status = %d, want 409", resp.StatusCode)
+	}
+	if g := m.Gcodes(); len(g) != 0 {
+		t.Fatalf("wrong recovery action reached machine: %v", g)
+	}
+
+	resp = postJSON(t, srv.URL+"/api/control", map[string]string{"action": "reset"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("reset status = %d, want 202", resp.StatusCode)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if line == "reset" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("reset did not reach machine: %v", m.Gcodes())
+}
+
+func TestPostControlHomeAllowedDuringUnlockableAlarm(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|H:10>")
+
+	resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": "home"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("home status = %d, want 202", resp.StatusCode)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if line == "$H" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("home did not reach machine: %v", m.Gcodes())
+}
+
+func TestPostControlHomeRejectsHardFaultAlarm(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|H:21>")
+
+	resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": "home"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("home hard fault status = %d, want 409", resp.StatusCode)
+	}
+	if g := m.Gcodes(); len(g) != 0 {
+		t.Fatalf("home reached machine despite hard fault: %v", g)
+	}
+}
+
+func TestMachineStatusIncludesHaltReason(t *testing.T) {
+	srv, _, tr := serverWithMachine(t)
+	tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|H:10>")
+
+	resp := get(t, srv.URL+"/api/machine/status")
+	defer resp.Body.Close()
+	var st service.MachineStatus
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.State != machine.Alarm || st.HaltReason == nil || st.HaltReason.Code != 10 || st.HaltReason.Recovery != "unlock" {
+		t.Fatalf("machine status = %+v", st)
 	}
 }
 

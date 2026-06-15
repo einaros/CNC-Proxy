@@ -8,10 +8,13 @@
   :root {
     --bg: #101316; --panel: #191f25; --panel-2: #202832; --border: #303946;
     --text: #dde4ec; --muted: #91a0ae; --accent: #57a6d6; --ok: #44c27b;
-    --warn: #d99a3a; --err: #e86a5f; --pending: #b7c0ca;
+    --warn: #d99a3a; --err: #e86a5f; --pending: #b7c0ca; --radius: 6px;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { color-scheme: dark; }
   body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  button, input, select, textarea { font: inherit; }
   header { display: flex; align-items: center; gap: 18px; padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border); }
   header h1 { font-size: 16px; margin: 0; font-weight: 650; }
   #machine { margin-left: auto; display: grid; grid-auto-flow: column; gap: 16px; align-items: center; color: var(--muted); font-size: 13px; }
@@ -20,26 +23,36 @@
   .state-Run, .state-Hold, .state-Home, .state-Sleep { background: rgba(217,154,58,.16); color: var(--warn); }
   .state-Alarm { background: rgba(232,106,95,.16); color: var(--err); }
   .state-Unknown, .state- { background: rgba(145,160,174,.15); color: var(--muted); }
-  main { padding: 18px 20px 28px; max-width: 1180px; margin: 0 auto; }
-  #notice { margin-bottom: 12px; border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; background: var(--panel); }
+  main { padding: 18px 20px 28px; max-width: 1280px; margin: 0 auto; }
+  #notice { margin-bottom: 12px; border: 1px solid var(--border); padding: 8px 10px; border-radius: var(--radius); background: var(--panel); }
   #notice.ok { border-color: rgba(68,194,123,.45); color: var(--ok); }
   #notice.error { border-color: rgba(232,106,95,.5); color: var(--err); }
   .tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
-  .tab { border-bottom: 0; border-radius: 6px 6px 0 0; padding: 7px 12px; }
+  .tab { border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; padding: 7px 12px; }
   .tab.active { color: var(--accent); border-color: var(--accent); background: var(--panel); }
   .view[hidden] { display: none; }
-  details { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; }
+  details { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin-top: 8px; }
   summary { cursor: pointer; color: var(--muted); padding: 8px 10px; font-weight: 650; }
   .detail-body { border-top: 1px solid var(--border); padding: 10px; display: grid; gap: 10px; }
-  #status-raw { margin: 0; padding: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #status-raw { margin: 0; padding: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #status-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; }
-  .field { display: flex; justify-content: space-between; gap: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; min-width: 0; }
+  .field { display: flex; justify-content: space-between; gap: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; min-width: 0; }
   .field .key { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .field .val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #alarm-panel { margin-top: 8px; background: rgba(232,106,95,.10); border: 1px solid rgba(232,106,95,.45); border-radius: var(--radius); padding: 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+  #alarm-title { color: var(--err); font-weight: 700; }
+  #alarm-detail { color: var(--muted); margin-top: 2px; }
+  #alarm-feedback { margin-top: 6px; font-size: 12px; color: var(--muted); min-height: 16px; }
+  #alarm-feedback.ok { color: var(--ok); }
+  #alarm-feedback.error { color: var(--err); }
+  #alarm-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  #alarm-actions button { border-color: rgba(232,106,95,.45); }
   .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
-  #drop { flex: 1; border: 1px dashed var(--border); border-radius: 6px; padding: 14px; text-align: center; color: var(--muted); cursor: pointer; background: var(--panel); }
+  #drop { flex: 1; border: 1px dashed var(--border); border-radius: var(--radius); padding: 14px; text-align: center; color: var(--muted); cursor: pointer; background: var(--panel); }
   #drop.over { border-color: var(--accent); color: var(--accent); }
-  input[type="search"], input[type="text"], textarea, #gcode-input, select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  input[type="search"], input[type="text"], input[type="number"], textarea, #gcode-input, select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; min-height: 34px; }
+  input[type="checkbox"] { accent-color: var(--accent); }
+  input[type="range"] { accent-color: var(--accent); }
   textarea { min-height: 104px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   input[type="search"] { width: 260px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 8px; }
@@ -52,8 +65,10 @@
   .muted { color: var(--muted); }
   .err { color: var(--err); font-size: 12px; }
   .actions { display: flex; justify-content: flex-end; gap: 6px; white-space: nowrap; }
-  button, .actions a { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px; cursor: pointer; font-size: 13px; text-decoration: none; }
+  button, .actions a { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 10px; cursor: pointer; font-size: 13px; text-decoration: none; }
   button:hover, .actions a:hover { border-color: var(--accent); }
+  button:focus-visible, .actions a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
   .sync { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .s-synced .dot { background: var(--ok); }
@@ -63,56 +78,68 @@
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   .empty { color: var(--muted); padding: 18px; text-align: center; background: var(--panel); border: 1px solid var(--border); border-top: 0; }
   #jobs { background: var(--panel); border: 1px solid var(--border); }
-  .job { display: grid; grid-template-columns: 80px minmax(220px, 1fr) 140px minmax(120px, auto); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .job { display: grid; grid-template-columns: 80px minmax(220px, 1fr) 140px minmax(120px, auto); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
   .job:last-child { border-bottom: 0; }
   .job-kind { color: var(--accent); font-weight: 650; }
-  #console { background: var(--panel); border: 1px solid var(--border); }
-  #controls { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
+  .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+  .metric { min-width: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: grid; gap: 3px; align-content: start; }
+  .metric .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .metric .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
+  .metric--wide { grid-column: span 2; }
+  .metric--compact { min-width: 130px; }
+  #status-panel { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  #status-panel .metric--wide { min-width: min(100%, 260px); }
+  #console { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  #controls { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   #controls button.danger { border-color: rgba(232,106,95,.5); color: var(--err); }
   #controls button.danger:hover { border-color: var(--err); }
   #console-tools { display: grid; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
   #quick-commands, #macro-toolbar, #log-tools, #gcode-history, #macro-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   #log-tools { justify-content: space-between; }
+  #log-tools label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); }
   #gcode-history { padding: 8px; border-top: 1px solid var(--border); min-height: 41px; }
   .chip { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .macro-button { border-color: rgba(87,166,214,.35); }
   .macro-button.panel { min-width: 120px; justify-content: center; }
   #macro-panel { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
   #macro-manager { border-radius: 0; border-left: 0; border-right: 0; border-bottom: 1px solid var(--border); margin: 0; }
-  #macro-editor { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 10px; }
+  #macro-editor { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 10px; align-items: start; }
   #macro-list { display: grid; gap: 6px; align-content: start; }
-  .macro-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+  .macro-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; }
   .macro-row.active { border-color: var(--accent); }
   .macro-form { display: grid; gap: 8px; }
   .macro-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
   .macro-form label span { text-transform: uppercase; letter-spacing: .04em; }
-  .macro-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .macro-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
   .log-left, .log-right { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  #gcode-log { height: 240px; overflow-y: auto; padding: 10px 12px; margin: 0; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+  #gcode-log { min-height: 240px; max-height: 42vh; overflow-y: auto; padding: 10px 12px; margin: 0; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; background: #12171c; }
   #gcode-log .send { color: var(--accent); }
   #gcode-log .recv { color: var(--text); }
   #gcode-log .recv.err-line { color: var(--err); }
   #gcode-log .src { color: var(--muted); }
   #gcode-form { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); }
   #gcode-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  #jog { background: var(--panel); border: 1px solid var(--border); padding: 10px; display: grid; gap: 10px; }
-  .jog-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .status-grid, .jog-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .jog-cell { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; min-width: 0; }
-  .jog-cell .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-  .jog-cell .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .jog-visual { display: grid; grid-template-columns: minmax(180px, 1fr) 160px; gap: 8px; align-items: stretch; }
-  #jog-plot { width: 100%; min-height: 180px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+  #jog { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; align-items: start; }
+  .jog-summary { display: grid; grid-template-columns: auto repeat(4, minmax(110px, auto)); gap: 8px 14px; align-items: center; color: var(--muted); }
+  .jog-summary span { min-width: 0; }
+  .jog-summary b { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .jog-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 260px); gap: 10px; align-items: stretch; }
+  #jog .jog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; align-content: start; }
+  #jog .metric--primary { grid-column: span 2; }
+  .jog-plot-cell { padding: 0; overflow: hidden; min-height: 156px; }
+  #jog-plot { display: block; width: 100%; height: 100%; min-height: 156px; background: var(--panel-2); }
   #jog-plot text { fill: var(--muted); font: 5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #jog-path { fill: none; stroke: var(--accent); stroke-width: 1.3; }
   #jog-observed { fill: var(--ok); }
   #jog-target { fill: none; stroke: var(--warn); stroke-width: 1.5; }
   #jog-arm.armed { border-color: rgba(68,194,123,.55); color: var(--ok); }
   #jog-deadman.on { color: var(--ok); }
-  #jog-error { color: var(--err); }
+  #jog-error { color: var(--muted); min-height: 18px; }
+  #jog-error.error { color: var(--err); }
+  #jog-error.ok { color: var(--ok); }
   #gamepad-settings .detail-body { gap: 12px; }
-  .gamepad-axis-config, .gamepad-button-config { display: grid; gap: 8px; }
-  .gamepad-axis-row { display: grid; grid-template-columns: 34px minmax(90px, 130px) minmax(90px, 120px) minmax(160px, 1fr); gap: 8px; align-items: center; }
+  .gamepad-axis-config, .gamepad-button-config { display: grid; gap: 10px; }
+  .gamepad-axis-row { display: grid; grid-template-columns: 34px minmax(110px, 140px) minmax(96px, 120px) minmax(220px, 1fr); gap: 8px; align-items: end; }
   .gamepad-axis-row > span { color: var(--accent); font-weight: 650; }
   .gamepad-axis-row label, .gamepad-button-config label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
   .gamepad-axis-row input[type="number"], .gamepad-button-config input[type="number"], .gamepad-binding input[type="number"] { width: 100%; }
@@ -121,17 +148,17 @@
   .gamepad-bindings-head, .gamepad-binding { display: grid; grid-template-columns: 84px minmax(150px, 1fr) auto; gap: 8px; align-items: center; }
   .gamepad-bindings-head { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   #gamepad-macro-bindings { display: grid; gap: 6px; }
-  .empty.compact { padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+  .empty.compact { padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
   #file-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
   .summary-pill { background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; color: var(--muted); font-size: 12px; }
-  #file-browser { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 12px; align-items: start; }
-  #folder-sidebar { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  #file-browser { display: grid; grid-template-columns: minmax(220px, 260px) minmax(0, 1fr); gap: 12px; align-items: start; }
+  #folder-sidebar { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #folder-sidebar .side-title { padding: 8px 10px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); }
   #folder-tree { display: grid; max-height: 520px; overflow: auto; padding: 6px; gap: 2px; }
   .folder-tree-item { width: 100%; text-align: left; border-color: transparent; background: transparent; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .folder-tree-item:hover, .folder-tree-item.active { color: var(--text); background: var(--panel-2); border-color: var(--border); }
   #file-main { min-width: 0; }
-  #folder-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
+  #folder-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; margin-bottom: 10px; }
   #breadcrumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
   #breadcrumbs button { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .crumb-sep { color: var(--muted); }
@@ -140,13 +167,20 @@
   .file-name { display: inline; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
   .file-name:hover { color: var(--accent); border: 0; }
   .folder-name { color: var(--accent); font-weight: 650; }
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); background: var(--panel); }
+  .table-scroll table { border: 0; min-width: 780px; }
   @media (max-width: 760px) {
-    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    header { display: grid; }
+    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .jog-body { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     input[type="search"] { width: 100%; }
     th:nth-child(4), td:nth-child(4) { display: none; }
     .job { grid-template-columns: 1fr; gap: 3px; }
-    .status-grid, .jog-grid, .jog-visual { grid-template-columns: 1fr; }
+    #alarm-panel { grid-template-columns: 1fr; }
+    #alarm-actions { justify-content: stretch; }
+    .metric-grid, #status-panel, #jog .jog-grid { grid-template-columns: 1fr; }
+    #jog .metric--primary, .metric--wide { grid-column: auto; }
+    .jog-plot-cell, #jog-plot { min-height: 170px; }
     #file-browser { grid-template-columns: 1fr; }
     #folder-bar { align-items: stretch; display: grid; }
     #folder-actions { justify-content: stretch; }
@@ -172,14 +206,24 @@
 
   <section id="control-view" class="view">
     <h2>Machine Status</h2>
-    <div class="status-grid" id="status-panel">
-      <div class="jog-cell"><div class="label">MPos</div><div id="status-mpos" class="value">-</div></div>
-      <div class="jog-cell"><div class="label">WPos</div><div id="status-wpos" class="value">-</div></div>
-      <div class="jog-cell"><div class="label">Feed</div><div id="status-feed" class="value">-</div></div>
-      <div class="jog-cell"><div class="label">Spindle</div><div id="status-spindle" class="value">-</div></div>
-      <div class="jog-cell"><div class="label">Tool</div><div id="status-tool" class="value">-</div></div>
-      <div class="jog-cell"><div class="label">Status Age</div><div id="status-age" class="value">-</div></div>
-      <div class="jog-cell"><div class="label">Connection</div><div id="status-connection" class="value">-</div></div>
+    <div class="metric-grid" id="status-panel">
+      <div class="metric metric--wide"><div class="label">MPos</div><div id="status-mpos" class="value">-</div></div>
+      <div class="metric metric--wide"><div class="label">WPos</div><div id="status-wpos" class="value">-</div></div>
+      <div class="metric"><div class="label">Feed</div><div id="status-feed" class="value">-</div></div>
+      <div class="metric"><div class="label">Spindle</div><div id="status-spindle" class="value">-</div></div>
+      <div class="metric"><div class="label">Tool</div><div id="status-tool" class="value">-</div></div>
+      <div class="metric metric--compact"><div class="label">Status Age</div><div id="status-age" class="value">-</div></div>
+      <div class="metric metric--compact"><div class="label">Connection</div><div id="status-connection" class="value">-</div></div>
+    </div>
+    <div id="alarm-panel" hidden>
+      <div>
+        <div id="alarm-title">Alarm</div>
+        <div id="alarm-detail">-</div>
+        <div id="alarm-feedback" aria-live="polite"></div>
+      </div>
+      <div id="alarm-actions">
+        <button type="button" id="alarm-recover" data-control-action="recover">Recover</button>
+      </div>
     </div>
     <details id="status-detail">
       <summary>Status Details</summary>
@@ -192,6 +236,7 @@
     <h2>Gcode Console</h2>
     <div id="console">
       <div id="controls">
+        <button type="button" id="ctl-home-main" data-control-action="home" title="Home machine ($H)">⌂ Home</button>
         <button type="button" id="ctl-hold" title="Feed hold — pause motion">⏸ Hold</button>
         <button type="button" id="ctl-resume" title="Resume from feed hold">▶ Resume</button>
         <button type="button" id="ctl-halt" class="danger" title="Emergency stop (halt)">⏹ Halt</button>
@@ -268,18 +313,31 @@
 
     <h2>Gamepad Jog</h2>
     <div id="jog">
-      <div class="jog-row">
+      <div class="jog-summary">
         <button type="button" id="jog-arm">Arm Jog</button>
         <span>link: <b id="jog-link">-</b></span>
         <span>pad: <b id="jog-pad">-</b></span>
         <span>deadman: <b id="jog-deadman">off</b></span>
         <span>latency: <b id="jog-latency">-</b></span>
       </div>
-      <div class="jog-grid">
-        <div class="jog-cell"><div class="label">Axes</div><div id="jog-axes" class="value">X 0.00 Y 0.00 Z 0.00</div></div>
-        <div class="jog-cell"><div class="label">Buttons</div><div id="jog-buttons" class="value">-</div></div>
-        <div class="jog-cell"><div class="label">MPos</div><div id="jog-mpos" class="value">-</div></div>
-        <div class="jog-cell"><div class="label">WPos</div><div id="jog-wpos" class="value">-</div></div>
+      <div class="jog-body">
+        <div class="jog-grid">
+          <div class="metric metric--primary"><div class="label">Axes</div><div id="jog-axes" class="value">X 0.00 Y 0.00 Z 0.00</div></div>
+          <div class="metric metric--compact"><div class="label">Buttons</div><div id="jog-buttons" class="value">-</div></div>
+          <div class="metric metric--primary"><div class="label">MPos</div><div id="jog-mpos" class="value">-</div></div>
+          <div class="metric metric--primary"><div class="label">WPos</div><div id="jog-wpos" class="value">-</div></div>
+          <div class="metric metric--primary"><div class="label">Target</div><div id="jog-target-pos" class="value">-</div></div>
+        </div>
+        <div class="metric jog-plot-cell">
+          <svg id="jog-plot" viewBox="0 0 100 100" role="img" aria-label="Jog XY movement">
+            <line x1="50" y1="0" x2="50" y2="100" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
+            <line x1="0" y1="50" x2="100" y2="50" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
+            <polyline id="jog-path" points=""></polyline>
+            <circle id="jog-observed" cx="50" cy="50" r="2"></circle>
+            <circle id="jog-target" cx="50" cy="50" r="3"></circle>
+            <text x="3" y="8">XY</text>
+          </svg>
+        </div>
       </div>
       <details id="gamepad-settings">
         <summary>Gamepad Settings</summary>
@@ -316,20 +374,6 @@
           </div>
         </div>
       </details>
-      <div class="jog-visual">
-        <svg id="jog-plot" viewBox="0 0 100 100" role="img" aria-label="Jog XY movement">
-          <line x1="50" y1="0" x2="50" y2="100" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
-          <line x1="0" y1="50" x2="100" y2="50" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
-          <polyline id="jog-path" points=""></polyline>
-          <circle id="jog-observed" cx="50" cy="50" r="2"></circle>
-          <circle id="jog-target" cx="50" cy="50" r="3"></circle>
-          <text x="3" y="8">XY</text>
-        </svg>
-        <div class="jog-cell">
-          <div class="label">Lead</div>
-          <div id="jog-lead" class="value">X 0.000 Y 0.000 Z 0.000</div>
-        </div>
-      </div>
       <div id="jog-error"></div>
     </div>
   </section>
@@ -357,10 +401,12 @@
             <button type="button" id="folder-new">New Folder</button>
           </div>
         </div>
-        <table>
-          <thead><tr><th>Name</th><th>Type</th><th class="num">Size / Items</th><th>Modified</th><th>Status</th><th></th></tr></thead>
-          <tbody id="files"></tbody>
-        </table>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Name</th><th>Type</th><th class="num">Size / Items</th><th>Modified</th><th>Status</th><th></th></tr></thead>
+            <tbody id="files"></tbody>
+          </table>
+        </div>
         <div id="files-empty" class="empty">Files load when this tab opens.</div>
       </div>
     </div>
@@ -369,6 +415,6 @@
     <div id="jobs"></div>
   </section>
 </main>
-<script src="/app.js"></script>
+<script src="/app.js?v=ui-layout-1"></script>
 </body>
 </html>

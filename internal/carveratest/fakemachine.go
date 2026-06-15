@@ -17,16 +17,18 @@ import (
 type FakeMachine struct {
 	ln net.Listener
 
-	mu                sync.Mutex
-	files             map[string][]byte // remote path -> contents (from uploads)
-	dirs              map[string]bool   // created directories
-	status            string            // payload for "?" (e.g. "<Idle|...>")
-	failCmd           map[string]bool   // command prefixes to fail (for error-path tests)
-	ftype             string            // advertised upload type ("lz" enables compression)
-	compressDownloads bool              // if set, downloads send a .lz container
-	gcodes            []string          // CTRL_MULTI gcode lines received (motion/MDI)
-	controls          []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
-	gcodeReplies      map[string]string // exact line -> textual reply payload
+	mu                 sync.Mutex
+	files              map[string][]byte // remote path -> contents (from uploads)
+	dirs               map[string]bool   // created directories
+	status             string            // payload for "?" (e.g. "<Idle|...>")
+	failCmd            map[string]bool   // command prefixes to fail (for error-path tests)
+	ftype              string            // advertised upload type ("lz" enables compression)
+	compressDownloads  bool              // if set, downloads send a .lz container
+	gcodes             []string          // CTRL_MULTI gcode lines received (motion/MDI)
+	controls           []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
+	gcodeReplies       map[string]string // exact line -> textual reply payload
+	unlockDoesNotClear bool              // test hook: $X replies but leaves status unchanged
+	m999DoesNotClear   bool              // test hook: M999 replies but leaves status unchanged
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when
@@ -125,6 +127,22 @@ func (m *FakeMachine) SetGcodeReply(line, reply string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gcodeReplies[line] = reply
+}
+
+// SetUnlockDoesNotClear makes $X leave the current status unchanged while still
+// replying like firmware. Tests use this to exercise M999 recovery fallback.
+func (m *FakeMachine) SetUnlockDoesNotClear(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unlockDoesNotClear = v
+}
+
+// SetM999DoesNotClear makes M999 leave the current status unchanged while still
+// replying like firmware. Tests use this to exercise verified recovery failure.
+func (m *FakeMachine) SetM999DoesNotClear(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.m999DoesNotClear = v
 }
 
 func (m *FakeMachine) serve() {
@@ -395,6 +413,35 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 			reply = "{S:0,0|I:0}"
 		}
 		m.send(c, protocol.CmdDiagRes, strings.TrimRight(reply, "\r\n")+"\n")
+	case strings.EqualFold(line, "reset"):
+		// Firmware SimpleShell accepts "reset" as a console command and schedules
+		// a reboot. Record it so alarm-recovery tests can assert it was sent.
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, "Rebooting machine in 3 seconds...\n")
+	case strings.EqualFold(line, "M999"):
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		if !m.m999DoesNotClear {
+			m.status = "<Idle|MPos:0,0,0|WPos:0,0,0>"
+		}
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, "WARNING: After HALT you should HOME before resume\nok\n")
+	case line == "$X":
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		if !m.unlockDoesNotClear {
+			m.status = "<Idle|MPos:0,0,0|WPos:0,0,0>"
+		}
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, "[Caution: Unlocked]\nok\n")
+	case line == "$H":
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		m.status = "<Idle|MPos:0,0,0|WPos:0,0,0>"
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, "ok\n")
 	case strings.HasPrefix(line, "rm"):
 		path := secondField(line)
 		m.mu.Lock()

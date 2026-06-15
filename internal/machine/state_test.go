@@ -34,7 +34,7 @@ func TestParseStatus(t *testing.T) {
 }
 
 func TestParseStatusPayloadRichFields(t *testing.T) {
-	st, ok := ParseStatusPayload("<Run|MPos:1.25,-2.5,3.75,4,5|WPos:6,7,8|F:10,20,150|S:1000,12000,80,1,31.5,42.0,0,0,1|T:2,12.345,3|P:100,45,12|C:1,7,0,1>")
+	st, ok := ParseStatusPayload("<Run|MPos:1.25,-2.5,3.75,4,5|WPos:6,7,8|F:10,20,150|S:1000,12000,80,1,31.5,42.0,0,0,1|T:2,12.345,3|H:10|P:100,45,12|C:1,7,0,1>")
 	if !ok {
 		t.Fatal("status should parse")
 	}
@@ -59,11 +59,32 @@ func TestParseStatusPayloadRichFields(t *testing.T) {
 	if st.Tool == nil || st.Tool.Active != 2 || st.Tool.Offset != 12.345 || st.Tool.Target == nil || *st.Tool.Target != 3 {
 		t.Fatalf("tool = %+v", st.Tool)
 	}
+	if st.HaltReason == nil || st.HaltReason.Code != 10 || st.HaltReason.Message != "Soft limit triggered" || st.HaltReason.Recovery != "unlock" {
+		t.Fatalf("halt reason = %+v", st.HaltReason)
+	}
 	if len(st.Progress) != 3 || st.Progress[1] != 45 {
 		t.Fatalf("progress = %+v", st.Progress)
 	}
 	if len(st.Machine) != 4 || st.Machine[3] != 1 {
 		t.Fatalf("machine = %+v", st.Machine)
+	}
+}
+
+func TestDescribeHaltReasonRecovery(t *testing.T) {
+	cases := []struct {
+		code     int
+		recovery string
+	}{
+		{3, "unlock"},
+		{21, "reset"},
+		{41, "power_cycle"},
+		{99, "power_cycle"},
+		{0, "inspect"},
+	}
+	for _, c := range cases {
+		if got := DescribeHaltReason(c.code); got.Recovery != c.recovery {
+			t.Errorf("DescribeHaltReason(%d).Recovery = %q, want %q", c.code, got.Recovery, c.recovery)
+		}
 	}
 }
 

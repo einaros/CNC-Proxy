@@ -51,7 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.getJobs)
 	mux.HandleFunc("POST /api/gcode", s.postGcode)      // body: {line}
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog) // recent gcode I/O lines
-	mux.HandleFunc("POST /api/control", s.postControl)  // body: {action: hold|resume|halt}
+	mux.HandleFunc("POST /api/control", s.postControl)  // body: {action: hold|resume|halt|recover|unlock|home|reset}
 	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
 	mux.HandleFunc("PUT /api/ui/settings", s.putUISettings)
 	mux.HandleFunc("GET /api/jog/capabilities", s.getJogCapabilities)
@@ -184,6 +184,10 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrNotCached):
 		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrRecoveryUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrMachineStatusStale):
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case session.Retryable(err):
 		// Machine busy / controller mid-transfer / not idle: try again later.
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
@@ -238,10 +242,11 @@ func (s *Server) putUISettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ui)
 }
 
-// postControl injects a realtime control action: feed-hold, resume, or halt.
-// These are out-of-band and intentionally work even while the machine is
-// moving (including a controller-driven program), so the proxy can always pause
-// or emergency-stop.
+// postControl injects a realtime control action, or runs an explicit alarm
+// recovery action. Hold/resume/halt are out-of-band and intentionally work even
+// while the machine is moving. Recover/unlock/home/reset are normal serialized
+// firmware commands, but bypass generic idle-gated gcode because they are only
+// useful once the machine is in Alarm.
 func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action string `json:"action"`
@@ -250,8 +255,18 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
+	action := strings.ToLower(strings.TrimSpace(body.Action))
+	if action == "recover" || action == "unlock" || action == "home" || action == "reset" {
+		result, err := s.svc.RecoverAlarm(action)
+		if err != nil {
+			s.mapError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+		return
+	}
 	var c byte
-	switch body.Action {
+	switch action {
 	case "hold", "feedhold", "pause":
 		c = service.ControlFeedHold
 	case "resume":
@@ -259,7 +274,7 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 	case "halt", "stop", "estop":
 		c = service.ControlHalt
 	default:
-		writeErr(w, http.StatusBadRequest, "action must be one of: hold, resume, halt")
+		writeErr(w, http.StatusBadRequest, "action must be one of: hold, resume, halt, recover, unlock, home, reset")
 		return
 	}
 	if err := s.svc.SendControl(c); err != nil {

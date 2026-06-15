@@ -19,8 +19,9 @@ func webHandler() http.Handler {
 	}
 	files := http.FileServer(http.FS(sub))
 	mux := http.NewServeMux()
-	mux.Handle("/app.js", files)
+	mux.Handle("/app.js", noStore(files))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		noStoreHeaders(w)
 		if r.URL.Path == "/" {
 			http.ServeFileFS(w, r, sub, "index.html")
 			return
@@ -28,4 +29,16 @@ func webHandler() http.Handler {
 		files.ServeHTTP(w, r)
 	})
 	return mux
+}
+
+func noStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		noStoreHeaders(w)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func noStoreHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 }

@@ -77,6 +77,14 @@ func (k *Conn) WriteGcodeLine(line string) error {
 	if len(line) == 0 || line[len(line)-1] != '\n' {
 		line += "\n"
 	}
+	return k.WriteConsoleCommand(line)
+}
+
+// WriteConsoleCommand writes a CTRL_MULTI console command exactly as supplied.
+// The official controller uses this form for firmware console commands such as
+// "$X", "$H", and "reset"; callers that need normal gcode line termination
+// should use WriteGcodeLine instead.
+func (k *Conn) WriteConsoleCommand(line string) error {
 	return k.writeFrame(protocol.Encode(protocol.CmdCtrlMulti, []byte(line)))
 }
 
@@ -292,16 +300,21 @@ const (
 // preceded it. On a connection-level read error with no output yet, that error
 // is surfaced so the arbiter can drop and reconnect.
 func (k *Conn) SendGcodeLine(line string, opts GcodeOpts) (string, error) {
+	return k.SendConsoleCommand(ensureLineEnding(line), opts)
+}
+
+// SendConsoleCommand sends a CTRL_MULTI console command exactly as supplied and
+// collects output according to opts. This mirrors the official controller's
+// handling of firmware console commands while retaining SendGcodeLine for
+// newline-terminated MDI/gcode.
+func (k *Conn) SendConsoleCommand(line string, opts GcodeOpts) (string, error) {
 	if opts.Settle <= 0 {
 		opts.Settle = defaultSettle
 	}
 	if opts.Cap <= 0 {
 		opts.Cap = defaultCap
 	}
-	if len(line) == 0 || line[len(line)-1] != '\n' {
-		line += "\n"
-	}
-	if err := k.WriteGcodeLine(line); err != nil {
+	if err := k.WriteConsoleCommand(line); err != nil {
 		return "", err
 	}
 
@@ -378,6 +391,13 @@ func (k *Conn) SendGcodeLine(line string, opts GcodeOpts) (string, error) {
 			// Ignore other frames during a gcode command.
 		}
 	}
+}
+
+func ensureLineEnding(line string) string {
+	if line == "" || line[len(line)-1] == '\n' {
+		return line
+	}
+	return line + "\n"
 }
 
 // SendControl sends a single realtime control character (CTRL_SINGLE): '!'

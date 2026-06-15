@@ -23,6 +23,8 @@ const state = {
   activeTab: "control",
   filesLoaded: false,
   currentDir: "",
+  controlPendingAction: "",
+  lastControlResult: null,
   controlES: null,
   filesES: null,
   jog: {
@@ -37,12 +39,17 @@ const state = {
     mpos: null,
     wpos: null,
     observed: null,
+    availability: null,
     target: null,
     lead: { x: 0, y: 0, z: 0 },
     path: [],
     buttons: [],
     error: "",
     sent: new Map(),
+    reconnectTimer: null,
+    reconnectAttempt: 0,
+    sampleTimer: null,
+    preferredPadIndex: null,
   },
 };
 
@@ -56,6 +63,31 @@ const SYNC_LABEL = {
   pending_rename: "Rename queued",
   remote_only: "On machine",
   error: "Error",
+};
+
+const HALT_REASON = {
+  1: "Halt manually",
+  2: "Home fail",
+  3: "Probe fail",
+  4: "Calibrate fail",
+  5: "ATC home fail",
+  6: "ATC invalid tool number",
+  7: "ATC drop tool fail",
+  8: "ATC position occupied",
+  9: "Spindle overheated",
+  10: "Soft limit triggered",
+  11: "Cover opened when playing",
+  12: "Wireless probe dead or not set",
+  13: "Emergency stop button pressed",
+  14: "Power overheated",
+  15: "Machine has not been homed",
+  21: "Hard limit triggered",
+  22: "X axis motor error",
+  23: "Y axis motor error",
+  24: "Z axis motor error",
+  25: "Spindle stall",
+  26: "SD card read fail",
+  41: "Spindle alarm",
 };
 
 function relPath(p) {
@@ -156,6 +188,34 @@ function fmtTool(t) {
   const target = Number.isFinite(t.target) ? " -> T" + t.target : "";
   const offset = Number.isFinite(t.offset) ? " Z " + t.offset.toFixed(3) : "";
   return active + target + offset;
+}
+
+function haltReason(m) {
+  if (m?.halt_reason) return m.halt_reason;
+  const h = m?.fields?.H;
+  const code = Number.parseInt(String(h || "").split(",")[0], 10);
+  if (!Number.isFinite(code)) return null;
+  return {
+    code,
+    message: HALT_REASON[code] || "Unknown alarm",
+    recovery: code >= 41 ? "power_cycle" : (code >= 21 ? "reset" : "unlock"),
+  };
+}
+
+function recoveryText(recovery, reason = null) {
+  if (reason?.code === 10) {
+    return "Soft limit halt. Clear the physical cause, then recover; the proxy sends $X, verifies status, and falls back to M999 if firmware stays in Alarm.";
+  }
+  switch (recovery) {
+  case "unlock":
+    return "Clear the cause, unlock, then home before moving.";
+  case "reset":
+    return "Clear the cause, reset the machine, reconnect, then home.";
+  case "power_cycle":
+    return "Switch the machine off and on, reconnect, then home.";
+  default:
+    return "Inspect the cause before moving the machine.";
+  }
 }
 
 function escapeHtml(s) {
@@ -381,7 +441,7 @@ function setNotice(text, kind = "info") {
 }
 
 async function request(url, opts = {}) {
-  const resp = await fetch(url, opts);
+  const resp = await fetch(url, { credentials: "same-origin", cache: "no-store", ...opts });
   if (!resp.ok) {
     let detail = "";
     try {
@@ -421,6 +481,9 @@ function renderMachine() {
     m.reconnecting ? "reconnecting" : (m.connected ? "connected" : "not connected");
   document.getElementById("status-raw").textContent = m.raw || "-";
   renderStatusFields(m.fields || {});
+  renderAlarmPanel(m);
+  syncJogAvailabilityFromMachine(m);
+  renderJog();
 }
 
 function renderStatusFields(fields) {
@@ -439,6 +502,100 @@ function renderStatusFields(fields) {
   }
 }
 
+function renderAlarmPanel(m) {
+  const panel = document.getElementById("alarm-panel");
+  const reason = haltReason(m);
+  panel.hidden = m.state !== "Alarm";
+  if (panel.hidden) {
+    const feedback = document.getElementById("alarm-feedback");
+    if (feedback) {
+      feedback.textContent = "";
+      feedback.className = "";
+    }
+    return;
+  }
+
+  const code = reason ? "H:" + reason.code : "H:-";
+  const message = reason?.message || "Unknown alarm";
+  const recovery = reason?.recovery || "inspect";
+  document.getElementById("alarm-title").textContent = `Alarm ${code}: ${message}`;
+  document.getElementById("alarm-detail").textContent = recoveryText(recovery, reason);
+  const btn = document.getElementById("alarm-recover");
+  const feedback = document.getElementById("alarm-feedback");
+  const pending = state.controlPendingAction === "recover";
+  btn.hidden = recovery === "power_cycle";
+  btn.disabled = pending || recovery === "inspect";
+  btn.textContent = pending ? "Recovering..." : recoveryButtonText(recovery, reason);
+  if (pending) {
+    feedback.textContent = "Sending recovery command and verifying machine status...";
+    feedback.className = "";
+  } else if (state.lastControlResult?.action === "recover" && state.lastControlResult?.message) {
+    feedback.textContent = state.lastControlResult.message;
+    feedback.className = state.lastControlResult.failed ? "error" : "ok";
+  } else {
+    feedback.textContent = recovery === "power_cycle" ? "This halt class cannot be cleared in software." : "";
+    feedback.className = recovery === "power_cycle" ? "error" : "";
+  }
+}
+
+function recoveryButtonText(recovery, reason = null) {
+  if (reason?.code === 10) return "Unlock Soft Limit";
+  switch (recovery) {
+  case "unlock":
+    return "Unlock Alarm";
+  case "reset":
+    return "Reset Machine";
+  default:
+    return "Recover";
+  }
+}
+
+function syncJogAvailabilityFromMachine(m) {
+  if (!state.jog.caps?.enabled) return;
+  const stale = !!m.stale || Number(m.age_ms) > 10000;
+  let availability;
+  if (stale || !m.state || m.state === "Unknown") {
+    availability = {
+      available: false,
+      reason: "stale_status",
+      message: "Machine status is stale. Wait for a fresh Idle status before jogging.",
+    };
+  } else if (m.state !== "Idle") {
+    availability = {
+      available: false,
+      reason: "not_idle",
+      message: `Machine is ${m.state}. Jogging requires fresh Idle status.`,
+    };
+  } else if (!hasMPos(m.mpos)) {
+    availability = {
+      available: false,
+      reason: "stale_status",
+      message: "Machine position is unavailable. Wait for a status report with MPos before jogging.",
+    };
+  } else {
+    availability = { available: true, message: "Ready to arm jog." };
+  }
+  state.jog.availability = availability;
+  if (isTransientJogBlock(state.jog.error)) {
+    state.jog.error = "";
+  }
+}
+
+function hasMPos(mpos) {
+  return !!mpos && ["x", "y", "z"].some((axis) => Number.isFinite(Number(mpos[axis])));
+}
+
+function isTransientJogBlock(err) {
+  if (!err) return false;
+  if (["busy", "not_idle", "stale_status", "controller_waiting", "machine_error"].includes(err)) return true;
+  const low = String(err).toLowerCase();
+  return low.includes("machine left joggable state") ||
+    low.includes("machine is not ready") ||
+    low.includes("not idle") ||
+    low.includes("status is too stale") ||
+    low.includes("controller requested the machine");
+}
+
 function renderJog() {
   const j = state.jog;
   document.getElementById("jog-link").textContent = j.link;
@@ -451,13 +608,62 @@ function renderJog() {
   document.getElementById("jog-buttons").textContent = pressedButtonList(j.buttons);
   document.getElementById("jog-mpos").textContent = fmtPos(j.mpos);
   document.getElementById("jog-wpos").textContent = fmtPos(j.wpos);
-  document.getElementById("jog-error").textContent = j.error || "";
+  document.getElementById("jog-target-pos").textContent = fmtPos(j.target);
+  const msg = jogPanelMessage();
+  const msgEl = document.getElementById("jog-error");
+  msgEl.textContent = msg.text;
+  msgEl.className = msg.kind || "";
   const arm = document.getElementById("jog-arm");
   arm.textContent = j.armed ? "Disarm Jog" : "Arm Jog";
   arm.classList.toggle("armed", j.armed);
   arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online";
-  document.getElementById("jog-lead").textContent = fmtPos(j.lead);
   renderJogPlot();
+}
+
+function jogPanelMessage() {
+  const j = state.jog;
+  if (j.error) return { text: jogErrorText(j.error), kind: "error" };
+  if (j.availability && !j.availability.available) {
+    return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
+  }
+  if (j.link !== "online") {
+    return { text: "Connecting to jog service...", kind: "" };
+  }
+  if (!j.pad) {
+    return { text: "Connect a gamepad. Then arm jog, hold the deadman button, and move an axis.", kind: "" };
+  }
+  const deadmanButton = state.ui.gamepad.deadman_button;
+  if (!j.armed) {
+    return { text: `Ready. Click Arm Jog, then hold button ${deadmanButton} and move an axis.`, kind: "ok" };
+  }
+  if (!j.deadman) {
+    return { text: `Armed. Hold deadman button ${deadmanButton} to allow motion.`, kind: "" };
+  }
+  if (Math.abs(j.axes.x) < 0.12 && Math.abs(j.axes.y) < 0.12 && Math.abs(j.axes.z) < 0.12) {
+    return { text: "Armed. Move an axis while holding deadman.", kind: "ok" };
+  }
+  return { text: "Jog input active.", kind: "ok" };
+}
+
+function jogErrorText(err) {
+  switch (err) {
+  case "disabled":
+    return "Jogging is disabled.";
+  case "busy":
+    return "Another jog session is active. Close the other CNC Proxy tab/client or wait for it to disconnect.";
+  case "not_idle":
+    return "Machine is not Idle. Wait for fresh Idle status, then arm jog again.";
+  case "stale_status":
+    return "Machine status or position is stale. Wait for a fresh status report before jogging.";
+  case "controller_waiting":
+    return "The controller requested the machine. Jog was disarmed; wait for Idle, then arm again.";
+  case "machine_error":
+    return "Machine I/O failed. Check the log, wait for reconnect, then arm again.";
+  case "bad_input":
+    return "Invalid jog input from the browser.";
+  default:
+    return err || "";
+  }
 }
 
 function pressedButtonList(buttons) {
@@ -1253,25 +1459,139 @@ async function sendGcode(line) {
   }
 }
 
-// sendControl injects a realtime control action (hold/resume/halt). The action
-// and any error are echoed via the gcode log/SSE stream, so we only surface a
-// transport/HTTP failure locally.
+// sendControl injects a realtime control action or explicit recovery action.
+// Show immediate feedback because recovery commands may be sent while the log is
+// filtered or the machine remains in Alarm until the next status poll.
 async function sendControl(action) {
+  state.controlPendingAction = action;
+  if (action === "recover") state.lastControlResult = null;
+  setControlButtonsPending(action, true);
+  renderMachine();
+  setNotice(controlPendingText(action), "info");
   try {
-    await request("/api/control", {
+    const resp = await request("/api/control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action }),
     });
+    let result = null;
+    if ((resp.headers.get("Content-Type") || "").includes("application/json")) {
+      result = await resp.json();
+    }
+    if (result) state.lastControlResult = result;
+    setNotice(controlSuccessText(action, result), "ok");
+    pollMachine();
+    setTimeout(pollMachine, 1200);
   } catch (e) {
+    if (action === "recover") {
+      state.lastControlResult = { action, recovered: false, failed: true, message: e.message };
+    }
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+    setNotice(controlErrorText(action, e.message), "error");
+  } finally {
+    state.controlPendingAction = "";
+    setControlButtonsPending(action, false);
+    renderMachine();
   }
+}
+
+function setControlButtonsPending(action, pending) {
+  const ids = {
+    hold: "ctl-hold",
+    resume: "ctl-resume",
+    halt: "ctl-halt",
+  };
+  const buttons = Array.from(document.querySelectorAll("[data-control-action]"))
+    .filter((btn) => btn.dataset.controlAction === action);
+  const id = ids[action];
+  if (id) {
+    const btn = document.getElementById(id);
+    if (btn) buttons.push(btn);
+  }
+  for (const btn of buttons) {
+    btn.disabled = pending;
+  }
+}
+
+function controlPendingText(action) {
+  switch (action) {
+  case "unlock":
+    return "Sending unlock...";
+  case "home":
+    return "Sending home...";
+  case "reset":
+    return "Sending reset...";
+  case "recover":
+    return "Recovering alarm...";
+  case "hold":
+    return "Sending hold...";
+  case "resume":
+    return "Sending resume...";
+  case "halt":
+    return "Sending halt...";
+  default:
+    return "Sending control: " + action;
+  }
+}
+
+function controlSuccessText(action, result = null) {
+  if (result?.message) return result.message;
+  switch (action) {
+  case "recover":
+    return "Recovery command sent.";
+  case "unlock":
+    return "Unlock sent. If the alarm clears, home before moving.";
+  case "home":
+    return "Home sent.";
+  case "reset":
+    return "Reset sent. Wait for reconnect, then home.";
+  case "hold":
+    return "Hold sent.";
+  case "resume":
+    return "Resume sent.";
+  case "halt":
+    return "Halt sent.";
+  default:
+    return "Control sent: " + action;
+  }
+}
+
+function controlErrorText(action, message) {
+  return action + " failed: " + message;
+}
+
+function confirmControl(action) {
+  switch (action) {
+  case "halt":
+    return confirm("Emergency halt the machine? This stops all motion and enters Alarm.");
+  case "recover":
+    return confirm("Recover this alarm? Clear the physical cause first. For soft limits, the proxy will unlock and verify status; home before moving afterward.");
+  case "unlock":
+    return confirm("Unlock the alarm? Clear the physical cause first. Home the machine before moving afterward.");
+  case "home":
+    return confirm("Home the machine now? Make sure the work area is clear.");
+  case "reset":
+    return confirm("Reset the machine controller? Reconnect and home the machine afterward.");
+  default:
+    return true;
+  }
+}
+
+function bindDataControlButtons() {
+  document.querySelectorAll("[data-control-action]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const action = btn.dataset.controlAction;
+      if (confirmControl(action)) sendControl(action);
+    });
+  });
 }
 
 async function loadJogCapabilities() {
   try {
     const r = await request("/api/jog/capabilities");
     state.jog.caps = await r.json();
+    state.jog.availability = state.jog.caps.availability || null;
   } catch (e) {
     state.jog.error = e.message;
   }
@@ -1284,33 +1604,81 @@ function jogURL() {
 }
 
 function connectJog() {
-  if (!("WebSocket" in window) || state.jog.ws) return;
+  if (!("WebSocket" in window)) {
+    state.jog.link = "unsupported";
+    state.jog.error = "WebSocket unavailable";
+    renderJog();
+    return;
+  }
+  const existing = state.jog.ws;
+  if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
+  clearJogReconnect();
   const ws = new WebSocket(jogURL());
   state.jog.ws = ws;
   state.jog.link = "connecting";
   renderJog();
   ws.onopen = () => {
+    if (state.jog.ws !== ws) return;
     state.jog.link = "online";
+    state.jog.reconnectAttempt = 0;
     state.jog.error = "";
     renderJog();
   };
   ws.onclose = () => {
+    if (state.jog.ws !== ws) return;
     state.jog.ws = null;
     state.jog.link = "offline";
     state.jog.armed = false;
+    state.jog.sent.clear();
     renderJog();
-    setTimeout(connectJog, 2000);
+    scheduleJogReconnect();
   };
   ws.onerror = () => {
+    if (state.jog.ws !== ws) return;
     state.jog.error = "jog socket error";
     renderJog();
+    try {
+      ws.close();
+    } catch {
+      // Browser will report the close asynchronously.
+    }
   };
-  ws.onmessage = (e) => applyJogEvent(JSON.parse(e.data));
+  ws.onmessage = (e) => {
+    if (state.jog.ws !== ws) return;
+    try {
+      applyJogEvent(JSON.parse(e.data));
+    } catch (err) {
+      state.jog.error = "bad jog event: " + err.message;
+      renderJog();
+    }
+  };
+}
+
+function clearJogReconnect() {
+  if (state.jog.reconnectTimer) {
+    clearTimeout(state.jog.reconnectTimer);
+    state.jog.reconnectTimer = null;
+  }
+}
+
+function scheduleJogReconnect() {
+  if (state.jog.reconnectTimer || document.hidden) return;
+  const attempt = Math.min(state.jog.reconnectAttempt++, 5);
+  const delay = Math.min(10000, 500 * 2 ** attempt);
+  state.jog.link = "reconnecting";
+  renderJog();
+  state.jog.reconnectTimer = setTimeout(() => {
+    state.jog.reconnectTimer = null;
+    connectJog();
+  }, delay);
 }
 
 function sendJog(msg) {
   const ws = state.jog.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connectJog();
+    return;
+  }
   if (!msg.seq) msg.seq = state.jog.seq++;
   state.jog.sent.set(msg.seq, performance.now());
   ws.send(JSON.stringify(msg));
@@ -1319,16 +1687,23 @@ function sendJog(msg) {
 function applyJogEvent(ev) {
   if (ev.type === "hello" && ev.capabilities) {
     state.jog.caps = ev.capabilities;
+    state.jog.availability = ev.capabilities.availability || null;
+    if (state.jog.availability?.available && state.jog.error === "busy") state.jog.error = "";
   } else if (ev.type === "state") {
     state.jog.armed = !!ev.armed;
-    if (ev.availability && ev.availability.reason && !ev.availability.available && !state.jog.armed) {
-      state.jog.error = ev.availability.reason;
+    if (ev.availability) {
+      state.jog.availability = ev.availability;
+      if (ev.availability.available) {
+        state.jog.error = "";
+      } else if (ev.availability.reason && !state.jog.armed) {
+        state.jog.error = "";
+      }
     }
   } else if (ev.type === "status" && ev.status) {
     state.jog.mpos = ev.status.mpos || state.jog.mpos;
     state.jog.wpos = ev.status.wpos || state.jog.wpos;
     state.jog.observed = ev.status.mpos || state.jog.observed;
-    state.jog.error = "";
+    if (ev.status.state === "Idle") state.jog.error = "";
   } else if (ev.type === "motion" && ev.motion) {
     state.jog.target = ev.motion.target || state.jog.target;
     state.jog.observed = ev.motion.observed || state.jog.observed;
@@ -1345,7 +1720,7 @@ function applyJogEvent(ev) {
     }
     state.jog.error = "";
   } else if (ev.type === "error") {
-    state.jog.error = ev.code || ev.message || "jog error";
+    state.jog.error = ev.message || ev.code || "jog error";
     if (ev.code === "controller_waiting" || ev.code === "not_idle" || ev.code === "stale_status") {
       state.jog.armed = false;
     }
@@ -1356,8 +1731,13 @@ function applyJogEvent(ev) {
 function currentGamepad() {
   if (!navigator.getGamepads) return null;
   const pads = navigator.getGamepads();
+  const preferred = state.jog.preferredPadIndex;
+  if (Number.isInteger(preferred) && pads[preferred] && pads[preferred].connected !== false) return pads[preferred];
   for (const p of pads) {
-    if (p) return p;
+    if (p && p.connected !== false) {
+      state.jog.preferredPadIndex = p.index;
+      return p;
+    }
   }
   return null;
 }
@@ -1397,38 +1777,48 @@ function handleGamepadMacroButtons(buttons, deadman) {
 }
 
 function sampleJog() {
-  const gp = currentGamepad();
-  if (!gp) {
-    state.jog.pad = "";
-    state.jog.deadman = false;
-    state.jog.axes = { x: 0, y: 0, z: 0 };
-    state.jog.buttons = [];
-    if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes });
+  try {
+    const gp = currentGamepad();
+    if (!gp) {
+      state.jog.pad = "";
+      state.jog.deadman = false;
+      state.jog.axes = { x: 0, y: 0, z: 0 };
+      state.jog.buttons = [];
+      if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes });
+      renderJog();
+      return;
+    }
+    const gamepad = state.ui.gamepad;
+    const axes = {
+      x: mappedAxis(gp, "x"),
+      y: mappedAxis(gp, "y"),
+      z: mappedAxis(gp, "z"),
+    };
+    const buttons = buttonStates(gp);
+    const deadman = buttonPressed(gp, gamepad.deadman_button);
+    const slow = gamepad.slow_buttons.some((btn) => buttonPressed(gp, btn));
+    state.jog.preferredPadIndex = gp.index;
+    state.jog.pad = gp.id || "connected";
+    state.jog.deadman = deadman;
+    state.jog.axes = axes;
+    handleGamepadMacroButtons(buttons, deadman);
+    if (state.jog.armed) sendJog({ type: "input", deadman, axes, slow });
     renderJog();
+  } catch (e) {
+    state.jog.error = "gamepad read failed: " + e.message;
+    renderJog();
+  } finally {
     scheduleJogSample();
-    return;
   }
-  const gamepad = state.ui.gamepad;
-  const axes = {
-    x: mappedAxis(gp, "x"),
-    y: mappedAxis(gp, "y"),
-    z: mappedAxis(gp, "z"),
-  };
-  const buttons = buttonStates(gp);
-  const deadman = buttonPressed(gp, gamepad.deadman_button);
-  const slow = gamepad.slow_buttons.some((btn) => buttonPressed(gp, btn));
-  state.jog.pad = gp.id || "connected";
-  state.jog.deadman = deadman;
-  state.jog.axes = axes;
-  handleGamepadMacroButtons(buttons, deadman);
-  if (state.jog.armed) sendJog({ type: "input", deadman, axes, slow });
-  renderJog();
-  scheduleJogSample();
 }
 
 function scheduleJogSample() {
+  if (state.jog.sampleTimer) return;
   const ms = Math.max(20, Number(state.jog.caps?.tick_ms) || 50);
-  setTimeout(sampleJog, ms);
+  state.jog.sampleTimer = setTimeout(() => {
+    state.jog.sampleTimer = null;
+    sampleJog();
+  }, ms);
 }
 
 function clampAxis(v) {
@@ -1590,13 +1980,38 @@ function init() {
   document.getElementById("ctl-halt").onclick = () => {
     if (confirm("Emergency halt the machine? This stops all motion and enters Alarm.")) sendControl("halt");
   };
+  bindDataControlButtons();
   document.getElementById("jog-arm").onclick = () => sendJog({ type: state.jog.armed ? "disarm" : "arm" });
 
   loadUISettings();
   loadJogCapabilities();
   connectJog();
-  window.addEventListener("gamepadconnected", renderJog);
-  window.addEventListener("gamepaddisconnected", renderJog);
+  window.addEventListener("online", () => {
+    loadJogCapabilities();
+    connectJog();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      connectJog();
+      scheduleJogSample();
+    }
+  });
+  window.addEventListener("gamepadconnected", (e) => {
+    state.jog.preferredPadIndex = e.gamepad?.index ?? state.jog.preferredPadIndex;
+    state.jog.error = "";
+    connectJog();
+    scheduleJogSample();
+    renderJog();
+  });
+  window.addEventListener("gamepaddisconnected", (e) => {
+    if (state.jog.preferredPadIndex === e.gamepad?.index) state.jog.preferredPadIndex = null;
+    state.jog.pad = "";
+    state.jog.deadman = false;
+    state.jog.axes = { x: 0, y: 0, z: 0 };
+    state.jog.buttons = [];
+    if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes });
+    renderJog();
+  });
   scheduleJogSample();
   renderFiles();
   renderJobs();

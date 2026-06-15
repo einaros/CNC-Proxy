@@ -58,6 +58,15 @@ type ToolStatus struct {
 	Target *int    `json:"target,omitempty"`
 }
 
+// HaltReason describes the firmware's H: alarm/halt reason field. The ranges
+// mirror the official controller's recovery policy.
+type HaltReason struct {
+	Code     int    `json:"code"`
+	Message  string `json:"message"`
+	Recovery string `json:"recovery"`
+	Severity string `json:"severity"`
+}
+
 // Status is the parsed machine status payload from STATUS_RES. It preserves all
 // raw fields while normalizing the fields the proxy needs for safe operation.
 type Status struct {
@@ -69,6 +78,7 @@ type Status struct {
 	Feed       *Triple           `json:"feed,omitempty"`
 	Spindle    *Spindle          `json:"spindle,omitempty"`
 	Tool       *ToolStatus       `json:"tool,omitempty"`
+	HaltReason *HaltReason       `json:"halt_reason,omitempty"`
 	Progress   []float64         `json:"progress,omitempty"`
 	Machine    []float64         `json:"machine,omitempty"`
 	ObservedAt time.Time         `json:"observed_at,omitempty"`
@@ -94,6 +104,10 @@ func (s Status) copy() Status {
 			v.Target = &target
 		}
 		cp.Tool = &v
+	}
+	if s.HaltReason != nil {
+		v := *s.HaltReason
+		cp.HaltReason = &v
 	}
 	cp.Progress = append([]float64(nil), s.Progress...)
 	cp.Machine = append([]float64(nil), s.Machine...)
@@ -157,6 +171,10 @@ func ParseStatusPayload(payload string) (Status, bool) {
 			st.Spindle = parseSpindle(val)
 		case "T":
 			st.Tool = parseTool(val)
+		case "H":
+			if reason := ParseHaltReason(val); reason != nil {
+				st.HaltReason = reason
+			}
 		case "P":
 			st.Progress = parseNumberList(val)
 		case "C":
@@ -251,6 +269,70 @@ func parseTool(s string) *ToolStatus {
 		t.Target = &target
 	}
 	return t
+}
+
+// ParseHaltReason parses the first integer in an H: field.
+func ParseHaltReason(s string) *HaltReason {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	first := s
+	if i := strings.IndexByte(first, ','); i >= 0 {
+		first = first[:i]
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(first))
+	if err != nil {
+		return nil
+	}
+	reason := DescribeHaltReason(code)
+	return &reason
+}
+
+// DescribeHaltReason returns the official-controller meaning and recovery class
+// for a firmware halt reason code.
+func DescribeHaltReason(code int) HaltReason {
+	reason := HaltReason{Code: code, Message: "Unknown alarm", Recovery: "inspect", Severity: "unknown"}
+	if msg, ok := haltReasonMessages[code]; ok {
+		reason.Message = msg
+	}
+	switch {
+	case code >= 1 && code <= 20:
+		reason.Recovery = "unlock"
+		reason.Severity = "unlock"
+	case code >= 21 && code <= 40:
+		reason.Recovery = "reset"
+		reason.Severity = "reset"
+	case code >= 41:
+		reason.Recovery = "power_cycle"
+		reason.Severity = "power_cycle"
+	}
+	return reason
+}
+
+var haltReasonMessages = map[int]string{
+	1:  "Halt manually",
+	2:  "Home fail",
+	3:  "Probe fail",
+	4:  "Calibrate fail",
+	5:  "ATC home fail",
+	6:  "ATC invalid tool number",
+	7:  "ATC drop tool fail",
+	8:  "ATC position occupied",
+	9:  "Spindle overheated",
+	10: "Soft limit triggered",
+	11: "Cover opened when playing",
+	12: "Wireless probe dead or not set",
+	13: "Emergency stop button pressed",
+	14: "Power overheated",
+	15: "Machine has not been homed",
+	21: "Hard limit triggered",
+	22: "X axis motor error",
+	23: "Y axis motor error",
+	24: "Z axis motor error",
+	25: "Spindle stall",
+	26: "SD card read fail",
+	41: "Spindle alarm",
 }
 
 func parseNumberList(s string) []float64 {

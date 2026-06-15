@@ -98,6 +98,7 @@ type MachineStatus struct {
 	Feed         *machine.Triple     `json:"feed,omitempty"`
 	Spindle      *machine.Spindle    `json:"spindle,omitempty"`
 	Tool         *machine.ToolStatus `json:"tool,omitempty"`
+	HaltReason   *machine.HaltReason `json:"halt_reason,omitempty"`
 	Progress     []float64           `json:"progress,omitempty"`
 	Machine      []float64           `json:"machine,omitempty"`
 }
@@ -123,6 +124,7 @@ func (s *Service) Status() MachineStatus {
 		Feed:         st.Feed,
 		Spindle:      st.Spindle,
 		Tool:         st.Tool,
+		HaltReason:   st.HaltReason,
 		Progress:     st.Progress,
 		Machine:      st.Machine,
 	}
@@ -372,6 +374,21 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 // actually terminates on the reply's quiescence well before this.
 const gcodeReplyCap = 30 * time.Second
 
+const recoveryStatusTimeout = 2 * time.Second
+
+// RecoveryResult is returned by explicit alarm-recovery actions so operators
+// can see what was sent and what the machine reported afterward.
+type RecoveryResult struct {
+	Action     string              `json:"action"`
+	Commands   []string            `json:"commands,omitempty"`
+	Output     []string            `json:"output,omitempty"`
+	State      machine.State       `json:"state"`
+	HaltReason *machine.HaltReason `json:"halt_reason,omitempty"`
+	Recovered  bool                `json:"recovered"`
+	NeedsHome  bool                `json:"needs_home,omitempty"`
+	Message    string              `json:"message"`
+}
+
 // SendGcode runs a single gcode line on the machine and returns the machine's
 // output (the payload of an "ok <payload>" reply, or output lines for a no-"ok"
 // reply; empty for fire-and-forget commands). It works in both owner mode and
@@ -444,6 +461,238 @@ func (s *Service) SendControl(c byte) error {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
 	}
 	return err
+}
+
+// RecoverAlarm sends one of the firmware's explicit alarm recovery commands and
+// verifies the observed state afterward when the command is expected to clear an
+// alarm. This is separate from generic gcode because recovery must be possible
+// while the state is Alarm, where normal state-changing gcode is intentionally
+// blocked by idle gating. It still goes through the arbiter, so it never
+// interleaves with another normal machine conversation.
+func (s *Service) RecoverAlarm(action string) (RecoveryResult, error) {
+	action = strings.ToLower(strings.TrimSpace(action))
+	st, err := s.recoveryStatus()
+	if err != nil {
+		return RecoveryResult{Action: action, Message: err.Error()}, err
+	}
+	res := recoveryResult(action, st)
+	if st.State != machine.Alarm && !(action == "home" && st.State == machine.Idle) {
+		err := fmt.Errorf("%w: machine is %s, not Alarm", ErrRecoveryUnavailable, stateLabel(st.State))
+		res.Message = err.Error()
+		return res, err
+	}
+
+	switch action {
+	case "recover":
+		return s.recoverAlarmGuided(st, res)
+	case "unlock":
+		if st.HaltReason != nil && st.HaltReason.Recovery != "unlock" {
+			err := fmt.Errorf("%w: H:%d %s requires %s", ErrRecoveryUnavailable, st.HaltReason.Code, st.HaltReason.Message, st.HaltReason.Recovery)
+			res.Message = err.Error()
+			return res, err
+		}
+		return s.recoverAlarmUnlock(st, res)
+	case "home":
+		if st.State == machine.Alarm && st.HaltReason != nil && st.HaltReason.Recovery != "unlock" {
+			err := fmt.Errorf("%w: H:%d %s requires %s before homing", ErrRecoveryUnavailable, st.HaltReason.Code, st.HaltReason.Message, st.HaltReason.Recovery)
+			res.Message = err.Error()
+			return res, err
+		}
+		return s.recoverAlarmHome(res)
+	case "reset":
+		if st.HaltReason != nil && st.HaltReason.Recovery == "power_cycle" {
+			err := fmt.Errorf("%w: H:%d %s requires power cycle", ErrRecoveryUnavailable, st.HaltReason.Code, st.HaltReason.Message)
+			res.Message = err.Error()
+			return res, err
+		}
+		return s.recoverAlarmReset(res)
+	default:
+		err := fmt.Errorf("service: recovery action must be one of: recover, unlock, home, reset")
+		res.Message = err.Error()
+		return res, err
+	}
+}
+
+func (s *Service) recoverAlarmGuided(st machine.Status, res RecoveryResult) (RecoveryResult, error) {
+	if st.HaltReason == nil {
+		err := fmt.Errorf("%w: alarm has no H: reason; inspect the machine before recovery", ErrRecoveryUnavailable)
+		res.Message = err.Error()
+		return res, err
+	}
+	switch st.HaltReason.Recovery {
+	case "unlock":
+		return s.recoverAlarmUnlock(st, res)
+	case "reset":
+		return s.recoverAlarmReset(res)
+	case "power_cycle":
+		err := fmt.Errorf("%w: H:%d %s requires power cycle", ErrRecoveryUnavailable, st.HaltReason.Code, st.HaltReason.Message)
+		res.Message = err.Error()
+		return res, err
+	default:
+		err := fmt.Errorf("%w: H:%d %s requires inspection before recovery", ErrRecoveryUnavailable, st.HaltReason.Code, st.HaltReason.Message)
+		res.Message = err.Error()
+		return res, err
+	}
+}
+
+func (s *Service) recoverAlarmUnlock(start machine.Status, res RecoveryResult) (RecoveryResult, error) {
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		st, err := s.runRecoveryCommand(c, &res, "$X")
+		if err != nil {
+			return err
+		}
+		res = updateRecoveryResult(res, st)
+		if st.State != machine.Alarm {
+			return nil
+		}
+		if start.HaltReason == nil || start.HaltReason.Code != 10 {
+			return fmt.Errorf("%w: unlock command sent, but machine still reports %s", ErrRecoveryUnavailable, statusSummary(st))
+		}
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "H:10 still Alarm after $X; trying firmware M999 fallback")
+		st, err = s.runRecoveryCommand(c, &res, "M999")
+		if err != nil {
+			return err
+		}
+		res = updateRecoveryResult(res, st)
+		return nil
+	})
+	if err != nil {
+		res.Message = err.Error()
+		return res, err
+	}
+	if res.State == machine.Alarm {
+		err := fmt.Errorf("%w: recovery commands sent, but machine still reports %s", ErrRecoveryUnavailable, statusSummary(machine.Status{State: res.State, HaltReason: res.HaltReason}))
+		res.Message = err.Error()
+		return res, err
+	}
+	res.Recovered = true
+	res.NeedsHome = true
+	res.Message = "Alarm cleared. Home the machine before moving or cutting."
+	return res, nil
+}
+
+func (s *Service) recoverAlarmHome(res RecoveryResult) (RecoveryResult, error) {
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		st, err := s.runRecoveryCommand(c, &res, "$H")
+		if err != nil {
+			return err
+		}
+		res = updateRecoveryResult(res, st)
+		return nil
+	})
+	if err != nil {
+		res.Message = err.Error()
+		return res, err
+	}
+	if res.State == machine.Alarm {
+		err := fmt.Errorf("%w: home command sent, but machine still reports %s", ErrRecoveryUnavailable, statusSummary(machine.Status{State: res.State, HaltReason: res.HaltReason}))
+		res.Message = err.Error()
+		return res, err
+	}
+	res.Recovered = true
+	res.Message = "Home command sent and the machine is no longer in Alarm."
+	return res, nil
+}
+
+func (s *Service) recoverAlarmReset(res RecoveryResult) (RecoveryResult, error) {
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		s.recordRecoverySend(&res, "reset")
+		if err := c.WriteConsoleCommand("reset"); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		res.Message = err.Error()
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return res, err
+	}
+	s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "reset sent")
+	res.Message = "Reset command sent. Wait for reconnect, then home the machine."
+	return res, nil
+}
+
+func (s *Service) runRecoveryCommand(c *client.Conn, res *RecoveryResult, line string) (machine.Status, error) {
+	s.recordRecoverySend(res, line)
+	out, err := c.SendConsoleCommand(line, client.GcodeOpts{Cap: recoveryStatusTimeout})
+	if out != "" {
+		res.Output = append(res.Output, out)
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return machine.Status{}, err
+	}
+	if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
+	}
+	return s.queryRecoveryStatus(c)
+}
+
+func (s *Service) recordRecoverySend(res *RecoveryResult, line string) {
+	res.Commands = append(res.Commands, line)
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "recovery "+res.Action+" ("+line+")")
+}
+
+func (s *Service) queryRecoveryStatus(c *client.Conn) (machine.Status, error) {
+	payload, err := c.QueryState(recoveryStatusTimeout)
+	if err != nil {
+		return machine.Status{}, err
+	}
+	if !s.arb.Tracker().ObserveStatusPayload(payload) {
+		return machine.Status{}, fmt.Errorf("%w: machine returned malformed status", ErrMachineStatusStale)
+	}
+	st, _ := s.arb.Tracker().Current()
+	return st, nil
+}
+
+func (s *Service) recoveryStatus() (machine.Status, error) {
+	st, _ := s.arb.Tracker().Current()
+	if s.arb.Tracker().Fresh(s.arb.StateMaxAge()) {
+		return st, nil
+	}
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		var queryErr error
+		st, queryErr = s.queryRecoveryStatus(c)
+		return queryErr
+	})
+	if err != nil {
+		return machine.Status{}, err
+	}
+	st, _ = s.arb.Tracker().Current()
+	if !s.arb.Tracker().Fresh(s.arb.StateMaxAge()) {
+		return machine.Status{}, ErrMachineStatusStale
+	}
+	return st, nil
+}
+
+func recoveryResult(action string, st machine.Status) RecoveryResult {
+	return updateRecoveryResult(RecoveryResult{Action: action}, st)
+}
+
+func updateRecoveryResult(res RecoveryResult, st machine.Status) RecoveryResult {
+	res.State = st.State
+	if st.HaltReason != nil {
+		reason := *st.HaltReason
+		res.HaltReason = &reason
+	} else {
+		res.HaltReason = nil
+	}
+	return res
+}
+
+func statusSummary(st machine.Status) string {
+	if st.State == machine.Alarm && st.HaltReason != nil {
+		return fmt.Sprintf("Alarm H:%d: %s", st.HaltReason.Code, st.HaltReason.Message)
+	}
+	return stateLabel(st.State)
+}
+
+func stateLabel(st machine.State) string {
+	if st == machine.Unknown {
+		return "Unknown"
+	}
+	return string(st)
 }
 
 // Delete enqueues a delete and marks the entry pending_delete.
@@ -628,6 +877,8 @@ func md5hex(b []byte) string {
 
 // Errors returned by the service.
 var (
-	ErrNotFound  = errors.New("service: not found")
-	ErrNotCached = errors.New("service: content not cached locally")
+	ErrNotFound            = errors.New("service: not found")
+	ErrNotCached           = errors.New("service: content not cached locally")
+	ErrMachineStatusStale  = errors.New("service: machine status is stale")
+	ErrRecoveryUnavailable = errors.New("service: recovery unavailable")
 )

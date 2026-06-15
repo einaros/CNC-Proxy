@@ -117,8 +117,9 @@ Injection & control model (both modes — proxy alone OR with controller attache
   relay's `SendControl`, which writes the shared machine socket without taking
   the injection window. This remains intentional even during controller file
   transfers: the firmware's file parser accepts standalone CTRL_SINGLE realtime
-  frames, and transfer frames remain forwarded verbatim. `POST /api/control
-  {action: hold|resume|halt}`.
+  frames, and transfer frames remain forwarded verbatim. `POST /api/control`
+  accepts `{action: hold|resume|halt}` for realtime controls and
+  `{action: recover|unlock|home|reset}` for explicit alarm recovery.
 - **gamepad jog** (`internal/jog`, authenticated `GET /api/jog/ws`) is a
   long-lived interactive lease, not regular MDI. `Arbiter.AcquireJog` holds
   `opMu` for the session duration, so sync/reconcile/file operations cannot
@@ -145,6 +146,19 @@ Injection & control model (both modes — proxy alone OR with controller attache
   grounded in actually-observed behavior. Memory file
   `production-audit-findings` lists rejected false positives — don't
   reintroduce "fixes" for them.
+- **Bugfixes must be proven end to end.** When a user reports that a control
+  does nothing, assume the fix is not done until the full path has been chased:
+  DOM event, request payload, auth/middleware, handler routing, service policy,
+  arbiter mode, machine frame, UI feedback, cache behavior, and tests. Go to
+  unreasonable lengths to understand the real failure and verify the actual
+  behavior rather than stopping at the first plausible patch.
+- **Machine-action UI must never be silent.** Any button/control that can send
+  gcode, recovery commands, realtime control, jog input, file mutations, or
+  anything else affecting the machine must show immediate visible feedback,
+  an in-progress/disabled state while the request is active, and a terminal
+  success/failure message at the control or panel where the operator clicked.
+  When the machine can be observed afterward, verify and show the observed
+  result; never leave the operator guessing whether a command was issued.
 - **Race detector is the bar:** `go test -race ./...` green before declaring
   done. New concurrency must respect the arbiter's `opMu` (the shared
   `client.Conn` is not concurrency-safe).

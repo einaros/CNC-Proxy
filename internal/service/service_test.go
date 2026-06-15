@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"io"
 	"path/filepath"
 	"testing"
@@ -385,5 +386,126 @@ func TestSendControlRejectsUnknown(t *testing.T) {
 	svc, _, _ := serviceWithMachine(t)
 	if err := svc.SendControl('Q'); err == nil {
 		t.Error("expected error for unsupported control char")
+	}
+}
+
+func TestRecoverAlarmSoftLimitUnlocksAndVerifies(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	if !tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>") {
+		t.Fatal("alarm status should parse")
+	}
+
+	start := time.Now()
+	res, err := svc.RecoverAlarm("recover")
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("recovery waited too long: %s", elapsed)
+	}
+	if !res.Recovered || res.State != machine.Idle || !res.NeedsHome {
+		t.Fatalf("recovery result = %+v, want recovered Idle with needs_home", res)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "$X" {
+		t.Fatalf("recovery gcodes = %v, want [$X]", g)
+	}
+}
+
+func TestRecoverAlarmSoftLimitFallsBackToM999(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	m.SetUnlockDoesNotClear(true)
+	if !tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>") {
+		t.Fatal("alarm status should parse")
+	}
+	m.SetStatus("<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>")
+
+	res, err := svc.RecoverAlarm("recover")
+	if err != nil {
+		t.Fatalf("recover with M999 fallback: %v", err)
+	}
+	if !res.Recovered || res.State != machine.Idle {
+		t.Fatalf("recovery result = %+v, want recovered Idle", res)
+	}
+	if g := m.Gcodes(); len(g) != 2 || g[0] != "$X" || g[1] != "M999" {
+		t.Fatalf("recovery gcodes = %v, want [$X M999]", g)
+	}
+}
+
+func TestRecoverAlarmStillAlarmReturnsUnavailable(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	m.SetUnlockDoesNotClear(true)
+	m.SetM999DoesNotClear(true)
+	status := "<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("alarm status should parse")
+	}
+
+	res, err := svc.RecoverAlarm("recover")
+	if err == nil {
+		t.Fatal("expected recovery failure")
+	}
+	if !errors.Is(err, ErrRecoveryUnavailable) {
+		t.Fatalf("recover err = %v, want ErrRecoveryUnavailable", err)
+	}
+	if res.Recovered || res.State != machine.Alarm {
+		t.Fatalf("recovery result = %+v, want unrecovered Alarm", res)
+	}
+	if g := m.Gcodes(); len(g) != 2 || g[0] != "$X" || g[1] != "M999" {
+		t.Fatalf("recovery gcodes = %v, want [$X M999]", g)
+	}
+}
+
+func TestRecoverAlarmHomeBypassesAlarmIdleGate(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	if !tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>") {
+		t.Fatal("alarm status should parse")
+	}
+
+	res, err := svc.RecoverAlarm("home")
+	if err != nil {
+		t.Fatalf("home: %v", err)
+	}
+	if !res.Recovered || res.State != machine.Idle {
+		t.Fatalf("home result = %+v, want recovered Idle", res)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "$H" {
+		t.Fatalf("recovery gcodes = %v, want [$H]", g)
+	}
+}
+
+func TestRecoverAlarmRefreshesStaleStatus(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	status := "<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>"
+	m.SetStatus(status)
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("alarm status should parse")
+	}
+	arb := session.New(session.Config{
+		Tracker:     tr,
+		StateMaxAge: 50 * time.Millisecond,
+		Dial:        func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+	})
+	svc, err := New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(75 * time.Millisecond)
+
+	res, err := svc.RecoverAlarm("unlock")
+	if err != nil {
+		t.Fatalf("unlock with stale cached status should refresh first: %v", err)
+	}
+	if !res.Recovered || res.State != machine.Idle {
+		t.Fatalf("recovery result = %+v, want recovered Idle", res)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "$X" {
+		t.Fatalf("recovery gcodes = %v, want [$X]", g)
 	}
 }

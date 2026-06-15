@@ -116,7 +116,7 @@ Then:
   `DELETE /api/files/{path}`, `POST /api/files/rename`, `GET /api/machine`,
   `GET /api/machine/status`, `GET /api/jobs`, `POST /api/gcode` (body
   `{"line":"G0 X10"}`), `POST /api/control` (body
-  `{"action":"hold|resume|halt"}`), `GET /api/gcode/log` (recent gcode I/O),
+  `{"action":"hold|resume|halt|recover|unlock|home|reset"}`), `GET /api/gcode/log` (recent gcode I/O),
   `GET /api/events` (SSE: catalog/job changes plus all gcode I/O — both
   API-submitted and controller traffic observed by the relay; optional
   `?scope=control` omits catalog/jobs and `?scope=files` omits gcode),
