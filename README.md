@@ -16,7 +16,8 @@ a mountable WebDAV filesystem — without modifying the controller or firmware.
 - **File-handling API + web UI (HTTP):** upload, list, delete, rename, with
   Google-Drive-style deferred sync — writes are accepted immediately and pushed
   to the machine later, when it's reachable and idle. Live status, sync jobs,
-  and gcode I/O are shown through the operational web UI and SSE stream.
+  gcode I/O, observed run history, backup/import, and operator diagnostics are
+  shown through the operational web UI and SSE stream.
 - **WebDAV filesystem (HTTP):** mount the machine's gcode directory natively on
   macOS/Windows/Linux. No driver install, nothing to sign — the OS's built-in
   WebDAV client connects to the server the proxy runs.
@@ -51,6 +52,8 @@ The **sync engine** drains the queue only in owner mode while the machine is
 | `internal/discovery` | UDP discovery listen + re-advertise |
 | `internal/relay` | Byte-transparent TCP relay, single session |
 | `internal/session` | Arbiter: relay vs owner mode, idle gating |
+| `internal/gcodelog` | Bounded in-memory log of observed controller/API/jog gcode I/O |
+| `internal/runhistory` | Observed run summaries derived from status and gcode log signals |
 | `internal/store` | Durable catalog + job queue (atomic JSON) |
 | `internal/synceng` | Deferred-sync loop with backoff; periodic reconcile sweep |
 | `internal/quicklz` | QuickLZ 1.5.0 level-3 port (compress/decompress + `.lz` framing) |
@@ -114,9 +117,11 @@ Then:
 - Web UI: <http://127.0.0.1:8420/>
 - API: `POST /api/files?path=part.nc` (raw body or multipart), `GET /api/files`,
   `DELETE /api/files/{path}`, `POST /api/files/rename`, `GET /api/machine`,
-  `GET /api/machine/status`, `GET /api/jobs`, `POST /api/gcode` (body
+  `GET /api/machine/status`, `GET /api/jobs`, `GET /api/runs`,
+  `POST /api/gcode` (body
   `{"line":"G0 X10"}`), `POST /api/control` (body
   `{"action":"hold|resume|halt|recover|unlock|home|reset"}`), `GET /api/gcode/log` (recent gcode I/O),
+  `GET /api/backup`, `POST /api/backup/import`,
   `GET /api/events` (SSE: catalog/job changes plus all gcode I/O — both
   API-submitted and controller traffic observed by the relay; optional
   `?scope=control` omits catalog/jobs and `?scope=files` omits gcode),
@@ -154,6 +159,16 @@ Then:
     bindings, and log preferences. Macro buttons execute through the same
     `/api/gcode` endpoint as manual console input, so existing idle gating and
     relay safety behavior still apply.
+  - **Run history** is derived from status frames and the shared gcode log; it
+    does not poll the machine or alter controller traffic. Entries include the
+    best observed file hint, source, start/end time, state transitions, alarms,
+    halt reason, progress, feed/spindle override changes, and a bounded command
+    trail. The history is intentionally best-effort: a controller can start a
+    job without sending a filename-bearing command through the proxy.
+  - **Backup/export/import** covers the durable `state.json` model (catalog,
+    queue, macros, macro buttons, log preferences, and gamepad mappings), plus
+    retained gcode log lines and run history. It is local proxy state only;
+    importing a backup does not talk to the machine by itself.
 - WebDAV mount: macOS Finder → Go → Connect to Server → `http://127.0.0.1:8421/`;
   Windows → Map network drive; Linux → `davs?://…` in the file manager.
 
@@ -178,6 +193,9 @@ password; default user `cnc`) or explicitly pass `-allow-insecure-http`.
 | `-auth-token` | (empty) | HTTP Basic Auth token/password for API/WebDAV |
 | `-allow-insecure-http` | false | allow API/WebDAV to bind beyond loopback without auth |
 | `-data-dir` | OS config dir | catalog, job queue, and file cache |
+| `-api-max-upload-mb` | 512 | maximum API/WebDAV upload request body size |
+| `-api-max-json-kb` | 1024 | maximum JSON request body size for API mutations |
+| `-api-max-backup-mb` | 64 | maximum backup import request body size |
 | `-jog-enabled` | true | enable low-latency gamepad jogging API/UI |
 | `-jog-max-xy-mm-min` | 1200 | maximum XY jog speed in mm/min |
 | `-jog-max-z-mm-min` | 300 | maximum Z jog speed in mm/min |
@@ -237,6 +255,24 @@ Each file carries a sync state shown in the web UI: `synced`, `pending_upload`,
 `uploading`, `pending_delete`, `deleting`, `pending_rename`, `remote_only`,
 `error`. A write lands as `pending_upload` and becomes `synced` once the machine
 confirms the MD5.
+
+## Security, diagnostics, and maintenance
+
+- HTTP servers set header/body timeouts, header-size limits, and configurable
+  request body caps. API and WebDAV upload limits share `-api-max-upload-mb`;
+  JSON mutations use `-api-max-json-kb`; backup imports use
+  `-api-max-backup-mb`.
+- Browser-originated machine-action requests are rejected unless their
+  `Origin`/`Referer` matches the API host. This covers file mutations, gcode,
+  realtime/recovery control, UI settings writes, backup import, and the jog
+  WebSocket while still allowing non-browser API clients without origin headers.
+- `GET /api/jobs` includes transient `blocked_reason`, `blocked_message`, and
+  `blocked_until` diagnostics so operators can see whether a job is waiting on
+  stale status, non-Idle machine state, controller relay mode, retry backoff, or
+  a previous failure.
+- A background maintenance pass prunes completed jobs older than 24 hours and
+  removes old unreferenced cache files. Catalog entries and non-completed jobs
+  keep their referenced cache files pinned.
 
 ## Test
 

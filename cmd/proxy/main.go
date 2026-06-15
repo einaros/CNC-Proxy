@@ -65,6 +65,9 @@ func main() {
 		authToken    = flag.String("auth-token", "", "HTTP Basic Auth token/password for API/WebDAV")
 		insecureHTTP = flag.Bool("allow-insecure-http", false, "allow API/WebDAV to bind beyond loopback without -auth-token")
 		dataDir      = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
+		apiUploadMB  = flag.Int64("api-max-upload-mb", 512, "maximum API/WebDAV upload body size in MiB")
+		apiJSONKB    = flag.Int64("api-max-json-kb", 1024, "maximum API JSON request body size in KiB")
+		apiBackupMB  = flag.Int64("api-max-backup-mb", 64, "maximum API backup import body size in MiB")
 		jogEnabled   = flag.Bool("jog-enabled", jogDefaults.Enabled, "enable low-latency gamepad jogging API/UI")
 		jogMaxXY     = flag.Float64("jog-max-xy-mm-min", jogDefaults.MaxXYMMMin, "maximum XY jog speed in mm/min")
 		jogMaxZ      = flag.Float64("jog-max-z-mm-min", jogDefaults.MaxZMMMin, "maximum Z jog speed in mm/min")
@@ -166,6 +169,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("cannot create service: %v", err)
 	}
+	go svc.RunMaintenance(ctx, 10*time.Minute, 24*time.Hour, 24*time.Hour)
 	jogMgr := jog.New(arb, jog.Config{
 		Enabled:        *jogEnabled,
 		MaxXYMMMin:     *jogMaxXY,
@@ -177,7 +181,12 @@ func main() {
 	})
 
 	authCfg := httpauth.Config{User: *authUser, Token: *authToken}
-	apiSrv := &http.Server{Addr: *apiAddr, Handler: httpauth.Middleware(authCfg, api.NewWithOptions(svc, api.Options{Jog: jogMgr}).Handler())}
+	apiSrv := hardenedAPIServer(*apiAddr, httpauth.Middleware(authCfg, api.NewWithOptions(svc, api.Options{
+		Jog:            jogMgr,
+		MaxUploadBytes: mib(*apiUploadMB),
+		MaxJSONBytes:   kib(*apiJSONKB),
+		MaxBackupBytes: mib(*apiBackupMB),
+	}).Handler()))
 	go func() {
 		log.Printf("api: listening on %s", *apiAddr)
 		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -185,7 +194,7 @@ func main() {
 		}
 	}()
 
-	davSrv := &http.Server{Addr: *davAddr, Handler: httpauth.Middleware(authCfg, davfs.New(svc).Handler(""))}
+	davSrv := hardenedDAVServer(*davAddr, httpauth.Middleware(authCfg, limitRequestBody(mib(*apiUploadMB), davfs.New(svc).Handler(""))))
 	go func() {
 		log.Printf("webdav: listening on %s (mount this address)", *davAddr)
 		if err := davSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -292,6 +301,53 @@ func isLoopbackBind(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func hardenedAPIServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+func hardenedDAVServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Minute,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+func limitRequestBody(max int64, next http.Handler) http.Handler {
+	if max <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, max)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func mib(v int64) int64 {
+	if v <= 0 {
+		return 0
+	}
+	return v << 20
+}
+
+func kib(v int64) int64 {
+	if v <= 0 {
+		return 0
+	}
+	return v << 10
 }
 
 // injectorAdapter bridges *relay.Server to session.Injector. The two packages

@@ -54,6 +54,24 @@ func TestUnsubscribeClosesChannel(t *testing.T) {
 	l.Append(DirSend, SourceAPI, "after") // must not block or panic
 }
 
+func TestReplaceRestoresRingAndSequence(t *testing.T) {
+	l := New(2)
+	l.Replace([]Line{
+		{Seq: 10, Dir: DirSend, Source: SourceAPI, Text: "old"},
+		{Seq: 11, Dir: DirRecv, Source: SourceAPI, Text: "ok"},
+		{Seq: 12, Dir: DirSend, Source: SourceController, Text: "new"},
+	})
+	lines := l.Recent()
+	if len(lines) != 2 || lines[0].Seq != 11 || lines[1].Seq != 12 {
+		t.Fatalf("recent after replace = %+v", lines)
+	}
+	l.Append(DirRecv, SourceController, "ok")
+	lines = l.Recent()
+	if lines[len(lines)-1].Seq != 13 {
+		t.Fatalf("next seq after replace = %+v", lines)
+	}
+}
+
 func TestRecentNeverNil(t *testing.T) {
 	l := New(5)
 	if got := l.Recent(); got == nil {

@@ -222,7 +222,13 @@ func TestPruneDoneJobs(t *testing.T) {
 	s.UpdateJob(f.ID, func(j *Job) { j.State = Failed })
 
 	now = now.Add(time.Hour)
-	s.PruneDoneJobs(time.Minute)
+	removed, err := s.PruneDoneJobs(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
 
 	jobs := s.ListJobs()
 	if len(jobs) != 1 || jobs[0].State != Failed {

@@ -7,6 +7,7 @@ const GCODE_HISTORY_KEY = "cnc-proxy.gcode-history.v1";
 const state = {
   files: new Map(),
   jobs: new Map(),
+  runs: [],
   machine: { state: "", mode: "owner", age_ms: 0, connected: false },
   gcodeSeqs: new Set(),
   gcodeLines: [],
@@ -155,6 +156,17 @@ function fmtAge(ms) {
   const min = Math.round(sec / 60);
   if (min < 60) return min + "m";
   return Math.round(min / 60) + "h";
+}
+
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "-";
+  const sec = Math.round(ms / 1000);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function fmtCoord(v) {
@@ -1097,9 +1109,44 @@ function renderJobs() {
       <span class="job-kind">${escapeHtml(j.kind)}</span>
       <span class="name">${escapeHtml(relPath(j.path))}</span>
       <span class="muted">${escapeHtml(j.state)}${j.attempts ? `, attempt ${j.attempts}` : ""}</span>
-      ${j.last_error ? `<span class="err">${escapeHtml(j.last_error)}</span>` : ""}`;
+      <span>${j.blocked_message ? escapeHtml(j.blocked_message) : ""}${j.last_error ? `<br><span class="err">${escapeHtml(j.last_error)}</span>` : ""}</span>`;
     div.appendChild(row);
   }
+}
+
+function renderRuns() {
+  const div = document.getElementById("run-history");
+  const runs = Array.isArray(state.runs) ? state.runs.slice(0, 8) : [];
+  document.getElementById("run-count").textContent = String(runs.length);
+  if (!runs.length) {
+    div.innerHTML = `<div class="empty">No observed runs yet.</div>`;
+    return;
+  }
+  div.innerHTML = "";
+  for (const run of runs) {
+    const row = document.createElement("div");
+    row.className = "run-row";
+    const states = (run.state_transitions || []).map((s) => s.state || "Unknown").filter(Boolean);
+    const alarms = (run.alarms || []).map((a) => a.halt_reason ? `H:${a.halt_reason.code} ${a.halt_reason.message}` : "Alarm");
+    const feed = lastOverride(run.feed_overrides);
+    const spindle = lastOverride(run.spindle_overrides);
+    const detail = [
+      states.length ? "states: " + states.join(" -> ") : "",
+      alarms.length ? "alarm: " + alarms.join(", ") : "",
+      feed ? `feed ${Math.round(feed.override)}%` : "",
+      spindle ? `spindle ${Math.round(spindle.override)}%` : "",
+    ].filter(Boolean).join("; ");
+    row.innerHTML = `
+      <div><div class="run-title">${escapeHtml(run.file || "Observed run")}</div><div class="muted">${escapeHtml(run.source || "unknown")}${run.active ? " · active" : ""}</div></div>
+      <div class="muted">${escapeHtml(fmtTime(run.started_at))}</div>
+      <div class="muted">${escapeHtml(fmtDuration(run.duration_ms || 0))}</div>
+      <div>${escapeHtml(detail || "No transitions recorded yet.")}</div>`;
+    div.appendChild(row);
+  }
+}
+
+function lastOverride(values) {
+  return Array.isArray(values) && values.length ? values[values.length - 1] : null;
 }
 
 function appendGcodeLine(ln) {
@@ -1198,6 +1245,43 @@ function exportVisibleLog() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function exportBackup() {
+  try {
+    const r = await request("/api/backup");
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "cnc-proxy-backup.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    document.getElementById("backup-status").textContent = "Backup exported.";
+  } catch (e) {
+    document.getElementById("backup-status").textContent = "Export failed: " + e.message;
+    setNotice("Backup export failed: " + e.message, "error");
+  }
+}
+
+async function importBackupFile(file) {
+  if (!file) return;
+  if (!confirm("Import this CNC Proxy backup? This replaces local catalog, queue, UI settings, retained logs, and run history.")) return;
+  try {
+    const text = await file.text();
+    await request("/api/backup/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: text,
+    });
+    document.getElementById("backup-status").textContent = "Backup imported; reloading...";
+    setNotice("Backup imported.", "ok");
+    setTimeout(() => location.reload(), 600);
+  } catch (e) {
+    document.getElementById("backup-status").textContent = "Import failed: " + e.message;
+    setNotice("Backup import failed: " + e.message, "error");
+  }
 }
 
 async function uploadFiles(fileList) {
@@ -1833,9 +1917,11 @@ function applySnapshot(snap) {
     state.filesLoaded = true;
   }
   if (Array.isArray(snap.jobs)) state.jobs = new Map(snap.jobs.map((j) => [j.id, j]));
+  if (Array.isArray(snap.runs)) state.runs = snap.runs;
   renderMachine();
   renderFiles();
   renderJobs();
+  renderRuns();
   if (Array.isArray(snap.gcode)) {
     state.gcodeSeqs.clear();
     state.gcodeLines = [];
@@ -1845,6 +1931,11 @@ function applySnapshot(snap) {
 }
 
 function applyChange(ev) {
+  if (ev.kind === "reset") {
+    setNotice("Local state changed; reloading.", "info");
+    setTimeout(() => location.reload(), 400);
+    return;
+  }
   if (ev.kind === "entry" && ev.entry) {
     if (ev.entry.sync === "") state.files.delete(ev.entry.path);
     else state.files.set(ev.entry.path, ev.entry);
@@ -1890,6 +1981,16 @@ async function pollMachine() {
     renderMachine();
   } catch (e) {
     setNotice("Machine status unavailable: " + e.message, "error");
+  }
+}
+
+async function loadRuns() {
+  try {
+    const r = await request("/api/runs");
+    state.runs = await r.json();
+    renderRuns();
+  } catch {
+    // Run history is operational context; status polling remains primary.
   }
 }
 
@@ -1959,6 +2060,12 @@ function init() {
   document.getElementById("log-copy").onclick = copyVisibleLog;
   document.getElementById("log-export").onclick = exportVisibleLog;
   document.getElementById("log-clear").onclick = clearGcodeLog;
+  document.getElementById("backup-export").onclick = exportBackup;
+  document.getElementById("backup-import").onclick = () => document.getElementById("backup-file").click();
+  document.getElementById("backup-file").onchange = (e) => {
+    importBackupFile(e.target.files[0]);
+    e.target.value = "";
+  };
   document.getElementById("macro-new").onclick = newMacro;
   document.getElementById("macro-save").onclick = saveMacroFromForm;
   document.getElementById("macro-run").onclick = () => runMacro(macroByID(state.selectedMacroId));
@@ -2015,10 +2122,13 @@ function init() {
   scheduleJogSample();
   renderFiles();
   renderJobs();
+  renderRuns();
   renderCommandHistory();
   connectControlSSE();
   pollMachine();
+  loadRuns();
   setInterval(pollMachine, 3000);
+  setInterval(loadRuns, 10000);
 }
 
 document.addEventListener("DOMContentLoaded", init);

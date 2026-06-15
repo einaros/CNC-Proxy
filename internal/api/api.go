@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
@@ -20,13 +22,19 @@ import (
 
 // Server holds the HTTP handlers.
 type Server struct {
-	svc *service.Service
-	jog *jog.Manager
+	svc            *service.Service
+	jog            *jog.Manager
+	maxUploadBytes int64
+	maxJSONBytes   int64
+	maxBackupBytes int64
 }
 
 // Options configures optional API surfaces.
 type Options struct {
-	Jog *jog.Manager
+	Jog            *jog.Manager
+	MaxUploadBytes int64
+	MaxJSONBytes   int64
+	MaxBackupBytes int64
 }
 
 // New creates an API server.
@@ -34,7 +42,22 @@ func New(svc *service.Service) *Server { return NewWithOptions(svc, Options{}) }
 
 // NewWithOptions creates an API server with optional feature managers.
 func NewWithOptions(svc *service.Service, opts Options) *Server {
-	return &Server{svc: svc, jog: opts.Jog}
+	if opts.MaxUploadBytes <= 0 {
+		opts.MaxUploadBytes = 512 << 20
+	}
+	if opts.MaxJSONBytes <= 0 {
+		opts.MaxJSONBytes = 1 << 20
+	}
+	if opts.MaxBackupBytes <= 0 {
+		opts.MaxBackupBytes = 64 << 20
+	}
+	return &Server{
+		svc:            svc,
+		jog:            opts.Jog,
+		maxUploadBytes: opts.MaxUploadBytes,
+		maxJSONBytes:   opts.MaxJSONBytes,
+		maxBackupBytes: opts.MaxBackupBytes,
+	}
 }
 
 // Handler returns the configured HTTP mux.
@@ -49,17 +72,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/files/rename", s.renameFile) // body: {from,to}
 	mux.HandleFunc("POST /api/dirs", s.postDir)            // body: {path}
 	mux.HandleFunc("GET /api/jobs", s.getJobs)
+	mux.HandleFunc("GET /api/runs", s.getRuns)
 	mux.HandleFunc("POST /api/gcode", s.postGcode)      // body: {line}
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog) // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)  // body: {action: hold|resume|halt|recover|unlock|home|reset}
 	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
 	mux.HandleFunc("PUT /api/ui/settings", s.putUISettings)
+	mux.HandleFunc("GET /api/backup", s.getBackup)
+	mux.HandleFunc("POST /api/backup/import", s.postBackupImport)
 	mux.HandleFunc("GET /api/jog/capabilities", s.getJogCapabilities)
 	mux.HandleFunc("GET /api/jog/ws", s.jogWS)
 	mux.HandleFunc("GET /api/events", s.events)
 	// Everything not under /api/ is the embedded web UI.
 	mux.Handle("/", webHandler())
-	return mux
+	return sameOriginGuard(mux)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -70,6 +96,24 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	defer r.Body.Close()
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.maxJSONBytes)).Decode(dst)
+	if err == nil {
+		return true
+	}
+	if requestBodyTooLarge(err) {
+		writeErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+	} else {
+		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	}
+	return false
+}
+
+func requestBodyTooLarge(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "http: request body too large")
 }
 
 func (s *Server) getMachine(w http.ResponseWriter, r *http.Request) {
@@ -84,14 +128,23 @@ func (s *Server) getJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.Jobs())
 }
 
+func (s *Server) getRuns(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.svc.RunHistory())
+}
+
 // postFile accepts either a multipart upload (field "file", path from form
 // "path" or the filename) or a raw body with the path in the "X-Path" header /
 // "path" query parameter.
 func (s *Server) postFile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadBytes)
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		f, hdr, err := r.FormFile("file")
 		if err != nil {
+			if requestBodyTooLarge(err) {
+				writeErr(w, http.StatusRequestEntityTooLarge, "upload too large")
+				return
+			}
 			writeErr(w, http.StatusBadRequest, "missing file field: "+err.Error())
 			return
 		}
@@ -118,6 +171,10 @@ func (s *Server) postFile(w http.ResponseWriter, r *http.Request) {
 func (s *Server) doUpload(w http.ResponseWriter, remote string, r io.Reader) {
 	entry, err := s.svc.Upload(remote, r)
 	if err != nil {
+		if requestBodyTooLarge(err) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "upload too large")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -151,8 +208,7 @@ func (s *Server) renameFile(w http.ResponseWriter, r *http.Request) {
 		From string `json:"from"`
 		To   string `json:"to"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !s.decodeJSON(w, r, &body) {
 		return
 	}
 	if err := s.svc.Rename(body.From, body.To); err != nil {
@@ -166,8 +222,7 @@ func (s *Server) postDir(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Path string `json:"path"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !s.decodeJSON(w, r, &body) {
 		return
 	}
 	entry, err := s.svc.Mkdir(body.Path)
@@ -202,8 +257,7 @@ func (s *Server) postGcode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Line string `json:"line"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !s.decodeJSON(w, r, &body) {
 		return
 	}
 	if body.Line == "" {
@@ -230,8 +284,7 @@ func (s *Server) getUISettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putUISettings(w http.ResponseWriter, r *http.Request) {
 	var body store.UISettings
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !s.decodeJSON(w, r, &body) {
 		return
 	}
 	ui, err := s.svc.SetUISettings(body)
@@ -251,8 +304,7 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action string `json:"action"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !s.decodeJSON(w, r, &body) {
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(body.Action))
@@ -282,6 +334,29 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) getBackup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Disposition", `attachment; filename="cnc-proxy-backup.json"`)
+	writeJSON(w, http.StatusOK, s.svc.ExportBackup())
+}
+
+func (s *Server) postBackupImport(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	var backup service.Backup
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.maxBackupBytes)).Decode(&backup); err != nil {
+		if requestBodyTooLarge(err) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "backup import body too large")
+		} else {
+			writeErr(w, http.StatusBadRequest, "invalid backup JSON: "+err.Error())
+		}
+		return
+	}
+	if err := s.svc.ImportBackup(backup); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "imported"})
 }
 
 // events streams catalog/job/machine/gcode changes as Server-Sent Events.
@@ -332,6 +407,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	if includeGcode {
 		snap["gcode"] = s.svc.GcodeLog().Recent()
+		snap["runs"] = s.svc.RunHistory()
 	}
 	sendEvent(w, "snapshot", snap)
 	flusher.Flush()
@@ -344,7 +420,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			sendEvent(w, "change", ev)
+			sendEvent(w, "change", s.svc.EnrichEventJob(ev))
 			flusher.Flush()
 		case ln, ok := <-gch:
 			if !ok {
@@ -362,4 +438,84 @@ func sendEvent(w io.Writer, event string, v any) {
 		return
 	}
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+}
+
+func sameOriginGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !requiresSameOrigin(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if site := strings.ToLower(r.Header.Get("Sec-Fetch-Site")); site == "cross-site" {
+			writeErr(w, http.StatusForbidden, "cross-site request rejected")
+			return
+		}
+		if !sameOrigin(r, r.Header.Get("Origin")) {
+			writeErr(w, http.StatusForbidden, "cross-origin request rejected")
+			return
+		}
+		if r.Header.Get("Origin") == "" && !sameOrigin(r, r.Header.Get("Referer")) {
+			writeErr(w, http.StatusForbidden, "cross-origin request rejected")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func requiresSameOrigin(r *http.Request) bool {
+	if r.URL.Path == "/api/jog/ws" {
+		return true
+	}
+	if r.URL.Path == "/api/backup" {
+		return true
+	}
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
+}
+
+func sameOrigin(r *http.Request, raw string) bool {
+	if raw == "" {
+		return true
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	host := r.Host
+	if host == "" {
+		host = r.URL.Host
+	}
+	return strings.EqualFold(normalizeHost(u.Host), normalizeHost(host)) &&
+		strings.EqualFold(u.Scheme, requestScheme(r))
+}
+
+func requestScheme(r *http.Request) string {
+	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
+		if i := strings.IndexByte(xf, ','); i >= 0 {
+			xf = xf[:i]
+		}
+		return strings.ToLower(strings.TrimSpace(xf))
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func normalizeHost(host string) string {
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		return strings.ToLower(host)
+	}
+	if (p == "80" || p == "443") && h != "" {
+		return strings.ToLower(h)
+	}
+	return strings.ToLower(net.JoinHostPort(h, p))
 }

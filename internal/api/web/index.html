@@ -78,9 +78,15 @@
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   .empty { color: var(--muted); padding: 18px; text-align: center; background: var(--panel); border: 1px solid var(--border); border-top: 0; }
   #jobs { background: var(--panel); border: 1px solid var(--border); }
-  .job { display: grid; grid-template-columns: 80px minmax(220px, 1fr) 140px minmax(120px, auto); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
+  .job { display: grid; grid-template-columns: 80px minmax(220px, 1fr) 170px minmax(180px, auto); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
   .job:last-child { border-bottom: 0; }
   .job-kind { color: var(--accent); font-weight: 650; }
+  #run-history { background: var(--panel); border: 1px solid var(--border); }
+  .run-row { display: grid; grid-template-columns: minmax(180px, 1fr) 120px 120px minmax(220px, 1.4fr); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
+  .run-row:last-child { border-bottom: 0; }
+  .run-title { font-weight: 650; overflow-wrap: anywhere; }
+  .backup-panel { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
+  #backup-status { color: var(--muted); min-height: 18px; }
   .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
   .metric { min-width: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: grid; gap: 3px; align-content: start; }
   .metric .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -175,7 +181,7 @@
     #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     input[type="search"] { width: 100%; }
     th:nth-child(4), td:nth-child(4) { display: none; }
-    .job { grid-template-columns: 1fr; gap: 3px; }
+    .job, .run-row { grid-template-columns: 1fr; gap: 3px; }
     #alarm-panel { grid-template-columns: 1fr; }
     #alarm-actions { justify-content: stretch; }
     .metric-grid, #status-panel, #jog .jog-grid { grid-template-columns: 1fr; }
@@ -232,6 +238,9 @@
         <div id="status-fields"></div>
       </div>
     </details>
+
+    <h2>Run History (<span id="run-count">0</span>)</h2>
+    <div id="run-history"></div>
 
     <h2>Gcode Console</h2>
     <div id="console">
@@ -413,6 +422,14 @@
 
     <h2>Activity (<span id="active-jobs">0</span>)</h2>
     <div id="jobs"></div>
+
+    <h2>Backup</h2>
+    <div class="backup-panel">
+      <button type="button" id="backup-export">Export Backup</button>
+      <button type="button" id="backup-import">Import Backup</button>
+      <input id="backup-file" type="file" accept="application/json,.json" hidden>
+      <span id="backup-status"></span>
+    </div>
   </section>
 </main>
 <script src="/app.js?v=ui-layout-1"></script>

@@ -81,6 +81,12 @@ type Job struct {
 	LastError string    `json:"last_error,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Diagnostic fields are populated on API copies only; they are not part of
+	// the durable queue semantics.
+	BlockedReason  string     `json:"blocked_reason,omitempty"`
+	BlockedMessage string     `json:"blocked_message,omitempty"`
+	BlockedUntil   *time.Time `json:"blocked_until,omitempty"`
 }
 
 // UISettings is durable operator UI configuration. It is intentionally kept in

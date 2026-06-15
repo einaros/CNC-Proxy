@@ -75,6 +75,56 @@ func TestPostFileRawBody(t *testing.T) {
 	}
 }
 
+func TestMutatingAPIRejectsCrossOriginBrowserRequests(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req, _ := http.NewRequest("POST", srv.URL+"/api/gcode", strings.NewReader(`{"line":"M114"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://evil.example")
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want 403", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest("POST", srv.URL+"/api/gcode", strings.NewReader(`{"line":"M114"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	resp = do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("same-origin request was rejected")
+	}
+}
+
+func TestBackupExportRejectsCrossOriginBrowserRequests(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req, _ := http.NewRequest("GET", srv.URL+"/api/backup", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin backup status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestPostFileUploadLimit(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	arb := session.New(session.Config{Dial: func() (*client.Conn, error) { return nil, io.EOF }})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewWithOptions(svc, Options{MaxUploadBytes: 4}).Handler())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/api/files?path=too-big.nc", strings.NewReader("12345"))
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("upload status = %d, want 413", resp.StatusCode)
+	}
+}
+
 func TestAuthenticatedAPIRequests(t *testing.T) {
 	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	arb := session.New(session.Config{Dial: func() (*client.Conn, error) { return nil, io.EOF }})
@@ -162,6 +212,59 @@ func TestGetFilesAndContent(t *testing.T) {
 	}
 }
 
+func TestJobsEndpointIncludesDiagnostics(t *testing.T) {
+	srv, _ := newTestServer(t)
+	http.Post(srv.URL+"/api/files?path=a.nc", "application/octet-stream", strings.NewReader("hello"))
+
+	resp := get(t, srv.URL+"/api/jobs")
+	defer resp.Body.Close()
+	var jobs []store.Job
+	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].BlockedReason != "stale_status" || jobs[0].BlockedMessage == "" {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+}
+
+func TestBackupEndpoints(t *testing.T) {
+	srv, _ := newTestServer(t)
+	http.Post(srv.URL+"/api/files?path=a.nc", "application/octet-stream", strings.NewReader("hello"))
+
+	resp := get(t, srv.URL+"/api/backup")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Disposition"), "cnc-proxy-backup.json") {
+		t.Fatalf("backup export status=%d disposition=%q", resp.StatusCode, resp.Header.Get("Content-Disposition"))
+	}
+	var backup service.Backup
+	if err := json.NewDecoder(resp.Body).Decode(&backup); err != nil {
+		t.Fatal(err)
+	}
+	if backup.Version != 1 || len(backup.State.Entries) != 1 {
+		t.Fatalf("backup = %+v", backup)
+	}
+
+	body, _ := json.Marshal(backup)
+	req, _ := http.NewRequest("POST", srv.URL+"/api/backup/import", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	imp := do(t, req)
+	defer imp.Body.Close()
+	if imp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(imp.Body)
+		t.Fatalf("backup import status=%d body=%s", imp.StatusCode, b)
+	}
+
+	backup.Version = 0
+	body, _ = json.Marshal(backup)
+	req, _ = http.NewRequest("POST", srv.URL+"/api/backup/import", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	bad := do(t, req)
+	defer bad.Body.Close()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unsupported backup version status=%d, want 400", bad.StatusCode)
+	}
+}
+
 // TestSpacedFilenameRoundTrip ensures a filename with a space (which the web UI
 // percent-encodes) can be uploaded, read back, and deleted through the API.
 func TestSpacedFilenameRoundTrip(t *testing.T) {
@@ -245,6 +348,33 @@ func TestMachineStatusEndpointRichFields(t *testing.T) {
 	if st.State != machine.Idle || st.MPos["x"] != 1 || st.WPos["z"] != 6 || st.Feed == nil {
 		t.Fatalf("machine status = %+v", st)
 	}
+}
+
+func TestRunsEndpointDerivesObservedRun(t *testing.T) {
+	srv, _, tr := serverWithMachine(t)
+	tr.Observe(machine.Idle)
+	resp := postJSON(t, srv.URL+"/api/gcode", map[string]string{"line": "play /sd/gcodes/a.nc"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("play command status = %d", resp.StatusCode)
+	}
+	tr.ObserveStatusPayload("<Run|MPos:0,0,0|F:100,200,100|S:5000,12000,80|P:1,10,1>")
+	tr.ObserveStatusPayload("<Idle|MPos:0,0,0>")
+
+	var runs []struct {
+		File string `json:"file"`
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		r := get(t, srv.URL+"/api/runs")
+		json.NewDecoder(r.Body).Decode(&runs)
+		r.Body.Close()
+		if len(runs) == 1 && runs[0].File == "/sd/gcodes/a.nc" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("runs = %+v, want observed file", runs)
 }
 
 func TestWebUIServed(t *testing.T) {

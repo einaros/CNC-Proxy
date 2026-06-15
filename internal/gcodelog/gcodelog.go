@@ -91,6 +91,28 @@ func (l *Log) Recent() []Line {
 	return out
 }
 
+// Replace imports a retained log snapshot. It does not replay imported lines to
+// subscribers; clients can re-fetch /api/gcode/log or reconnect SSE.
+func (l *Log) Replace(lines []Line) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	start := 0
+	if len(lines) > l.cap {
+		start = len(lines) - l.cap
+	}
+	l.ring = append(l.ring[:0], lines[start:]...)
+	maxSeq := int64(0)
+	for i := range l.ring {
+		if l.ring[i].Seq > maxSeq {
+			maxSeq = l.ring[i].Seq
+		}
+	}
+	l.nextSeq = maxSeq + 1
+	if l.nextSeq <= 0 {
+		l.nextSeq = 1
+	}
+}
+
 // Subscribe returns a channel of new lines and an unsubscribe func. Lines
 // already retained are not replayed; combine with Recent (Seq is globally
 // increasing, so duplicates are detectable).

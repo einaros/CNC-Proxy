@@ -41,6 +41,14 @@ type persisted struct {
 	UI      *UISettings       `json:"ui,omitempty"`
 }
 
+// Snapshot is an exportable copy of the durable state.json model.
+type Snapshot struct {
+	Entries map[string]Entry `json:"entries"`
+	Jobs    []Job            `json:"jobs"`
+	NextJob int64            `json:"next_job"`
+	UI      UISettings       `json:"ui"`
+}
+
 // Open loads a store from path, creating an empty one if the file is absent.
 func Open(path string) (*Store, error) {
 	s := &Store{
@@ -73,6 +81,60 @@ func Open(path string) (*Store, error) {
 		s.ui = normalizeUISettings(*p.UI, s.now())
 	}
 	return s, nil
+}
+
+// Snapshot returns a deep copy of the durable model for backup/export.
+func (s *Store) Snapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := Snapshot{
+		Entries: make(map[string]Entry, len(s.entries)),
+		Jobs:    make([]Job, 0, len(s.jobs)),
+		NextJob: s.nextJob,
+		UI:      copyUISettings(s.ui),
+	}
+	for k, e := range s.entries {
+		out.Entries[k] = *e
+	}
+	for _, j := range s.jobs {
+		cp := *j
+		clearJobDiagnostics(&cp)
+		out.Jobs = append(out.Jobs, cp)
+	}
+	return out
+}
+
+// Restore replaces the durable model with a backup snapshot.
+func (s *Store) Restore(in Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := make(map[string]*Entry, len(in.Entries))
+	for k, e := range in.Entries {
+		cp := e
+		entries[k] = &cp
+	}
+	jobs := make([]*Job, 0, len(in.Jobs))
+	nextJob := in.NextJob
+	for _, j := range in.Jobs {
+		clearJobDiagnostics(&j)
+		cp := j
+		jobs = append(jobs, &cp)
+		if cp.ID >= nextJob {
+			nextJob = cp.ID + 1
+		}
+	}
+	if nextJob <= 0 {
+		nextJob = 1
+	}
+	s.entries = entries
+	s.jobs = jobs
+	s.nextJob = nextJob
+	s.ui = normalizeUISettings(in.UI, s.now())
+	if err := s.flushLocked(); err != nil {
+		return err
+	}
+	s.publishLocked(Event{Kind: "reset"})
+	return nil
 }
 
 // flushLocked writes the whole model atomically and durably. Caller holds s.mu.
@@ -318,26 +380,37 @@ func (s *Store) ListJobs() []Job {
 	defer s.mu.RUnlock()
 	out := make([]Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		out = append(out, *j)
+		cp := *j
+		clearJobDiagnostics(&cp)
+		out = append(out, cp)
 	}
 	return out
 }
 
 // PruneDoneJobs removes completed jobs older than the given age, keeping the
 // queue from growing without bound. Failed jobs are retained for visibility.
-func (s *Store) PruneDoneJobs(olderThan time.Duration) error {
+func (s *Store) PruneDoneJobs(olderThan time.Duration) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cutoff := s.now().Add(-olderThan)
 	kept := s.jobs[:0]
+	removed := 0
 	for _, j := range s.jobs {
 		if j.State == Done && j.UpdatedAt.Before(cutoff) {
+			removed++
 			continue
 		}
 		kept = append(kept, j)
 	}
+	if removed == 0 {
+		return 0, nil
+	}
 	s.jobs = kept
-	return s.flushLocked()
+	if err := s.flushLocked(); err != nil {
+		return removed, err
+	}
+	s.publishLocked(Event{Kind: "reset"})
+	return removed, nil
 }
 
 // UISettings returns a copy of the durable operator UI settings.
@@ -549,4 +622,10 @@ func copyUISettings(in UISettings) UISettings {
 		out.Gamepad.MacroButtons = []GamepadMacroButton{}
 	}
 	return out
+}
+
+func clearJobDiagnostics(j *Job) {
+	j.BlockedReason = ""
+	j.BlockedMessage = ""
+	j.BlockedUntil = nil
 }

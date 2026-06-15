@@ -13,6 +13,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -30,6 +31,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 	"github.com/uwin/cnc-proxy/internal/quicklz"
+	"github.com/uwin/cnc-proxy/internal/runhistory"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
@@ -62,6 +64,10 @@ type Service struct {
 	// log — for streaming to web clients.
 	gcodeLog *gcodelog.Log
 
+	// runHistory derives recent run summaries from the gcode log and observed
+	// status stream. It never performs machine I/O.
+	runHistory *runhistory.History
+
 	// commitMu makes a mutation's "publish to cache + update catalog + enqueue
 	// job" sequence atomic across concurrent callers, so the cache file, the
 	// catalog entry's MD5/size, and the queued job always describe the same
@@ -75,12 +81,41 @@ func New(st *store.Store, arb *session.Arbiter) (*Service, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, err
 	}
-	return &Service{store: st, arb: arb, cacheDir: cacheDir, gcodeLog: gcodelog.New(500)}, nil
+	s := &Service{
+		store:      st,
+		arb:        arb,
+		cacheDir:   cacheDir,
+		gcodeLog:   gcodelog.New(500),
+		runHistory: runhistory.New(100),
+	}
+	s.startRunHistoryObservers()
+	return s, nil
 }
 
 // GcodeLog exposes the shared gcode I/O log so the relay can record controller
 // traffic into it and the API can stream it.
 func (s *Service) GcodeLog() *gcodelog.Log { return s.gcodeLog }
+
+// RunHistory returns recent observed runs, newest first.
+func (s *Service) RunHistory() []runhistory.Run { return s.runHistory.Recent() }
+
+func (s *Service) startRunHistoryObservers() {
+	if st, _ := s.arb.Tracker().Current(); !st.ObservedAt.IsZero() {
+		s.runHistory.ObserveStatus(st)
+	}
+	statusCh, _ := s.arb.Tracker().Subscribe()
+	go func() {
+		for st := range statusCh {
+			s.runHistory.ObserveStatus(st)
+		}
+	}()
+	gcodeCh, _ := s.gcodeLog.Subscribe()
+	go func() {
+		for ln := range gcodeCh {
+			s.runHistory.ObserveLine(ln)
+		}
+	}()
+}
 
 // MachineStatus is the snapshot returned to clients.
 type MachineStatus struct {
@@ -190,11 +225,217 @@ func (s *Service) PutRemoteOnly(remotePath string, size int64, mtime time.Time, 
 	})
 }
 
-// Jobs returns the job queue.
-func (s *Service) Jobs() []store.Job { return s.store.ListJobs() }
+const (
+	jobDiagBaseBackoff = 2 * time.Second
+	jobDiagMaxBackoff  = 60 * time.Second
+)
+
+// Jobs returns the job queue with transient operator diagnostics populated.
+func (s *Service) Jobs() []store.Job {
+	jobs := s.store.ListJobs()
+	for i := range jobs {
+		s.enrichJob(&jobs[i])
+	}
+	return jobs
+}
+
+// EnrichEventJob returns a copy of a store event with job diagnostics populated.
+func (s *Service) EnrichEventJob(ev store.Event) store.Event {
+	if ev.Job == nil {
+		return ev
+	}
+	cp := *ev.Job
+	s.enrichJob(&cp)
+	ev.Job = &cp
+	return ev
+}
+
+func (s *Service) enrichJob(j *store.Job) {
+	switch j.State {
+	case store.Done:
+		return
+	case store.Failed:
+		j.BlockedReason = "failed"
+		if j.LastError != "" {
+			j.BlockedMessage = "Failed: " + j.LastError
+		} else {
+			j.BlockedMessage = "Failed. Inspect the job error and queue the operation again."
+		}
+		return
+	case store.Running:
+		j.BlockedReason = "running"
+		j.BlockedMessage = "Running on the machine."
+		return
+	}
+
+	now := time.Now()
+	if j.Attempts > 0 {
+		wait := jobDiagBaseBackoff << (j.Attempts - 1)
+		if wait > jobDiagMaxBackoff || wait <= 0 {
+			wait = jobDiagMaxBackoff
+		}
+		until := j.UpdatedAt.Add(wait)
+		if now.Before(until) {
+			j.BlockedReason = "backoff"
+			j.BlockedUntil = &until
+			j.BlockedMessage = fmt.Sprintf("Backing off after error; retry after %s.", until.Format(time.RFC3339))
+			return
+		}
+	}
+
+	st, _ := s.arb.Tracker().Current()
+	if !s.arb.Tracker().Fresh(s.arb.StateMaxAge()) {
+		j.BlockedReason = "stale_status"
+		j.BlockedMessage = "Waiting for a fresh machine status before syncing."
+		return
+	}
+	if !st.State.CanRunFileOps() {
+		j.BlockedReason = "not_idle"
+		j.BlockedMessage = "Waiting for the machine to be Idle; current state is " + stateLabel(st.State) + "."
+		return
+	}
+	if s.arb.Mode() == session.ModeRelay {
+		j.BlockedReason = "relay_active"
+		j.BlockedMessage = "Controller is connected; sync will use an injection window between controller transactions."
+		return
+	}
+	j.BlockedReason = "ready"
+	j.BlockedMessage = "Ready to sync on the next queue pass."
+}
 
 // Subscribe proxies the store's event subscription for SSE.
 func (s *Service) Subscribe() (<-chan store.Event, func()) { return s.store.Subscribe() }
+
+// Backup is the portable JSON export for the proxy's local state.
+type Backup struct {
+	Version    int              `json:"version"`
+	ExportedAt time.Time        `json:"exported_at"`
+	State      store.Snapshot   `json:"state"`
+	GcodeLog   []gcodelog.Line  `json:"gcode_log"`
+	RunHistory []runhistory.Run `json:"run_history"`
+}
+
+// ExportBackup returns a JSON-serializable copy of state.json, UI settings,
+// retained gcode log lines, and observed run history.
+func (s *Service) ExportBackup() Backup {
+	return Backup{
+		Version:    1,
+		ExportedAt: time.Now(),
+		State:      s.store.Snapshot(),
+		GcodeLog:   s.gcodeLog.Recent(),
+		RunHistory: s.runHistory.Snapshot(),
+	}
+}
+
+// ImportBackup replaces local proxy state from a backup export. It only mutates
+// local proxy state; machine I/O remains governed by the sync queue and arbiter.
+func (s *Service) ImportBackup(b Backup) error {
+	if b.Version != 1 {
+		return fmt.Errorf("service: unsupported backup version %d", b.Version)
+	}
+	if err := s.store.Restore(b.State); err != nil {
+		return err
+	}
+	s.gcodeLog.Replace(b.GcodeLog)
+	s.runHistory.Replace(b.RunHistory)
+	return nil
+}
+
+// CachePruneReport summarizes one cache maintenance pass.
+type CachePruneReport struct {
+	FilesRemoved int   `json:"files_removed"`
+	BytesRemoved int64 `json:"bytes_removed"`
+}
+
+// RunMaintenance periodically prunes completed jobs and unreferenced cache
+// files. It does not touch machine state.
+func (s *Service) RunMaintenance(ctx context.Context, interval, doneJobAge, cacheFileAge time.Duration) {
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = s.store.PruneDoneJobs(doneJobAge)
+			_, _ = s.PruneCache(cacheFileAge)
+		}
+	}
+}
+
+// PruneCache removes old temp files and cache files no catalog entry or active
+// job references anymore.
+func (s *Service) PruneCache(olderThan time.Duration) (CachePruneReport, error) {
+	if olderThan <= 0 {
+		olderThan = time.Hour
+	}
+	cutoff := time.Now().Add(-olderThan)
+	referenced := map[string]bool{}
+	cacheDir, err := filepath.Abs(s.cacheDir)
+	if err != nil {
+		return CachePruneReport{}, err
+	}
+	for _, e := range s.store.ListEntries() {
+		s.markReferencedCache(referenced, cacheDir, e.CachePath)
+	}
+	for _, j := range s.store.ListJobs() {
+		if j.State == store.Done || j.State == store.Failed {
+			continue
+		}
+		s.markReferencedCache(referenced, cacheDir, j.CachePath)
+	}
+
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return CachePruneReport{}, nil
+		}
+		return CachePruneReport{}, err
+	}
+	var report CachePruneReport
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		info, err := ent.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		full := filepath.Join(s.cacheDir, ent.Name())
+		abs, err := filepath.Abs(full)
+		if err != nil || !strings.HasPrefix(abs, cacheDir+string(os.PathSeparator)) {
+			continue
+		}
+		if referenced[abs] {
+			continue
+		}
+		if err := os.Remove(full); err == nil {
+			report.FilesRemoved++
+			report.BytesRemoved += info.Size()
+		}
+	}
+	return report, nil
+}
+
+func (s *Service) markReferencedCache(ref map[string]bool, cacheDir, p string) {
+	if p == "" {
+		return
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return
+	}
+	if abs == cacheDir || !strings.HasPrefix(abs, cacheDir+string(os.PathSeparator)) {
+		return
+	}
+	ref[abs] = true
+}
 
 // UISettings returns durable web UI preferences. It is cache-only and never
 // touches the machine.

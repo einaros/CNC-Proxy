@@ -6,13 +6,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/machine"
+	"github.com/uwin/cnc-proxy/internal/runhistory"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
@@ -507,5 +510,109 @@ func TestRecoverAlarmRefreshesStaleStatus(t *testing.T) {
 	}
 	if g := m.Gcodes(); len(g) != 1 || g[0] != "$X" {
 		t.Fatalf("recovery gcodes = %v, want [$X]", g)
+	}
+}
+
+func TestBackupExportImportRoundTrip(t *testing.T) {
+	svc, _ := newService(t)
+	if _, err := svc.Upload("part.nc", strings.NewReader("G0 X0\n")); err != nil {
+		t.Fatal(err)
+	}
+	ui, err := svc.SetUISettings(store.UISettings{
+		Macros:       []store.Macro{{ID: "m1", Name: "Position", Lines: []string{"M114"}}},
+		MacroButtons: []store.MacroSlot{{ID: "s1", MacroID: "m1", Region: "toolbar"}},
+		Log:          store.LogSettings{Filter: "all", Autoscroll: true},
+		Gamepad:      store.Gamepad{DeadmanButton: 2},
+	})
+	if err != nil || len(ui.Macros) != 1 {
+		t.Fatalf("settings = %+v err=%v", ui, err)
+	}
+	svc.gcodeLog.Append("send", "api", "M114")
+	svc.runHistory.Replace([]runhistory.Run{{ID: 1, File: "part.nc", StartedAt: time.Unix(1000, 0)}})
+	backup := svc.ExportBackup()
+
+	restored, _ := newService(t)
+	if err := restored.ImportBackup(backup); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := restored.Lookup("part.nc"); !ok {
+		t.Fatal("restored backup missing catalog entry")
+	}
+	if got := restored.UISettings(); len(got.Macros) != 1 || got.Macros[0].Name != "Position" || got.Gamepad.DeadmanButton != 2 {
+		t.Fatalf("restored UI = %+v", got)
+	}
+	if lines := restored.GcodeLog().Recent(); len(lines) != 1 || lines[0].Text != "M114" {
+		t.Fatalf("restored log = %+v", lines)
+	}
+	if runs := restored.RunHistory(); len(runs) != 1 || runs[0].File != "part.nc" {
+		t.Fatalf("restored runs = %+v", runs)
+	}
+}
+
+func TestJobDiagnostics(t *testing.T) {
+	svc, st := newService(t)
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: "/sd/gcodes/a.nc"})
+	if got := svc.Jobs()[0]; got.BlockedReason != "stale_status" {
+		t.Fatalf("stale diagnostic = %+v", got)
+	}
+	svc.arb.Tracker().Observe(machine.Run)
+	if got := svc.Jobs()[0]; got.BlockedReason != "not_idle" {
+		t.Fatalf("run diagnostic = %+v", got)
+	}
+	svc.arb.Tracker().Observe(machine.Idle)
+	if got := svc.Jobs()[0]; got.BlockedReason != "ready" {
+		t.Fatalf("ready diagnostic = %+v", got)
+	}
+	svc.arb.EnterRelay()
+	if got := svc.Jobs()[0]; got.BlockedReason != "relay_active" {
+		t.Fatalf("relay diagnostic = %+v", got)
+	}
+	svc.arb.ExitRelay()
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.Attempts = 1
+		j.LastError = "temporary"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.Jobs()[0]; got.BlockedReason != "backoff" || got.BlockedUntil == nil {
+		t.Fatalf("backoff diagnostic = %+v", got)
+	}
+}
+
+func TestPruneCacheRemovesOnlyUnreferencedOldFiles(t *testing.T) {
+	svc, st := newService(t)
+	cacheDir := st.CacheDir()
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ref := filepath.Join(cacheDir, "referenced")
+	orphan := filepath.Join(cacheDir, "orphan")
+	temp := filepath.Join(cacheDir, "upload-old.tmp")
+	for _, p := range []string{ref, orphan, temp} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/a.nc", CachePath: ref, Sync: store.Synced}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := svc.PruneCache(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.FilesRemoved != 2 {
+		t.Fatalf("report = %+v, want two files removed", report)
+	}
+	if _, err := os.Stat(ref); err != nil {
+		t.Fatalf("referenced cache should remain: %v", err)
+	}
+	for _, p := range []string{orphan, temp} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s stat = %v, want removed", p, err)
+		}
 	}
 }
