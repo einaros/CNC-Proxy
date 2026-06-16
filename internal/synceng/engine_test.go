@@ -60,7 +60,8 @@ func TestUploadJobSyncsWhenIdle(t *testing.T) {
 	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
 
-	// Machine busy → drain should leave the job queued.
+	// Machine busy -> drain should refresh status, see Run, and leave the job queued.
+	m.SetStatus("<Run|MPos:0,0,0|WPos:0,0,0>")
 	tr.Observe(machine.Run)
 	eng.drain()
 	if e, _ := st.GetEntry(remote); e.Sync == store.Synced {
@@ -70,7 +71,8 @@ func TestUploadJobSyncsWhenIdle(t *testing.T) {
 		t.Fatal("upload job should still be queued while busy")
 	}
 
-	// Machine idle → drain should upload and sync.
+	// Machine idle -> the next pass should refresh status again, upload, and sync.
+	m.SetStatus("<Idle|MPos:0,0,0|WPos:0,0,0>")
 	tr.Observe(machine.Idle)
 	eng.drain()
 
@@ -84,6 +86,48 @@ func TestUploadJobSyncsWhenIdle(t *testing.T) {
 	}
 	if _, ok := st.NextQueued(); ok {
 		t.Error("queue should be empty after successful drain")
+	}
+}
+
+func TestUploadJobRefreshesStaleStatusBeforeSyncing(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	arb := session.New(session.Config{
+		Tracker:      tr,
+		PollInterval: 10 * time.Millisecond,
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithFilePacketSize(client.USBPacketSize))
+		},
+		FilePacketSize:            client.USBPacketSize,
+		PreserveConnOnPollTimeout: true,
+	})
+	eng := newEngine(st, arb)
+
+	cachePath, md5hex, size := writeCache(t, t.TempDir(), client.USBPacketSize*2+17)
+	remote := "/sd/gcodes/usb.nc"
+	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
+
+	eng.drain()
+	e, _ := st.GetEntry(remote)
+	if e.Sync != store.Synced {
+		t.Fatalf("entry sync = %q, want synced", e.Sync)
+	}
+	if !tr.Fresh(time.Second) {
+		t.Fatal("upload pass should refresh stale machine status itself")
+	}
+	got, ok := m.File(remote)
+	if !ok || int64(len(got)) != size {
+		t.Fatalf("machine file = %d bytes ok=%v, want %d", len(got), ok, size)
+	}
+	sizes := m.UploadPacketSizes()
+	if len(sizes) != 1 || sizes[0] != client.USBPacketSize {
+		t.Fatalf("upload packet sizes = %v, want [%d]", sizes, client.USBPacketSize)
 	}
 }
 

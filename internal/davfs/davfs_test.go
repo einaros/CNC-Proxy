@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/httpauth"
+	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -194,14 +196,31 @@ func TestRemoveAndRename(t *testing.T) {
 }
 
 func TestReadNotCached(t *testing.T) {
-	fs, svc := newFS(t)
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	m.SetStatus("<Run|MPos:0,0,0|WPos:0,0,0>")
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	tr.Observe(machine.Run)
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), time.Second) },
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := New(svc)
 	ctx := context.Background()
 	// A file known only on the machine (remote_only, no cache path).
 	if err := svc.PutRemoteOnly("remote.nc", 1234, time.Unix(0, 0), ""); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := fs.OpenFile(ctx, "/remote.nc", os.O_RDONLY, 0)
+	_, err = fs.OpenFile(ctx, "/remote.nc", os.O_RDONLY, 0)
 	if err == nil {
 		t.Fatal("expected error reading a non-cached remote file")
 	}

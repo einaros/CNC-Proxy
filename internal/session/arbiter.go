@@ -15,6 +15,7 @@ package session
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"time"
 
@@ -37,6 +38,8 @@ const (
 	// ModeRelay: a controller is connected; the proxy only observes.
 	ModeRelay
 )
+
+const statusRefreshTimeout = 5 * time.Second
 
 func (m Mode) String() string {
 	if m == ModeRelay {
@@ -141,6 +144,12 @@ type Arbiter struct {
 	// machine transport in a client.Conn. Owner-mode conns receive this through
 	// their Dial function.
 	filePacketSize int
+
+	// preserveConnOnPollTimeout keeps owner-mode polling timeouts from being
+	// treated as connection-fatal. USB serial status replies can arrive late
+	// enough that closing/reopening the port discards the eventual frame or
+	// repeatedly resets the machine when reset-on-open is enabled.
+	preserveConnOnPollTimeout bool
 }
 
 // Config configures an Arbiter.
@@ -151,6 +160,11 @@ type Config struct {
 	PollInterval   time.Duration
 	StateMaxAge    time.Duration
 	FilePacketSize int
+
+	// PreserveConnOnPollTimeout should be enabled for USB/serial owner-mode
+	// polling. TCP keeps the historic behavior where a status timeout drops the
+	// connection and lets the next poll redial.
+	PreserveConnOnPollTimeout bool
 }
 
 // New creates an Arbiter in owner mode.
@@ -168,13 +182,14 @@ func New(cfg Config) *Arbiter {
 		cfg.FilePacketSize = client.WifiPacketSize
 	}
 	return &Arbiter{
-		tracker:        cfg.Tracker,
-		dial:           cfg.Dial,
-		injector:       cfg.Injector,
-		mode:           ModeOwner,
-		pollInterval:   cfg.PollInterval,
-		stateMaxAge:    cfg.StateMaxAge,
-		filePacketSize: cfg.FilePacketSize,
+		tracker:                   cfg.Tracker,
+		dial:                      cfg.Dial,
+		injector:                  cfg.Injector,
+		mode:                      ModeOwner,
+		pollInterval:              cfg.PollInterval,
+		stateMaxAge:               cfg.StateMaxAge,
+		filePacketSize:            cfg.FilePacketSize,
+		preserveConnOnPollTimeout: cfg.PreserveConnOnPollTimeout,
 	}
 }
 
@@ -237,9 +252,12 @@ func (a *Arbiter) ObserveStatusPayload(payload string) bool {
 // the proxy's own persistent connection. In relay mode it borrows the
 // controller's shared connection via the injector, running fn between the
 // controller's transactions; if no injector is configured it returns
-// ErrRelayActive. When requireIdle is set, fn runs only if machine state is a
-// fresh Idle (ErrNotIdle otherwise). Relay-mode injection additionally returns
-// ErrBusy (from the injector) if the controller is mid file-transfer.
+// ErrRelayActive. When requireIdle is set, fn runs only after the machine is
+// known to be fresh Idle. A stale or non-Idle cached state is actively refreshed
+// on this same serialized transaction path before fn is allowed to run; a
+// refreshed non-Idle or unrefreshable status returns ErrNotIdle. Relay-mode
+// injection additionally returns ErrBusy (from the injector) if the controller
+// is mid file-transfer.
 func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) error {
 	// Serialize all machine I/O: only one operation may use the single
 	// connection at a time. Held for the whole callback.
@@ -249,11 +267,11 @@ func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) err
 	a.mu.Lock()
 	mode := a.mode
 	inj := a.injector
+	needStatusRefresh := false
 	if requireIdle {
 		st, _ := a.tracker.Snapshot()
 		if !a.tracker.Fresh(a.stateMaxAge) || !st.CanRunFileOps() {
-			a.mu.Unlock()
-			return ErrNotIdle
+			needStatusRefresh = true
 		}
 	}
 
@@ -262,7 +280,7 @@ func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) err
 		if inj == nil {
 			return ErrRelayActive
 		}
-		return a.withInjection(inj, fn)
+		return a.withInjection(inj, requireIdle, needStatusRefresh, fn)
 	}
 
 	conn, err := a.acquireConnLocked()
@@ -270,14 +288,18 @@ func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) err
 	if err != nil {
 		return err
 	}
+	if requireIdle {
+		drop, err := a.ensureFreshIdle(conn, needStatusRefresh)
+		if err != nil {
+			if drop {
+				a.dropOwnerConn(conn)
+			}
+			return err
+		}
+	}
 	if err := fn(conn); err != nil {
 		// On any connection-level error, drop it so the next call reconnects.
-		a.mu.Lock()
-		if a.ownerConn == conn {
-			a.ownerConn.Close()
-			a.ownerConn = nil
-		}
-		a.mu.Unlock()
+		a.dropOwnerConn(conn)
 		return err
 	}
 	return nil
@@ -372,7 +394,7 @@ func (a *Arbiter) lockOp(ctx context.Context) error {
 }
 
 // withInjection borrows the controller's shared connection for one operation.
-func (a *Arbiter) withInjection(inj Injector, fn func(*client.Conn) error) error {
+func (a *Arbiter) withInjection(inj Injector, requireIdle, needStatusRefresh bool, fn func(*client.Conn) error) error {
 	it, release, err := inj.AcquireMachine()
 	if err != nil {
 		// Map the relay's "can't right now" errors to session semantics so the
@@ -389,7 +411,46 @@ func (a *Arbiter) withInjection(inj Injector, fn func(*client.Conn) error) error
 	defer release()
 	conn := client.NewTransport(it, client.WithFilePacketSize(a.filePacketSize))
 	conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
+	if requireIdle {
+		if _, err := a.ensureFreshIdle(conn, needStatusRefresh); err != nil {
+			return err
+		}
+	}
 	return fn(conn)
+}
+
+func (a *Arbiter) ensureFreshIdle(conn *client.Conn, forceRefresh bool) (dropConn bool, err error) {
+	st, _ := a.tracker.Snapshot()
+	if !forceRefresh && a.tracker.Fresh(a.stateMaxAge) {
+		if st.CanRunFileOps() {
+			return false, nil
+		}
+		return false, ErrNotIdle
+	}
+	payload, err := conn.QueryState(statusRefreshTimeout)
+	if err != nil {
+		if timeoutErr(err) {
+			return false, ErrNotIdle
+		}
+		return true, err
+	}
+	if !a.tracker.ObserveStatusPayload(payload) {
+		return false, ErrNotIdle
+	}
+	st, _ = a.tracker.Snapshot()
+	if !a.tracker.Fresh(a.stateMaxAge) || !st.CanRunFileOps() {
+		return false, ErrNotIdle
+	}
+	return false, nil
+}
+
+func (a *Arbiter) dropOwnerConn(conn *client.Conn) {
+	a.mu.Lock()
+	if a.ownerConn == conn {
+		a.ownerConn.Close()
+		a.ownerConn = nil
+	}
+	a.mu.Unlock()
 }
 
 // SendControl emits a single realtime control character (feed-hold, resume,
@@ -502,9 +563,17 @@ func (a *Arbiter) pollOnce(queryTimeout time.Duration) {
 	_ = a.WithMachine(false, func(c *client.Conn) error {
 		payload, err := c.QueryState(queryTimeout)
 		if err != nil {
+			if a.preserveConnOnPollTimeout && timeoutErr(err) {
+				return nil
+			}
 			return err
 		}
 		a.tracker.ObserveStatusPayload(payload)
 		return nil
 	})
+}
+
+func timeoutErr(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

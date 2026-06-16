@@ -2,6 +2,7 @@ package jog
 
 import (
 	"context"
+	"math"
 	"net"
 	"strings"
 	"testing"
@@ -31,6 +32,84 @@ func TestNormalizeDeadzoneClampAndSlow(t *testing.T) {
 	}
 	if -got.Z > cfg.MaxZMMMin*cfg.Tick.Minutes()*slowScale {
 		t.Fatalf("Z exceeds slow max: %+v", got)
+	}
+}
+
+func TestNormalizeClampsFastJogCadence(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Tick = 5 * time.Millisecond
+	cfg.StatusInterval = 5 * time.Millisecond
+	cfg.DeadmanTimeout = 150 * time.Millisecond
+	got := cfg.normalize()
+	if got.Tick != minJogTick {
+		t.Fatalf("tick = %s, want %s", got.Tick, minJogTick)
+	}
+	if got.StatusInterval != minStatusEvery {
+		t.Fatalf("status interval = %s, want %s", got.StatusInterval, minStatusEvery)
+	}
+	if got.DeadmanTimeout != minDeadmanTimeout {
+		t.Fatalf("deadman timeout = %s, want %s", got.DeadmanTimeout, minDeadmanTimeout)
+	}
+}
+
+func TestStatusQueryTimeoutToleratesTransportLatency(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Tick = 5 * time.Millisecond
+	cfg.StatusInterval = 100 * time.Millisecond
+	if got := statusQueryTimeout(cfg); got != 200*time.Millisecond {
+		t.Fatalf("fast status query timeout = %s, want 200ms", got)
+	}
+
+	cfg.Tick = 50 * time.Millisecond
+	cfg.StatusInterval = 500 * time.Millisecond
+	if got := statusQueryTimeout(cfg); got != 250*time.Millisecond {
+		t.Fatalf("capped status query timeout = %s, want 250ms", got)
+	}
+}
+
+func TestActiveMotionSuppressesStatusPolling(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.Tick = minJogTick
+	mgr.cfg.StatusInterval = minStatusEvery
+	mgr.cfg.DeadmanTimeout = time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
+
+	now = base.Add(mgr.cfg.StatusInterval)
+	if s.shouldRequestStatus(now) {
+		t.Fatal("active jog should not poll status at the normal status interval")
+	}
+
+	now = base.Add(activeStatusPollInterval(mgr.cfg))
+	s.mu.Lock()
+	s.queuedUntil = now.Add(minJogLookahead / 2)
+	s.mu.Unlock()
+	if s.shouldRequestStatus(now) {
+		t.Fatal("active jog should not poll status while motion input is live")
+	}
+
+	s.mu.Lock()
+	s.queuedUntil = now.Add(minJogLookahead)
+	s.mu.Unlock()
+	if s.shouldRequestStatus(now) {
+		t.Fatal("active jog should not poll status even when buffered")
+	}
+
+	s.SetInput(Input{Seq: 3, Deadman: true, Axes: Axes{}, At: now})
+	if !s.shouldRequestStatus(now) {
+		t.Fatal("jog should poll status once active axis input stops")
 	}
 }
 
@@ -72,6 +151,32 @@ func TestActiveSessionAvailabilityIgnoresItself(t *testing.T) {
 	}
 }
 
+func TestActiveJogAvailabilityAllowsOwnRunState(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	if !mgr.arb.Tracker().ObserveStatusPayload("<Run|MPos:0,0,0|WPos:0,0,0>") {
+		t.Fatal("status precondition failed")
+	}
+
+	s.emitState(2)
+	ev := readEvent(t, s, "state")
+	if ev.Availability == nil || !ev.Availability.Available {
+		t.Fatalf("active jog availability during Run = %+v, want available", ev.Availability)
+	}
+	if ev.Availability.Message != "Jog session active." {
+		t.Fatalf("active jog availability message = %q", ev.Availability.Message)
+	}
+}
+
 func TestJogOwnerEmitsInstantSegments(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
@@ -102,9 +207,36 @@ func TestJogOwnerEmitsInstantSegments(t *testing.T) {
 func TestJogG53FallbackCommand(t *testing.T) {
 	target := machine.AxisValues{"x": 1.25, "y": -2.5, "z": 3.75}
 	delta := Axes{X: 0.5, Z: -0.25}
-	got := jogCommand(target, delta, MotionPrimitiveG53)
+	cfg := DefaultConfig()
+	cfg.MotionPrimitive = MotionPrimitiveG53
+	got := jogCommand(target, delta, cfg)
 	if got != "G53 G0 X1.2500 Z3.7500" {
 		t.Fatalf("G53 fallback command = %q", got)
+	}
+}
+
+func TestInstantJogCommandIncludesVelocityScale(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Tick = 20 * time.Millisecond
+	cfg.MaxXYMMMin = 1200
+	delta := Normalize(Axes{X: 1}, false, cfg)
+	got := jogCommand(machine.AxisValues{"x": 0, "y": 0, "z": 0}, delta, cfg)
+	if got != "$J X0.4000 F0.4000" {
+		t.Fatalf("instant jog command = %q, want velocity-matched F scale", got)
+	}
+}
+
+func TestMotionDeltaUsesBufferedSegment(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Tick = 20 * time.Millisecond
+	cfg.MaxXYMMMin = 1200
+	delta := MotionDelta(Axes{X: 1}, false, cfg)
+	if math.Abs(delta.X-1.6) > 0.0001 {
+		t.Fatalf("buffered X delta = %.4f, want 1.6000", delta.X)
+	}
+	got := jogCommandForDuration(machine.AxisValues{"x": delta.X, "y": 0, "z": 0}, delta, cfg, jogSegmentDuration(cfg))
+	if got != "$J X1.6000 F0.4000" {
+		t.Fatalf("buffered instant jog command = %q, want velocity-matched 80ms segment", got)
 	}
 }
 
@@ -139,6 +271,241 @@ func TestJogEmitsMotionEventAndLog(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("jog motion was not logged: %+v", log.Recent())
+}
+
+func TestJogFastTickDoesNotFloodMotionEvents(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.Tick = minJogTick
+	mgr.cfg.StatusInterval = time.Hour
+	mgr.cfg.DeadmanTimeout = time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
+
+	for i := 0; i < 20; i++ {
+		now = base.Add(time.Duration(i) * mgr.cfg.Tick)
+		s.motionTick()
+	}
+	var got int
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		got = len(fm.Gcodes())
+		if got >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got < 3 {
+		t.Fatalf("buffered jog should maintain queued motion, got %d commands: %v", got, fm.Gcodes())
+	}
+	s.mu.Lock()
+	lead := queueLead(now, s.queuedUntil)
+	s.mu.Unlock()
+	if lead < minJogLookahead || lead > maxJogLookahead+jogSegmentDuration(mgr.cfg) {
+		t.Fatalf("queued lead = %s, want bounded lookahead", lead)
+	}
+	motions := drainAvailableEvents(s, "motion")
+	if motions == 0 {
+		t.Fatal("expected at least one motion event")
+	}
+	if motions > 4 {
+		t.Fatalf("motion events should be UI-rate limited, got %d events across 20 fast ticks", motions)
+	}
+}
+
+func TestContinuousJogDoesNotPauseForCorrectionStatusAge(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = time.Hour
+	mgr.cfg.DeadmanTimeout = 5 * time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	drainAvailableEvents(s, "state")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
+
+	end := base.Add(activeStatusMaxAge(mgr.cfg) + 250*time.Millisecond)
+	for !now.After(end) {
+		s.motionTick()
+		now = now.Add(minJogTick)
+	}
+	if got := len(fm.Gcodes()); got < 10 {
+		t.Fatalf("continuous jog paused after correction status aged out; got %d commands: %v", got, fm.Gcodes())
+	}
+	if !s.hasLease() {
+		t.Fatal("continuous jog should keep the lease while correction status is stale")
+	}
+	failOnAvailableErrors(t, s)
+}
+
+func TestJogEmitsEstimatedMotionFromQueuedSegments(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.Tick = minJogTick
+	mgr.cfg.StatusInterval = time.Hour
+	mgr.cfg.DeadmanTimeout = time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	drainAvailableEvents(s, "state")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
+
+	s.motionTick()
+	drainAvailableEvents(s, "motion")
+	now = base.Add(40 * time.Millisecond)
+	s.motionTick()
+	ev := readEvent(t, s, "motion")
+	if ev.Motion == nil {
+		t.Fatal("missing motion event")
+	}
+	est := ev.Motion.Estimated
+	if est == nil {
+		t.Fatalf("motion event missing estimated position: %+v", ev.Motion)
+	}
+	if est["x"] <= 0 || est["x"] >= ev.Motion.Target["x"] {
+		t.Fatalf("estimated X = %.4f, target X = %.4f; want interpolated position ahead of observed and behind target", est["x"], ev.Motion.Target["x"])
+	}
+	if ev.Motion.EstimatedWPos == nil || math.Abs(ev.Motion.EstimatedWPos["x"]-est["x"]) > 0.0001 {
+		t.Fatalf("estimated WPos = %+v, estimated MPos = %+v", ev.Motion.EstimatedWPos, est)
+	}
+	if ev.Motion.QueueLeadMs <= 0 {
+		t.Fatalf("queue lead = %dms, want positive queued motion", ev.Motion.QueueLeadMs)
+	}
+}
+
+func TestJogAsyncStatusDoesNotBlockMotionTicks(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.Tick = minJogTick
+	mgr.cfg.StatusInterval = minStatusEvery
+	mgr.cfg.DeadmanTimeout = time.Second
+	fm.SetStatusReplyDelay(250 * time.Millisecond)
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	s.requestStatus()
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
+
+	for i := 0; i < 8; i++ {
+		now = base.Add(time.Duration(i) * mgr.cfg.Tick)
+		s.motionTick()
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := len(fm.Gcodes()); got >= 3 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("delayed status should not block motion ticks; gcodes=%v", fm.Gcodes())
+}
+
+func TestJogStatusTimeoutPausesWithoutDisarming(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = 20 * time.Millisecond
+	mgr.cfg.DeadmanTimeout = 150 * time.Millisecond
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	drainAvailableEvents(s, "state")
+	if !s.hasLease() {
+		t.Fatal("expected armed lease")
+	}
+
+	fm.SetStatusReplyDelay(500 * time.Millisecond)
+	if err := s.refreshStatus(); err != nil {
+		t.Fatalf("status timeout during jog should be retryable, got %v", err)
+	}
+	ev := readEvent(t, s, "error")
+	if ev.Code != CodeStatusWaiting {
+		t.Fatalf("status timeout event = %+v, want status_waiting", ev)
+	}
+	if !s.hasLease() {
+		t.Fatal("status timeout during active jog should not release the lease")
+	}
+}
+
+func TestJogStaleStatusPausesMotionWithoutDisarming(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.Tick = 5 * time.Millisecond
+	mgr.cfg.StatusInterval = 20 * time.Millisecond
+	mgr.cfg.DeadmanTimeout = 150 * time.Millisecond
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	drainAvailableEvents(s, "state")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
+
+	now = base.Add(activeStatusMaxAge(mgr.cfg) + time.Millisecond)
+	s.SetInput(Input{Seq: 3, Deadman: true, Axes: Axes{X: 1}, At: now})
+	s.motionTick()
+	ev := readEvent(t, s, "error")
+	if ev.Code != CodeStatusWaiting {
+		t.Fatalf("stale status event = %+v, want status_waiting", ev)
+	}
+	if !s.hasLease() {
+		t.Fatal("stale status should pause motion, not release the jog lease")
+	}
+	if got := fm.Gcodes(); len(got) != 0 {
+		t.Fatalf("stale status should not emit motion, got %v", got)
+	}
 }
 
 func TestJogLogsAlarmWithLastMotion(t *testing.T) {
@@ -219,7 +586,7 @@ func TestJogControlBypassesLease(t *testing.T) {
 	t.Fatalf("halt did not reach fake machine; controls=%v", fm.Controls())
 }
 
-func TestJogReleasesLeaseOnStaleStatus(t *testing.T) {
+func TestJogPausesLeaseOnStaleStatus(t *testing.T) {
 	mgr, _, cleanup := newJogManager(t)
 	defer cleanup()
 	base := time.Unix(100, 0)
@@ -246,11 +613,11 @@ func TestJogReleasesLeaseOnStaleStatus(t *testing.T) {
 	s.motionTick()
 
 	ev := readEvent(t, s, "error")
-	if ev.Code != CodeStaleStatus {
-		t.Fatalf("error event = %+v, want stale status", ev)
+	if ev.Code != CodeStatusWaiting {
+		t.Fatalf("error event = %+v, want status waiting", ev)
 	}
-	if s.hasLease() {
-		t.Fatal("stale status should release the jog lease")
+	if !s.hasLease() {
+		t.Fatal("stale status should pause motion without releasing the jog lease")
 	}
 }
 
@@ -284,6 +651,43 @@ func TestJogReleasesLeaseOnAlarmStatusWithoutDeadman(t *testing.T) {
 	if s.hasLease() {
 		t.Fatal("alarm status without deadman should release the jog lease")
 	}
+}
+
+func TestJogKeepsLeaseDuringOwnRunStatus(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = time.Hour
+	mgr.cfg.DeadmanTimeout = time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	if !s.hasLease() {
+		t.Fatal("expected armed lease")
+	}
+
+	fm.SetStatus("<Run|MPos:0,0,0|WPos:0,0,0>")
+	if err := s.refreshStatus(); err != nil {
+		t.Fatalf("refresh Run status: %v", err)
+	}
+	ev := readEvent(t, s, "status")
+	if ev.Status == nil || ev.Status.State != machine.Run {
+		t.Fatalf("status event = %+v, want Run", ev)
+	}
+	if !s.hasLease() {
+		t.Fatal("Run during active jog should not release the jog lease")
+	}
+
+	now := time.Now()
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: now})
+	s.motionTick()
+	drainUntil(t, s, "motion")
 }
 
 func TestJogRelayIdleController(t *testing.T) {
@@ -415,6 +819,40 @@ func readEvent(t *testing.T, s *Session, typ string) Event {
 			}
 		case <-deadline:
 			t.Fatalf("timeout waiting for event %q", typ)
+		}
+	}
+}
+
+func drainAvailableEvents(s *Session, typ string) int {
+	n := 0
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				return n
+			}
+			if ev.Type == typ {
+				n++
+			}
+		default:
+			return n
+		}
+	}
+}
+
+func failOnAvailableErrors(t *testing.T, s *Session) {
+	t.Helper()
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				return
+			}
+			if ev.Type == "error" {
+				t.Fatalf("unexpected jog error: %+v", ev)
+			}
+		default:
+			return
 		}
 	}
 }

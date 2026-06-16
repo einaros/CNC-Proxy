@@ -66,19 +66,23 @@ type serialConn struct {
 
 func newSerialConn(port serialPort, resetOnOpen bool) (*serialConn, error) {
 	c := &serialConn{port: port}
-	if resetOnOpen {
-		if err := port.SetDTR(false); err != nil {
-			return nil, err
-		}
-		serialResetSleep(500 * time.Millisecond)
+	if !resetOnOpen {
 		if err := port.ResetInputBuffer(); err != nil {
 			return nil, err
 		}
-		if err := port.SetDTR(true); err != nil {
-			return nil, err
-		}
-		serialResetSleep(500 * time.Millisecond)
+		return c, nil
 	}
+	if err := port.SetDTR(false); err != nil {
+		return nil, err
+	}
+	serialResetSleep(500 * time.Millisecond)
+	if err := port.ResetInputBuffer(); err != nil {
+		return nil, err
+	}
+	if err := port.SetDTR(true); err != nil {
+		return nil, err
+	}
+	serialResetSleep(500 * time.Millisecond)
 	return c, nil
 }
 

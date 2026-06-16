@@ -286,7 +286,7 @@ func (s *Service) enrichJob(j *store.Job) {
 	st, _ := s.arb.Tracker().Current()
 	if !s.arb.Tracker().Fresh(s.arb.StateMaxAge()) {
 		j.BlockedReason = "stale_status"
-		j.BlockedMessage = "Waiting for a fresh machine status before syncing."
+		j.BlockedMessage = "Refreshing machine status before syncing."
 		return
 	}
 	if !st.State.CanRunFileOps() {

@@ -70,13 +70,16 @@ func (p *fakeSerialPort) Close() error {
 	return nil
 }
 
-func TestSerialConnDoesNotResetDTRByDefault(t *testing.T) {
+func TestSerialConnFlushesInputWithoutDTRByDefault(t *testing.T) {
 	fp := &fakeSerialPort{}
 	if _, err := newSerialConn(fp, false); err != nil {
 		t.Fatalf("newSerialConn: %v", err)
 	}
-	if len(fp.dtrCalls) != 0 || fp.resets != 0 {
-		t.Fatalf("default open touched DTR/reset: dtr=%v resets=%d", fp.dtrCalls, fp.resets)
+	if len(fp.dtrCalls) != 0 {
+		t.Fatalf("default open touched DTR: %v", fp.dtrCalls)
+	}
+	if fp.resets != 1 {
+		t.Fatalf("default open input flushes = %d, want 1", fp.resets)
 	}
 }
 

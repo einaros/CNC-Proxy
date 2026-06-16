@@ -21,6 +21,8 @@ type FakeMachine struct {
 	files              map[string][]byte // remote path -> contents (from uploads)
 	dirs               map[string]bool   // created directories
 	status             string            // payload for "?" (e.g. "<Idle|...>")
+	statusReplyDelay   time.Duration     // optional test hook: delay "?" replies
+	dropStatusReplies  bool              // optional test hook: ignore "?" replies
 	failCmd            map[string]bool   // command prefixes to fail (for error-path tests)
 	ftype              string            // advertised upload type ("lz" enables compression)
 	compressDownloads  bool              // if set, downloads send a .lz container
@@ -68,6 +70,22 @@ func (m *FakeMachine) SetStatus(s string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.status = s
+}
+
+// SetStatusReplyDelay delays replies to `?` status polls. It is a test hook for
+// exercising jog/status behavior when firmware replies are delayed by motion.
+func (m *FakeMachine) SetStatusReplyDelay(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statusReplyDelay = d
+}
+
+// SetDropStatusReplies makes the fake ignore `?` status polls. It is a test
+// hook for exercising status timeout behavior.
+func (m *FakeMachine) SetDropStatusReplies(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dropStatusReplies = v
 }
 
 // SetFtype sets the upload type advertised via "ftype" ("lz" enables QuickLZ
@@ -212,7 +230,19 @@ func (m *FakeMachine) handle(c net.Conn) {
 						case '?':
 							m.mu.Lock()
 							s := m.status
+							delay := m.statusReplyDelay
+							drop := m.dropStatusReplies
 							m.mu.Unlock()
+							if drop {
+								break
+							}
+							if delay > 0 {
+								go func() {
+									time.Sleep(delay)
+									m.send(c, protocol.CmdStatusRes, s)
+								}()
+								break
+							}
 							m.send(c, protocol.CmdStatusRes, s)
 						case '!', '~', 0x18:
 							// Realtime control: record it so tests can assert it

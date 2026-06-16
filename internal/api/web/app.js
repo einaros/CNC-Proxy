@@ -26,6 +26,7 @@ const state = {
   currentDir: "",
   controlPendingAction: "",
   lastControlResult: null,
+  noticeKey: "",
   controlES: null,
   filesES: null,
   jog: {
@@ -40,12 +41,14 @@ const state = {
     mpos: null,
     wpos: null,
     observed: null,
+    estimated: false,
     availability: null,
     target: null,
     lead: { x: 0, y: 0, z: 0 },
     path: [],
     buttons: [],
     error: "",
+    errorCode: "",
     sent: new Map(),
     reconnectTimer: null,
     reconnectAttempt: 0,
@@ -173,9 +176,9 @@ function fmtCoord(v) {
   return Number.isFinite(v) ? v.toFixed(3) : "-";
 }
 
-function fmtPos(p) {
+function fmtPos(p, estimated = false) {
   if (!p) return "-";
-  return `X ${fmtCoord(p.x)} Y ${fmtCoord(p.y)} Z ${fmtCoord(p.z)}`;
+  return `X ${fmtCoord(p.x)} Y ${fmtCoord(p.y)} Z ${fmtCoord(p.z)}${estimated ? " est" : ""}`;
 }
 
 function fmtTriple(v, suffix = "") {
@@ -326,6 +329,38 @@ function normalizeGamepadSettings(gamepad, macroIDs) {
   };
 }
 
+function gamepadLabel(gp) {
+  if (!gp) return "";
+  const raw = String(gp.id || "").trim();
+  const index = Number.isInteger(gp.index) ? gp.index + 1 : 0;
+  const suffix = index > 0 ? " #" + index : "";
+  if (raw && isXboxGamepadID(raw) && !isGenericGamepadID(raw)) return raw;
+  if (isXboxGamepad(gp)) return "Xbox-compatible gamepad" + suffix;
+  if (raw && !isGenericGamepadID(raw)) return raw;
+  if (gp.mapping === "standard") return "Standard gamepad" + suffix;
+  const axes = gp.axes?.length || 0;
+  const buttons = gp.buttons?.length || 0;
+  if (axes || buttons) return `Gamepad${suffix} (${axes} axes, ${buttons} buttons)`;
+  return "Gamepad" + suffix;
+}
+
+function isGenericGamepadID(id) {
+  const s = String(id || "").trim().toLowerCase();
+  return !s || s === "gamepad" || s === "unknown" || s === "standard" || s === "standard gamepad" || s.includes("unknown gamepad");
+}
+
+function isXboxGamepad(gp) {
+  if (isXboxGamepadID(gp?.id)) return true;
+  const axes = gp?.axes?.length || 0;
+  const buttons = gp?.buttons?.length || 0;
+  return gp?.mapping === "standard" && axes >= 4 && buttons >= 12 && buttons <= 24;
+}
+
+function isXboxGamepadID(id) {
+  const s = String(id || "").toLowerCase();
+  return /\bxbox\b/.test(s) || /\bxinput\b/.test(s) || s.includes("x-input") || s.includes("vendor: 045e") || s.includes("vid_045e");
+}
+
 function normalizeUISettings(ui) {
   ui = ui || {};
   const macrosIn = Array.isArray(ui.macros) ? ui.macros : [];
@@ -445,11 +480,17 @@ function normalizeSlotOrder() {
   }
 }
 
-function setNotice(text, kind = "info") {
+function setNotice(text, kind = "info", key = "") {
   const el = document.getElementById("notice");
   el.textContent = text || "";
   el.className = kind;
   el.hidden = !text;
+  state.noticeKey = text ? key : "";
+}
+
+function clearNotice(key = "") {
+  if (key && state.noticeKey !== key) return;
+  setNotice("");
 }
 
 async function request(url, opts = {}) {
@@ -483,8 +524,8 @@ function renderMachine() {
   const el = document.getElementById("state");
   el.textContent = m.state || "Unknown";
   el.className = "badge state-" + (m.state || "Unknown");
-  document.getElementById("status-mpos").textContent = fmtPos(m.mpos);
-  document.getElementById("status-wpos").textContent = fmtPos(m.wpos);
+  document.getElementById("status-mpos").textContent = fmtPos(m.mpos, !!m.motion_estimated);
+  document.getElementById("status-wpos").textContent = fmtPos(m.wpos, !!m.motion_estimated);
   document.getElementById("status-feed").textContent = fmtTriple(m.feed, " mm/min");
   document.getElementById("status-spindle").textContent = fmtSpindle(m.spindle);
   document.getElementById("status-tool").textContent = fmtTool(m.tool);
@@ -564,6 +605,14 @@ function recoveryButtonText(recovery, reason = null) {
 
 function syncJogAvailabilityFromMachine(m) {
   if (!state.jog.caps?.enabled) return;
+  if (state.jog.armed && (m.state === "Idle" || m.state === "Run")) {
+    state.jog.availability = { available: true, message: "Jog session active." };
+    if (state.jog.errorCode === "status_waiting") {
+      state.jog.error = "";
+      state.jog.errorCode = "";
+    }
+    return;
+  }
   const stale = !!m.stale || Number(m.age_ms) > 10000;
   let availability;
   if (stale || !m.state || m.state === "Unknown") {
@@ -618,8 +667,8 @@ function renderJog() {
   document.getElementById("jog-axes").textContent =
     `X ${j.axes.x.toFixed(2)} Y ${j.axes.y.toFixed(2)} Z ${j.axes.z.toFixed(2)}`;
   document.getElementById("jog-buttons").textContent = pressedButtonList(j.buttons);
-  document.getElementById("jog-mpos").textContent = fmtPos(j.mpos);
-  document.getElementById("jog-wpos").textContent = fmtPos(j.wpos);
+  document.getElementById("jog-mpos").textContent = fmtPos(j.mpos, j.estimated);
+  document.getElementById("jog-wpos").textContent = fmtPos(j.wpos, j.estimated);
   document.getElementById("jog-target-pos").textContent = fmtPos(j.target);
   const msg = jogPanelMessage();
   const msgEl = document.getElementById("jog-error");
@@ -635,9 +684,6 @@ function renderJog() {
 function jogPanelMessage() {
   const j = state.jog;
   if (j.error) return { text: jogErrorText(j.error), kind: "error" };
-  if (j.availability && !j.availability.available) {
-    return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
-  }
   if (j.link !== "online") {
     return { text: "Connecting to jog service...", kind: "" };
   }
@@ -645,6 +691,9 @@ function jogPanelMessage() {
     return { text: "Connect a gamepad. Then arm jog, hold the deadman button, and move an axis.", kind: "" };
   }
   const deadmanButton = state.ui.gamepad.deadman_button;
+  if (!j.armed && j.availability && !j.availability.available) {
+    return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
+  }
   if (!j.armed) {
     return { text: `Ready. Click Arm Jog, then hold button ${deadmanButton} and move an axis.`, kind: "ok" };
   }
@@ -667,6 +716,8 @@ function jogErrorText(err) {
     return "Machine is not Idle. Wait for fresh Idle status, then arm jog again.";
   case "stale_status":
     return "Machine status or position is stale. Wait for a fresh status report before jogging.";
+  case "status_waiting":
+    return "Waiting for fresh machine status before continuing jog.";
   case "controller_waiting":
     return "The controller requested the machine. Jog was disarmed; wait for Idle, then arm again.";
   case "machine_error":
@@ -1676,6 +1727,7 @@ async function loadJogCapabilities() {
     state.jog.availability = state.jog.caps.availability || null;
   } catch (e) {
     state.jog.error = e.message;
+    state.jog.errorCode = "";
   }
   renderJog();
 }
@@ -1704,6 +1756,7 @@ function connectJog() {
     state.jog.link = "online";
     state.jog.reconnectAttempt = 0;
     state.jog.error = "";
+    state.jog.errorCode = "";
     renderJog();
   };
   ws.onclose = () => {
@@ -1718,6 +1771,7 @@ function connectJog() {
   ws.onerror = () => {
     if (state.jog.ws !== ws) return;
     state.jog.error = "jog socket error";
+    state.jog.errorCode = "";
     renderJog();
     try {
       ws.close();
@@ -1731,6 +1785,7 @@ function connectJog() {
       applyJogEvent(JSON.parse(e.data));
     } catch (err) {
       state.jog.error = "bad jog event: " + err.message;
+      state.jog.errorCode = "";
       renderJog();
     }
   };
@@ -1767,32 +1822,70 @@ function sendJog(msg) {
 }
 
 function applyJogEvent(ev) {
+  let machineChanged = false;
   if (ev.type === "hello" && ev.capabilities) {
     state.jog.caps = ev.capabilities;
     state.jog.availability = ev.capabilities.availability || null;
-    if (state.jog.availability?.available && state.jog.error === "busy") state.jog.error = "";
+    if (state.jog.availability?.available && state.jog.errorCode === "busy") {
+      state.jog.error = "";
+      state.jog.errorCode = "";
+    }
   } else if (ev.type === "state") {
     state.jog.armed = !!ev.armed;
     if (ev.availability) {
       state.jog.availability = ev.availability;
       if (ev.availability.available) {
         state.jog.error = "";
+        state.jog.errorCode = "";
       } else if (ev.availability.reason && !state.jog.armed) {
         state.jog.error = "";
+        state.jog.errorCode = "";
       }
     }
   } else if (ev.type === "status" && ev.status) {
     state.jog.mpos = ev.status.mpos || state.jog.mpos;
     state.jog.wpos = ev.status.wpos || state.jog.wpos;
     state.jog.observed = ev.status.mpos || state.jog.observed;
-    if (ev.status.state === "Idle") state.jog.error = "";
+    state.jog.estimated = false;
+    state.machine = {
+      ...state.machine,
+      state: ev.status.state || state.machine.state,
+      age_ms: ev.status.age_ms,
+      observed_at: ev.status.observed_at || state.machine.observed_at,
+      raw: ev.status.raw || state.machine.raw,
+      mpos: ev.status.mpos || state.machine.mpos,
+      wpos: ev.status.wpos || state.machine.wpos,
+      motion_estimated: false,
+      connected: true,
+    };
+    machineChanged = true;
+    if ((ev.status.state === "Idle" || ev.status.state === "Run") && state.jog.errorCode === "status_waiting") {
+      state.jog.error = "";
+      state.jog.errorCode = "";
+    } else if (ev.status.state === "Idle") {
+      state.jog.error = "";
+      state.jog.errorCode = "";
+    }
   } else if (ev.type === "motion" && ev.motion) {
+    const predicted = ev.motion.estimated || ev.motion.observed || ev.motion.target;
     state.jog.target = ev.motion.target || state.jog.target;
-    state.jog.observed = ev.motion.observed || state.jog.observed;
+    state.jog.mpos = predicted || state.jog.mpos;
+    state.jog.wpos = ev.motion.estimated_wpos || state.jog.wpos;
+    state.jog.observed = predicted || state.jog.observed;
+    state.jog.estimated = !!ev.motion.estimated;
     state.jog.lead = ev.motion.lead || state.jog.lead;
-    if (state.jog.observed) {
-      state.jog.path.push(state.jog.observed);
+    if (predicted) {
+      state.jog.path.push(predicted);
       if (state.jog.path.length > 80) state.jog.path.shift();
+    }
+    if (predicted) {
+      state.machine = {
+        ...state.machine,
+        mpos: predicted,
+        wpos: ev.motion.estimated_wpos || state.machine.wpos,
+        motion_estimated: !!ev.motion.estimated,
+      };
+      machineChanged = true;
     }
   } else if (ev.type === "ack") {
     const sent = state.jog.sent.get(ev.seq);
@@ -1801,13 +1894,16 @@ function applyJogEvent(ev) {
       state.jog.sent.delete(ev.seq);
     }
     state.jog.error = "";
+    state.jog.errorCode = "";
   } else if (ev.type === "error") {
+    state.jog.errorCode = ev.code || "";
     state.jog.error = ev.message || ev.code || "jog error";
     if (ev.code === "controller_waiting" || ev.code === "not_idle" || ev.code === "stale_status") {
       state.jog.armed = false;
     }
   }
-  renderJog();
+  if (machineChanged) renderMachine();
+  else renderJog();
 }
 
 function currentGamepad() {
@@ -1880,7 +1976,7 @@ function sampleJog() {
     const deadman = buttonPressed(gp, gamepad.deadman_button);
     const slow = gamepad.slow_buttons.some((btn) => buttonPressed(gp, btn));
     state.jog.preferredPadIndex = gp.index;
-    state.jog.pad = gp.id || "connected";
+    state.jog.pad = gamepadLabel(gp);
     state.jog.deadman = deadman;
     state.jog.axes = axes;
     handleGamepadMacroButtons(buttons, deadman);
@@ -1896,7 +1992,7 @@ function sampleJog() {
 
 function scheduleJogSample() {
   if (state.jog.sampleTimer) return;
-  const ms = Math.max(20, Number(state.jog.caps?.tick_ms) || 50);
+  const ms = Math.max(8, Number(state.jog.caps?.tick_ms) || 20);
   state.jog.sampleTimer = setTimeout(() => {
     state.jog.sampleTimer = null;
     sampleJog();
@@ -1949,18 +2045,26 @@ function connectControlSSE() {
   if (state.controlES) return;
   const es = new EventSource("/api/events?scope=control");
   state.controlES = es;
-  es.addEventListener("snapshot", (e) => applySnapshot(JSON.parse(e.data)));
+  es.onopen = () => clearNotice("control-sse");
+  es.addEventListener("snapshot", (e) => {
+    clearNotice("control-sse");
+    applySnapshot(JSON.parse(e.data));
+  });
   es.addEventListener("gcode", (e) => appendGcodeLine(JSON.parse(e.data)));
-  es.onerror = () => setNotice("Control event stream disconnected; retrying.", "error");
+  es.onerror = () => setNotice("Control event stream disconnected; retrying.", "error", "control-sse");
 }
 
 function connectFilesSSE() {
   if (state.filesES) return;
   const es = new EventSource("/api/events?scope=files");
   state.filesES = es;
-  es.addEventListener("snapshot", (e) => applySnapshot(JSON.parse(e.data)));
+  es.onopen = () => clearNotice("files-sse");
+  es.addEventListener("snapshot", (e) => {
+    clearNotice("files-sse");
+    applySnapshot(JSON.parse(e.data));
+  });
   es.addEventListener("change", (e) => applyChange(JSON.parse(e.data)));
-  es.onerror = () => setNotice("Files event stream disconnected; retrying.", "error");
+  es.onerror = () => setNotice("Files event stream disconnected; retrying.", "error", "files-sse");
 }
 
 function showTab(name) {

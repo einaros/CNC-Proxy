@@ -310,6 +310,7 @@ func TestSendGcodeQueryRunsRegardlessOfState(t *testing.T) {
 func TestSendGcodeMotionRequiresIdle(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 
+	m.SetStatus("<Run|MPos:0,0,0|WPos:0,0,0>")
 	tr.Observe(machine.Run)
 	_, err := svc.SendGcode("G91 G0 X-10")
 	if !session.Retryable(err) {
@@ -320,6 +321,7 @@ func TestSendGcodeMotionRequiresIdle(t *testing.T) {
 	}
 
 	// Now Idle: the move is accepted and reaches the machine.
+	m.SetStatus("<Idle|MPos:0,0,0|WPos:0,0,0>")
 	tr.Observe(machine.Idle)
 	if _, err := svc.SendGcode("G91 G0 X-10"); err != nil {
 		t.Fatalf("motion during Idle: %v", err)

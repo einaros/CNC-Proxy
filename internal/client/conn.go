@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/machinetransport"
@@ -44,6 +45,7 @@ func WithFilePacketSize(n int) Option {
 type Conn struct {
 	c              machinetransport.Conn
 	filePacketSize int
+	writeMu        sync.Mutex
 	scan           protocol.Scanner
 	// pending holds frames already parsed from a read that returned more than
 	// one frame, so the next readFrame call drains them first.
@@ -92,6 +94,8 @@ func newConn(t machinetransport.Conn, opts ...Option) *Conn {
 func (k *Conn) Close() error { return k.c.Close() }
 
 func (k *Conn) writeFrame(b []byte) error {
+	k.writeMu.Lock()
+	defer k.writeMu.Unlock()
 	_, err := k.c.Write(b)
 	return err
 }

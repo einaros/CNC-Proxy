@@ -262,8 +262,9 @@ func TestReconcileLeavesErrorStateAlone(t *testing.T) {
 }
 
 func TestReconcileBlockedWhenNotIdle(t *testing.T) {
-	_, st, arb, tr := setup(t)
+	m, st, arb, tr := setup(t)
 	eng := newEngine(st, arb)
+	m.SetStatus("<Run|MPos:0,0,0|WPos:0,0,0>")
 	tr.Observe(machine.Run) // busy
 
 	err := eng.Reconcile(4)

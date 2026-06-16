@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,6 +44,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/httpauth"
 	"github.com/uwin/cnc-proxy/internal/jog"
 	"github.com/uwin/cnc-proxy/internal/machinetransport"
+	"github.com/uwin/cnc-proxy/internal/proxyconfig"
 	"github.com/uwin/cnc-proxy/internal/relay"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
@@ -53,37 +55,44 @@ import (
 func main() {
 	jogDefaults := jog.DefaultConfig()
 	var (
-		tcpPort          = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
-		machineTransport = flag.String("machine-transport", machinetransport.KindTCP, "machine-side transport: tcp or usb")
-		machineAddr      = flag.String("machine", "", "machine TCP host:port; if empty in TCP mode, learned via UDP discovery")
-		usbDevice        = flag.String("usb-device", "", "USB/serial device for -machine-transport=usb (for example /dev/cu.usbserial-...)")
-		usbBaud          = flag.Int("usb-baud", 115200, "USB serial baud rate")
-		usbResetOnOpen   = flag.Bool("usb-reset-on-open", false, "toggle DTR when opening the USB serial device")
-		advertise        = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
-		proxyIP          = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
-		broadcast        = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
-		name             = flag.String("name", "", "advertised machine name; replaces the real name entirely (default: real name + -name-suffix)")
-		nameSuffix       = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name when -name is not set")
-		noAdvertise      = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
-		apiAddr          = flag.String("api-addr", "127.0.0.1:8420", "address for the HTTP API + web UI")
-		davAddr          = flag.String("dav-addr", "127.0.0.1:8421", "address for the WebDAV filesystem server")
-		authUser         = flag.String("auth-user", "cnc", "HTTP Basic Auth username for API/WebDAV when -auth-token is set")
-		authToken        = flag.String("auth-token", "", "HTTP Basic Auth token/password for API/WebDAV")
-		insecureHTTP     = flag.Bool("allow-insecure-http", false, "allow API/WebDAV to bind beyond loopback without -auth-token")
-		dataDir          = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
-		apiUploadMB      = flag.Int64("api-max-upload-mb", 512, "maximum API/WebDAV upload body size in MiB")
-		apiJSONKB        = flag.Int64("api-max-json-kb", 1024, "maximum API JSON request body size in KiB")
-		apiBackupMB      = flag.Int64("api-max-backup-mb", 64, "maximum API backup import body size in MiB")
-		jogEnabled       = flag.Bool("jog-enabled", jogDefaults.Enabled, "enable low-latency gamepad jogging API/UI")
-		jogMaxXY         = flag.Float64("jog-max-xy-mm-min", jogDefaults.MaxXYMMMin, "maximum XY jog speed in mm/min")
-		jogMaxZ          = flag.Float64("jog-max-z-mm-min", jogDefaults.MaxZMMMin, "maximum Z jog speed in mm/min")
-		jogTick          = flag.Duration("jog-tick", jogDefaults.Tick, "gamepad jog motion tick interval")
-		jogStatus        = flag.Duration("jog-status-interval", jogDefaults.StatusInterval, "status polling interval while a jog lease is armed")
-		jogDeadman       = flag.Duration("jog-deadman-timeout", jogDefaults.DeadmanTimeout, "maximum age of held-deadman gamepad input before motion stops")
-		jogMotion        = flag.String("jog-motion", string(jogDefaults.MotionPrimitive), "gamepad jog motion primitive: instant or g53")
+		printConfigSchema = flag.Bool("print-config-schema", false, "print proxy flag schema as JSON and exit")
+		tcpPort           = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
+		machineTransport  = flag.String("machine-transport", machinetransport.KindTCP, "machine-side transport: tcp or usb")
+		machineAddr       = flag.String("machine", "", "machine TCP host:port; if empty in TCP mode, learned via UDP discovery")
+		usbDevice         = flag.String("usb-device", "", "USB/serial device for -machine-transport=usb (for example /dev/cu.usbserial-...)")
+		usbBaud           = flag.Int("usb-baud", 115200, "USB serial baud rate")
+		usbResetOnOpen    = flag.Bool("usb-reset-on-open", false, "toggle DTR when opening the USB serial device")
+		advertise         = flag.Bool("advertise", false, "re-advertise the proxy over UDP so the official controller connects through it (transparent mode)")
+		proxyIP           = flag.String("proxy-ip", "", "IP the controller should connect to (this host); auto-derived if empty")
+		broadcast         = flag.String("broadcast", "", "broadcast address to advertise on; auto-derived if empty")
+		name              = flag.String("name", "", "advertised machine name; replaces the real name entirely (default: real name + -name-suffix)")
+		nameSuffix        = flag.String("name-suffix", " (proxy)", "suffix appended to the advertised machine name when -name is not set")
+		noAdvertise       = flag.Bool("no-advertise", false, "deprecated no-op; advertising is now opt-in via -advertise")
+		apiAddr           = flag.String("api-addr", "127.0.0.1:8420", "address for the HTTP API + web UI")
+		davAddr           = flag.String("dav-addr", "127.0.0.1:8421", "address for the WebDAV filesystem server")
+		authUser          = flag.String("auth-user", "cnc", "HTTP Basic Auth username for API/WebDAV when -auth-token is set")
+		authToken         = flag.String("auth-token", "", "HTTP Basic Auth token/password for API/WebDAV")
+		insecureHTTP      = flag.Bool("allow-insecure-http", false, "allow API/WebDAV to bind beyond loopback without -auth-token")
+		dataDir           = flag.String("data-dir", defaultDataDir(), "directory for the catalog, job queue, and file cache")
+		apiUploadMB       = flag.Int64("api-max-upload-mb", 512, "maximum API/WebDAV upload body size in MiB")
+		apiJSONKB         = flag.Int64("api-max-json-kb", 1024, "maximum API JSON request body size in KiB")
+		apiBackupMB       = flag.Int64("api-max-backup-mb", 64, "maximum API backup import body size in MiB")
+		jogEnabled        = flag.Bool("jog-enabled", jogDefaults.Enabled, "enable low-latency gamepad jogging API/UI")
+		jogMaxXY          = flag.Float64("jog-max-xy-mm-min", jogDefaults.MaxXYMMMin, "maximum XY jog speed in mm/min")
+		jogMaxZ           = flag.Float64("jog-max-z-mm-min", jogDefaults.MaxZMMMin, "maximum Z jog speed in mm/min")
+		jogTick           = flag.Duration("jog-tick", jogDefaults.Tick, "gamepad jog motion tick interval")
+		jogStatus         = flag.Duration("jog-status-interval", jogDefaults.StatusInterval, "status polling interval while a jog lease is armed")
+		jogDeadman        = flag.Duration("jog-deadman-timeout", jogDefaults.DeadmanTimeout, "maximum age of held-deadman gamepad input before motion stops")
+		jogMotion         = flag.String("jog-motion", string(jogDefaults.MotionPrimitive), "gamepad jog motion primitive: instant or g53")
 	)
 	applyEnvDefaults()
 	flag.Parse()
+	if *printConfigSchema {
+		if err := json.NewEncoder(os.Stdout).Encode(proxyconfig.Schema{Options: proxyconfig.Options()}); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	transportKind := machinetransport.NormalizeKind(*machineTransport)
 	if err := validateMachineTransport(transportKind, *usbDevice, *usbBaud, *advertise, *name); err != nil {
@@ -194,7 +203,8 @@ func main() {
 			}
 			return client.NewTransport(opened.Conn, client.WithFilePacketSize(opened.PacketSize)), nil
 		},
-		FilePacketSize: filePacketSize,
+		FilePacketSize:            filePacketSize,
+		PreserveConnOnPollTimeout: transportKind == machinetransport.KindUSB,
 	})
 	go arb.Poll(ctx, 5*time.Second)
 

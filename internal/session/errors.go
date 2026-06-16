@@ -7,8 +7,8 @@ var (
 	// so owner-mode operations (the sync engine) must wait.
 	ErrRelayActive = errors.New("session: controller is connected (relay mode)")
 
-	// ErrNotIdle means the machine is not in a fresh Idle state, so file
-	// operations cannot run yet.
+	// ErrNotIdle means the latest checked machine state is not Idle, or a fresh
+	// status could not be obtained, so file operations cannot run yet.
 	ErrNotIdle = errors.New("session: machine not idle")
 
 	// ErrBusy means the controller is mid file-transfer, so an injected

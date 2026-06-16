@@ -392,7 +392,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing jog visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `/app.js?v=ui-layout-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `/app.js?v=jog-stream-1`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -430,7 +430,10 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), "/api/events?scope=control") || !strings.Contains(string(jsBody), "/api/events?scope=files") {
 		t.Errorf("app.js missing scoped event streams")
 	}
-	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "/api/machine/status") {
+	if !strings.Contains(string(jsBody), `clearNotice("control-sse")`) || !strings.Contains(string(jsBody), `clearNotice("files-sse")`) {
+		t.Errorf("app.js missing stream reconnect notice clearing")
+	}
+	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing jog plot, jog status messaging, or cache-only status polling")
 	}
 	if got := js.Header.Get("Cache-Control"); got != "no-store" {
@@ -454,7 +457,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing %s", want)
 		}
 	}
-	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "pressedButtonList"} {
+	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "pressedButtonList", "gamepadLabel", "Xbox-compatible gamepad", "standard gamepad"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -699,6 +702,29 @@ func TestJogWebSocketArmAndInput(t *testing.T) {
 	t.Fatalf("no jog command observed: %v", m.Gcodes())
 }
 
+func TestJogWebSocketStatusTimeoutDoesNotCloseSession(t *testing.T) {
+	srv, m, _ := serverWithJog(t, false)
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+
+	m.SetStatus("<Run|MPos:0,0,0|WPos:0,0,0>")
+	m.SetStatusReplyDelay(500 * time.Millisecond)
+	writeWS(t, c, map[string]any{"type": "input", "seq": 2, "deadman": true, "axes": map[string]float64{"x": 1}})
+	ev := readWSEvent(t, c, "error")
+	if ev.Code != jog.CodeStatusWaiting {
+		t.Fatalf("error = %+v, want status_waiting", ev)
+	}
+
+	writeWS(t, c, map[string]any{"type": "disarm", "seq": 3})
+	ack := readWSEvent(t, c, "ack")
+	if ack.Seq != 3 {
+		t.Fatalf("ack = %+v, want disarm ack", ack)
+	}
+}
+
 func wsURL(httpURL string) string {
 	return "ws" + strings.TrimPrefix(httpURL, "http") + "/api/jog/ws"
 }
@@ -765,6 +791,7 @@ func TestPostGcodeMotionGatedByState(t *testing.T) {
 	srv, m, tr := serverWithMachine(t)
 
 	// Running: a motion command is rejected with 503 and never reaches the machine.
+	m.SetStatus("<Run|MPos:0,0,0|WPos:0,0,0>")
 	tr.Observe(machine.Run)
 	resp := postJSON(t, srv.URL+"/api/gcode", map[string]string{"line": "G91 G0 X-10"})
 	resp.Body.Close()
@@ -776,6 +803,7 @@ func TestPostGcodeMotionGatedByState(t *testing.T) {
 	}
 
 	// Idle: accepted.
+	m.SetStatus("<Idle|MPos:0,0,0|WPos:0,0,0>")
 	tr.Observe(machine.Idle)
 	resp2 := postJSON(t, srv.URL+"/api/gcode", map[string]string{"line": "G91 G0 X-10"})
 	resp2.Body.Close()

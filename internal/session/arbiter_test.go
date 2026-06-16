@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +58,42 @@ func newArbiter(t *testing.T, addr string, tr *machine.Tracker) *Arbiter {
 		Tracker: tr,
 		Dial:    func() (*client.Conn, error) { return client.Dial(addr, time.Second) },
 	})
+}
+
+func statusOnDemandMachine(t *testing.T, replies *atomic.Bool, accepts *atomic.Int32) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			go func(c net.Conn) {
+				defer c.Close()
+				var scan protocol.Scanner
+				buf := make([]byte, 4096)
+				for {
+					c.SetReadDeadline(time.Now().Add(2 * time.Second))
+					n, err := c.Read(buf)
+					for _, f := range scan.Push(buf[:n]) {
+						if f.Cmd == protocol.CmdCtrlSingle && len(f.Data) == 1 && f.Data[0] == '?' && replies.Load() {
+							c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:0.000,0.000,0.000>")))
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
 }
 
 func TestWithMachineBlockedInRelay(t *testing.T) {
@@ -141,28 +178,86 @@ func TestWithMachineMapsBusyError(t *testing.T) {
 	}
 }
 
-func TestWithMachineIdleGating(t *testing.T) {
+func TestWithMachineIdleGatingRefreshesStaleStatus(t *testing.T) {
 	tr := machine.NewTracker()
-	addr := miniMachine(t, func() string { return "<Idle>" })
+	var status atomic.Value
+	status.Store("<Idle|MPos:0.000,0.000,0.000>")
+	addr := miniMachine(t, func() string { return status.Load().(string) })
 	a := newArbiter(t, addr, tr)
 
-	// No state observed yet → not fresh → blocked when idle required.
-	if err := a.WithMachine(true, func(*client.Conn) error { return nil }); !errors.Is(err, ErrNotIdle) {
-		t.Errorf("stale state: got %v, want ErrNotIdle", err)
+	ran := false
+	if err := a.WithMachine(true, func(*client.Conn) error { ran = true; return nil }); err != nil {
+		t.Fatalf("stale state should be refreshed before idle-gated access: %v", err)
+	}
+	if !ran {
+		t.Fatal("fn did not run after stale status refresh")
+	}
+	if !tr.Fresh(time.Second) {
+		t.Fatal("tracker should be fresh after idle-gated refresh")
 	}
 
 	tr.Observe(machine.Run)
+	status.Store("<Run|MPos:0.000,0.000,0.000>")
 	if err := a.WithMachine(true, func(*client.Conn) error { return nil }); !errors.Is(err, ErrNotIdle) {
 		t.Errorf("Run state: got %v, want ErrNotIdle", err)
 	}
 
 	tr.Observe(machine.Idle)
-	ran := false
+	status.Store("<Idle|MPos:0.000,0.000,0.000>")
+	ran = false
 	if err := a.WithMachine(true, func(*client.Conn) error { ran = true; return nil }); err != nil {
 		t.Errorf("Idle state should allow: %v", err)
 	}
 	if !ran {
 		t.Error("fn did not run under Idle")
+	}
+}
+
+func TestWithMachineIdleGatingBlocksAfterFreshRunRefresh(t *testing.T) {
+	tr := machine.NewTracker()
+	addr := miniMachine(t, func() string { return "<Run|MPos:0.000,0.000,0.000>" })
+	a := newArbiter(t, addr, tr)
+
+	ran := false
+	err := a.WithMachine(true, func(*client.Conn) error { ran = true; return nil })
+	if !errors.Is(err, ErrNotIdle) {
+		t.Fatalf("got %v, want ErrNotIdle", err)
+	}
+	if ran {
+		t.Fatal("fn ran even though refreshed status was Run")
+	}
+	if !tr.Fresh(time.Second) {
+		t.Fatal("tracker should be fresh after Run status refresh")
+	}
+	if st, _ := tr.Snapshot(); st != machine.Run {
+		t.Fatalf("state = %q, want Run", st)
+	}
+}
+
+func TestWithMachineRelayInjectionRefreshesStaleStatus(t *testing.T) {
+	addr := miniMachine(t, func() string { return "<Idle|MPos:0.000,0.000,0.000>" })
+	tr := machine.NewTracker()
+	inj := &fakeInjector{addr: addr}
+	a := New(Config{
+		Tracker:  tr,
+		Dial:     func() (*client.Conn, error) { return client.Dial(addr, time.Second) },
+		Injector: inj,
+	})
+	a.EnterRelay()
+
+	ran := false
+	err := a.WithMachine(true, func(*client.Conn) error { ran = true; return nil })
+	if err != nil {
+		t.Fatalf("WithMachine via relay stale refresh: %v", err)
+	}
+	if !ran {
+		t.Fatal("fn did not run after relay stale status refresh")
+	}
+	if inj.acquired != 1 {
+		t.Fatalf("injector acquired = %d, want 1", inj.acquired)
+	}
+	if !tr.Fresh(time.Second) {
+		t.Fatal("tracker should be fresh after relay stale status refresh")
 	}
 }
 
@@ -205,6 +300,36 @@ func TestConnDroppedOnError(t *testing.T) {
 	a.WithMachine(false, func(c *client.Conn) error { c2 = c; return nil })
 	if c1 == c2 {
 		t.Error("expected a fresh connection after an error")
+	}
+}
+
+func TestPollTimeoutPreservesOwnerConnectionWhenConfigured(t *testing.T) {
+	var replies atomic.Bool
+	var accepts atomic.Int32
+	addr := statusOnDemandMachine(t, &replies, &accepts)
+	tr := machine.NewTracker()
+	a := New(Config{
+		Tracker:                   tr,
+		Dial:                      func() (*client.Conn, error) { return client.Dial(addr, time.Second) },
+		PreserveConnOnPollTimeout: true,
+	})
+
+	a.pollOnce(20 * time.Millisecond)
+	if tr.Fresh(time.Second) {
+		t.Fatal("tracker should remain stale after an unanswered poll")
+	}
+
+	replies.Store(true)
+	a.pollOnce(time.Second)
+
+	if got := accepts.Load(); got != 1 {
+		t.Fatalf("accepted connections = %d, want 1", got)
+	}
+	if !tr.Fresh(time.Second) {
+		t.Fatal("tracker should become fresh after the next status reply")
+	}
+	if st, _ := tr.Snapshot(); st != machine.Idle {
+		t.Fatalf("state = %q, want Idle", st)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"sync"
 	"time"
 
@@ -20,17 +21,35 @@ const (
 	CodeNotIdle           = "not_idle"
 	CodeBusy              = "busy"
 	CodeStaleStatus       = "stale_status"
+	CodeStatusWaiting     = "status_waiting"
 	CodeBadInput          = "bad_input"
 	CodeControllerWaiting = "controller_waiting"
 	CodeMachineError      = "machine_error"
 	CodeUnauthorized      = "unauthorized"
 
-	deadzone      = 0.12
-	slowScale     = 0.2
-	maxXYLeadMM   = 2.5
-	maxZLeadMM    = 1.0
-	statusTimeout = 2 * time.Second
-	motionLogGap  = time.Second
+	deadzone        = 0.12
+	slowScale       = 0.2
+	baseMaxXYLeadMM = 2.5
+	baseMaxZLeadMM  = 1.0
+	// The firmware's `$J ... F` argument is a scale of the slowest selected
+	// actuator max rate, not a feedrate. These match CarveraFirmware
+	// config.default for XYZ and let proxy speed limits translate into segment
+	// durations instead of max-rate bursts.
+	firmwareMaxXYMMMin = 3000.0
+	firmwareMaxZMMMin  = 2000.0
+	minJogTick         = 5 * time.Millisecond
+	minStatusEvery     = 100 * time.Millisecond
+	minDeadmanTimeout  = 300 * time.Millisecond
+	minJogSegment      = 60 * time.Millisecond
+	maxJogSegment      = 100 * time.Millisecond
+	minJogLookahead    = 120 * time.Millisecond
+	maxJogLookahead    = 180 * time.Millisecond
+	minActiveStatusGap = time.Second
+	maxActiveStatusGap = 2 * time.Second
+	maxSegmentsPerTick = 2
+	motionLogGap       = time.Second
+	motionEventGap     = 33 * time.Millisecond
+	statusWaitGap      = 500 * time.Millisecond
 )
 
 // Config controls the jog engine.
@@ -70,9 +89,9 @@ func DefaultConfig() Config {
 		Enabled:         true,
 		MaxXYMMMin:      1200,
 		MaxZMMMin:       300,
-		Tick:            50 * time.Millisecond,
+		Tick:            20 * time.Millisecond,
 		StatusInterval:  100 * time.Millisecond,
-		DeadmanTimeout:  150 * time.Millisecond,
+		DeadmanTimeout:  minDeadmanTimeout,
 		MotionPrimitive: MotionPrimitiveInstant,
 	}
 }
@@ -88,11 +107,20 @@ func (c Config) normalize() Config {
 	if c.Tick <= 0 {
 		c.Tick = d.Tick
 	}
+	if c.Tick < minJogTick {
+		c.Tick = minJogTick
+	}
 	if c.StatusInterval <= 0 {
 		c.StatusInterval = d.StatusInterval
 	}
+	if c.StatusInterval < minStatusEvery {
+		c.StatusInterval = minStatusEvery
+	}
 	if c.DeadmanTimeout <= 0 {
 		c.DeadmanTimeout = d.DeadmanTimeout
+	}
+	if c.DeadmanTimeout < minDeadmanTimeout {
+		c.DeadmanTimeout = minDeadmanTimeout
 	}
 	switch c.MotionPrimitive {
 	case "", MotionPrimitiveInstant:
@@ -167,17 +195,33 @@ type StatusEvent struct {
 // MotionEvent reports one server-generated jog segment for visualization and
 // low-rate telemetry. It is best-effort; slow clients may miss motion events.
 type MotionEvent struct {
-	Target   machine.AxisValues `json:"target,omitempty"`
-	Observed machine.AxisValues `json:"observed,omitempty"`
-	Delta    Axes               `json:"delta"`
-	Lead     Axes               `json:"lead"`
-	Command  string             `json:"command,omitempty"`
+	Target        machine.AxisValues `json:"target,omitempty"`
+	Observed      machine.AxisValues `json:"observed,omitempty"`
+	Estimated     machine.AxisValues `json:"estimated,omitempty"`
+	EstimatedWPos machine.AxisValues `json:"estimated_wpos,omitempty"`
+	Delta         Axes               `json:"delta"`
+	Lead          Axes               `json:"lead"`
+	QueueLeadMs   int64              `json:"queue_lead_ms,omitempty"`
+	Command       string             `json:"command,omitempty"`
 }
 
 type command struct {
 	typ    string
 	seq    int64
 	action string
+}
+
+type statusResult struct {
+	leaseID int64
+	payload string
+	err     error
+}
+
+type plannedSegment struct {
+	start time.Time
+	end   time.Time
+	from  machine.AxisValues
+	to    machine.AxisValues
 }
 
 // Manager owns the single active jog session.
@@ -233,8 +277,12 @@ func (m *Manager) availability(ignore *Session) Availability {
 		return Availability{Available: false, Reason: CodeBusy, Message: "Another jog session is active. Close the other CNC Proxy tab/client or wait for it to disconnect."}
 	}
 	st, _ := m.arb.Tracker().Current()
+	activeJog := ignore != nil && active == ignore && ignore.hasLease()
 	if !m.arb.Tracker().Fresh(m.arb.StateMaxAge()) {
 		return Availability{Available: false, Reason: CodeStaleStatus, Message: "Machine status is stale. Wait for a fresh Idle status before jogging."}
+	}
+	if activeJog && canContinueJog(st.State) && len(st.MPos) > 0 {
+		return Availability{Available: true, Message: "Jog session active."}
 	}
 	if st.State != machine.Idle {
 		return Availability{Available: false, Reason: CodeNotIdle, Message: "Machine is " + stateLabel(st.State) + ". Jogging requires fresh Idle status."}
@@ -253,12 +301,13 @@ func (m *Manager) Start(ctx context.Context) (*Session, error) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Session{
-		mgr:    m,
-		ctx:    ctx,
-		cancel: cancel,
-		cmds:   make(chan command, 16),
-		events: make(chan Event, 128),
-		done:   make(chan struct{}),
+		mgr:      m,
+		ctx:      ctx,
+		cancel:   cancel,
+		cmds:     make(chan command, 16),
+		statusCh: make(chan statusResult, 4),
+		events:   make(chan Event, 128),
+		done:     make(chan struct{}),
 	}
 	m.mu.Lock()
 	if m.active != nil {
@@ -299,24 +348,32 @@ type Session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	cmds   chan command
-	events chan Event
-	done   chan struct{}
-	once   sync.Once
-	emitMu sync.Mutex
-	closed bool
+	cmds     chan command
+	statusCh chan statusResult
+	events   chan Event
+	done     chan struct{}
+	once     sync.Once
+	emitMu   sync.Mutex
+	closed   bool
 
-	mu            sync.Mutex
-	latest        Input
-	haveInput     bool
-	armed         bool
-	lease         *session.JogLease
-	lastStatus    machine.Status
-	lastStatusAt  time.Time
-	planned       machine.AxisValues
-	lastMotionCmd string
-	lastAlarmRaw  string
-	lastMotionLog time.Time
+	mu              sync.Mutex
+	latest          Input
+	haveInput       bool
+	armed           bool
+	lease           *session.JogLease
+	leaseID         int64
+	statusInFlight  bool
+	statusWG        sync.WaitGroup
+	lastStatus      machine.Status
+	lastStatusAt    time.Time
+	planned         machine.AxisValues
+	queuedUntil     time.Time
+	segments        []plannedSegment
+	lastMotionCmd   string
+	lastMotionEvent time.Time
+	lastStatusWait  time.Time
+	lastAlarmRaw    string
+	lastMotionLog   time.Time
 }
 
 // Events streams server messages until the session closes.
@@ -397,11 +454,11 @@ func (s *Session) run() {
 			s.emitState(0)
 		case cmd := <-s.cmds:
 			s.handleCommand(cmd)
+		case res := <-s.statusCh:
+			s.handleStatusResult(res)
 		case <-statusTick.C:
-			if s.hasLease() {
-				if err := s.refreshStatus(); err != nil {
-					s.failLease(CodeMachineError, err)
-				}
+			if s.shouldRequestStatus(s.mgr.now()) {
+				s.requestStatus()
 			}
 		case <-tick.C:
 			if s.hasLease() {
@@ -450,33 +507,31 @@ func (s *Session) handleArm(seq int64) {
 		s.emitState(seq)
 		return
 	}
-	s.mu.Lock()
-	s.lease = lease
-	s.armed = true
-	s.haveInput = false
-	s.planned = nil
-	s.mu.Unlock()
-
-	if err := s.refreshStatus(); err != nil {
-		s.failLease(CodeMachineError, err)
-		return
-	}
-	s.mu.Lock()
-	st := s.lastStatus
-	s.mu.Unlock()
-	if st.State != machine.Idle || len(st.MPos) == 0 {
-		s.release(nil)
+	st, age := s.mgr.arb.Tracker().Current()
+	if !s.mgr.arb.Tracker().Fresh(s.mgr.arb.StateMaxAge()) || st.State != machine.Idle || len(st.MPos) == 0 {
+		lease.Release(nil)
 		code := CodeNotIdle
-		if len(st.MPos) == 0 {
+		if !s.mgr.arb.Tracker().Fresh(s.mgr.arb.StateMaxAge()) || len(st.MPos) == 0 {
 			code = CodeStaleStatus
 		}
 		s.emit(Event{Type: "error", Seq: seq, Code: code, Message: "machine is not ready to jog"})
 		s.emitState(seq)
 		return
 	}
+	now := s.mgr.now()
 	s.mu.Lock()
+	s.lease = lease
+	s.leaseID++
+	s.statusInFlight = false
+	s.armed = true
+	s.haveInput = false
+	s.lastStatus = st
+	s.lastStatusAt = now
 	s.planned = copyAxes(st.MPos)
+	s.queuedUntil = time.Time{}
+	s.segments = nil
 	s.mu.Unlock()
+	s.emit(Event{Type: "status", Status: statusEvent(st, age)})
 	s.emit(Event{Type: "ack", Seq: seq})
 	s.emitState(seq)
 }
@@ -507,17 +562,96 @@ func (s *Session) refreshStatus() error {
 	if lease == nil {
 		return nil
 	}
-	payload, err := lease.Conn.QueryState(statusTimeout)
+	payload, err := lease.Conn.QueryState(statusQueryTimeout(s.mgr.cfg))
 	if err != nil {
+		if isTimeout(err) {
+			s.emitStatusWaiting(s.mgr.now())
+			return nil
+		}
 		return err
 	}
+	return s.applyStatusPayload(payload)
+}
+
+func (s *Session) requestStatus() {
+	s.mu.Lock()
+	lease := s.lease
+	if lease == nil || s.statusInFlight {
+		s.mu.Unlock()
+		return
+	}
+	leaseID := s.leaseID
+	timeout := statusQueryTimeout(s.mgr.cfg)
+	s.statusInFlight = true
+	s.statusWG.Add(1)
+	s.mu.Unlock()
+
+	go func() {
+		defer s.statusWG.Done()
+		payload, err := lease.Conn.QueryState(timeout)
+		res := statusResult{leaseID: leaseID, payload: payload, err: err}
+		select {
+		case s.statusCh <- res:
+		case <-s.ctx.Done():
+		}
+	}()
+}
+
+func (s *Session) shouldRequestStatus(now time.Time) bool {
+	s.mu.Lock()
+	lease := s.lease
+	in := s.latest
+	haveInput := s.haveInput
+	inFlight := s.statusInFlight
+	s.mu.Unlock()
+	if lease == nil || inFlight {
+		return false
+	}
+	if motionInputActive(haveInput, in, now, s.mgr.cfg) {
+		return false
+	}
+	return true
+}
+
+func (s *Session) handleStatusResult(res statusResult) {
+	s.mu.Lock()
+	if res.leaseID != s.leaseID {
+		s.mu.Unlock()
+		return
+	}
+	s.statusInFlight = false
+	if s.lease == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	if res.err != nil {
+		if isTimeout(res.err) {
+			s.emitStatusWaiting(s.mgr.now())
+			return
+		}
+		s.failLease(CodeMachineError, res.err)
+		return
+	}
+	if err := s.applyStatusPayload(res.payload); err != nil {
+		s.failLease(CodeMachineError, err)
+	}
+}
+
+func (s *Session) applyStatusPayload(payload string) error {
 	if !s.mgr.arb.Tracker().ObserveStatusPayload(payload) {
 		return Error{Code: CodeStaleStatus, Message: "machine returned malformed status"}
 	}
 	st, age := s.mgr.arb.Tracker().Current()
 	s.mu.Lock()
 	s.lastStatus = st
-	s.lastStatusAt = s.mgr.now()
+	now := s.mgr.now()
+	s.lastStatusAt = now
+	if queueLead(now, s.queuedUntil) == 0 {
+		s.planned = copyAxes(st.MPos)
+		s.segments = nil
+	}
 	s.mu.Unlock()
 	if st.State == machine.Alarm {
 		s.logAlarmStatus(st)
@@ -539,11 +673,12 @@ func (s *Session) motionTick() {
 	st := s.lastStatus
 	planned := copyAxes(s.planned)
 	lastStatusAt := s.lastStatusAt
+	queuedUntil := s.queuedUntil
 	s.mu.Unlock()
 
-	if !haveInput || !in.Deadman || now.Sub(in.At) > s.mgr.cfg.DeadmanTimeout {
-		return
-	}
+	queuedLead := queueLead(now, queuedUntil)
+	activeMotion := motionInputActive(haveInput, in, now, s.mgr.cfg)
+	hasMotionPlan := planned != nil && queuedLead > 0
 	if !canContinueJog(st.State) {
 		if st.State == machine.Alarm {
 			s.logAlarmStatus(st)
@@ -553,28 +688,36 @@ func (s *Session) motionTick() {
 		s.emitState(0)
 		return
 	}
-	if len(st.MPos) == 0 || now.Sub(lastStatusAt) > max(3*s.mgr.cfg.StatusInterval, s.mgr.cfg.DeadmanTimeout) {
-		s.release(nil)
-		s.emit(Event{Type: "error", Code: CodeStaleStatus, Message: "status is too stale to jog"})
-		s.emitState(0)
+	if !activeMotion {
+		if queuedLead > 0 {
+			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
+		}
 		return
 	}
-	if planned == nil {
+	staleCorrectionStatus := len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(s.mgr.cfg)
+	if staleCorrectionStatus && !hasMotionPlan {
+		if queuedLead > 0 {
+			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
+		}
+		s.emitStatusWaiting(now)
+		return
+	}
+	if planned == nil || queuedLead == 0 {
 		planned = copyAxes(st.MPos)
 	}
-	if leadTooLarge(planned, st.MPos) {
+	segDur := jogSegmentDuration(s.mgr.cfg)
+	if queuedLead >= jogLookahead(s.mgr.cfg) {
+		s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
 		return
 	}
 
-	delta := Normalize(in.Axes, in.Slow, s.mgr.cfg)
+	delta := MotionDelta(in.Axes, in.Slow, s.mgr.cfg)
 	if delta.X == 0 && delta.Y == 0 && delta.Z == 0 {
+		if queuedLead > 0 {
+			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
+		}
 		return
 	}
-	target := copyAxes(planned)
-	target["x"] += delta.X
-	target["y"] += delta.Y
-	target["z"] += delta.Z
-	cmd := jogCommand(target, delta, s.mgr.cfg.MotionPrimitive)
 
 	s.mu.Lock()
 	lease := s.lease
@@ -582,20 +725,55 @@ func (s *Session) motionTick() {
 	if lease == nil {
 		return
 	}
-	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
-		s.failLease(CodeMachineError, err)
-		return
+	lastCmd := ""
+	for sent := 0; queuedLead < jogLookahead(s.mgr.cfg) && sent < maxSegmentsPerTick; sent++ {
+		target := copyAxes(planned)
+		target["x"] += delta.X
+		target["y"] += delta.Y
+		target["z"] += delta.Z
+		cmd := jogCommandForDuration(target, delta, s.mgr.cfg, segDur)
+		if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
+			s.failLease(CodeMachineError, err)
+			return
+		}
+		segStart := queuedUntil
+		if queuedUntil.Before(now) {
+			segStart = now
+		}
+		segEnd := segStart.Add(segDur)
+		queuedUntil = segEnd
+		queuedLead = queueLead(now, queuedUntil)
+		s.mu.Lock()
+		s.planned = target
+		s.queuedUntil = queuedUntil
+		s.segments = appendPlannedSegment(s.segments, plannedSegment{
+			start: segStart,
+			end:   segEnd,
+			from:  copyAxes(planned),
+			to:    copyAxes(target),
+		}, now)
+		s.lastMotionCmd = cmd
+		s.mu.Unlock()
+		planned = target
+		lastCmd = cmd
+		s.logMotion(now, cmd)
 	}
-	s.mu.Lock()
-	s.planned = target
-	s.lastMotionCmd = cmd
-	s.mu.Unlock()
-	s.emit(Event{Type: "motion", Motion: motionEvent(target, st.MPos, delta, cmd)})
-	s.logMotion(now, cmd)
+	s.emitMotionEstimate(now, st, planned, delta, lastCmd, queuedLead)
 }
 
 // Normalize converts raw axes into one tick of motion in mm.
 func Normalize(axes Axes, slow bool, cfg Config) Axes {
+	cfg = cfg.normalize()
+	return normalizeForDuration(axes, slow, cfg, cfg.Tick)
+}
+
+// MotionDelta converts raw axes into one buffered jog segment in mm.
+func MotionDelta(axes Axes, slow bool, cfg Config) Axes {
+	cfg = cfg.normalize()
+	return normalizeForDuration(axes, slow, cfg, jogSegmentDuration(cfg))
+}
+
+func normalizeForDuration(axes Axes, slow bool, cfg Config, d time.Duration) Axes {
 	cfg = cfg.normalize()
 	x := response(axes.X)
 	y := response(axes.Y)
@@ -608,7 +786,7 @@ func Normalize(axes Axes, slow bool, cfg Config) Axes {
 	if slow {
 		scale = slowScale
 	}
-	dtMin := cfg.Tick.Minutes()
+	dtMin := d.Minutes()
 	return Axes{
 		X: x * cfg.MaxXYMMMin * dtMin * scale,
 		Y: y * cfg.MaxXYMMMin * dtMin * scale,
@@ -634,14 +812,19 @@ func response(v float64) float64 {
 	return sign * n * n * n
 }
 
-func jogCommand(target machine.AxisValues, delta Axes, primitive MotionPrimitive) string {
-	if primitive == MotionPrimitiveG53 {
-		return g53JogCommand(target, delta)
-	}
-	return instantJogCommand(delta)
+func jogCommand(target machine.AxisValues, delta Axes, cfg Config) string {
+	return jogCommandForDuration(target, delta, cfg, cfg.normalize().Tick)
 }
 
-func instantJogCommand(delta Axes) string {
+func jogCommandForDuration(target machine.AxisValues, delta Axes, cfg Config, d time.Duration) string {
+	cfg = cfg.normalize()
+	if cfg.MotionPrimitive == MotionPrimitiveG53 {
+		return g53JogCommand(target, delta)
+	}
+	return instantJogCommand(delta, cfg, d)
+}
+
+func instantJogCommand(delta Axes, cfg Config, d time.Duration) string {
 	parts := "$J"
 	if delta.X != 0 {
 		parts += fmt.Sprintf(" X%.4f", delta.X)
@@ -652,6 +835,7 @@ func instantJogCommand(delta Axes) string {
 	if delta.Z != 0 {
 		parts += fmt.Sprintf(" Z%.4f", delta.Z)
 	}
+	parts += fmt.Sprintf(" F%.4f", jogFeedScale(delta, cfg, d))
 	return parts
 }
 
@@ -669,10 +853,119 @@ func g53JogCommand(target machine.AxisValues, delta Axes) string {
 	return parts
 }
 
-func leadTooLarge(planned, observed machine.AxisValues) bool {
-	return math.Abs(planned["x"]-observed["x"]) > maxXYLeadMM ||
-		math.Abs(planned["y"]-observed["y"]) > maxXYLeadMM ||
-		math.Abs(planned["z"]-observed["z"]) > maxZLeadMM
+func jogFeedScale(delta Axes, cfg Config, d time.Duration) float64 {
+	cfg = cfg.normalize()
+	dist := math.Sqrt(delta.X*delta.X + delta.Y*delta.Y + delta.Z*delta.Z)
+	if dist == 0 || d <= 0 {
+		return 1
+	}
+	desiredMMMin := dist / d.Minutes()
+	machineMax := selectedJogMachineMax(delta)
+	if machineMax <= 0 {
+		return 1
+	}
+	scale := desiredMMMin / machineMax
+	if scale < 0.001 {
+		return 0.001
+	}
+	if scale > 1 {
+		return 1
+	}
+	return scale
+}
+
+func selectedJogMachineMax(delta Axes) float64 {
+	maxRate := 0.0
+	if delta.X != 0 || delta.Y != 0 {
+		maxRate = firmwareMaxXYMMMin
+	}
+	if delta.Z != 0 && (maxRate == 0 || firmwareMaxZMMMin < maxRate) {
+		maxRate = firmwareMaxZMMMin
+	}
+	return maxRate
+}
+
+func safetyLeadTooLarge(planned, observed machine.AxisValues, cfg Config) bool {
+	xy, z := safetyLead(cfg)
+	return math.Abs(planned["x"]-observed["x"]) > xy ||
+		math.Abs(planned["y"]-observed["y"]) > xy ||
+		math.Abs(planned["z"]-observed["z"]) > z
+}
+
+func safetyLead(cfg Config) (float64, float64) {
+	cfg = cfg.normalize()
+	budget := activeStatusMaxAge(cfg)
+	if budget > 750*time.Millisecond {
+		budget = 750 * time.Millisecond
+	}
+	xy := cfg.MaxXYMMMin * budget.Minutes()
+	if xy < baseMaxXYLeadMM {
+		xy = baseMaxXYLeadMM
+	}
+	z := cfg.MaxZMMMin * budget.Minutes()
+	if z < baseMaxZLeadMM {
+		z = baseMaxZLeadMM
+	}
+	return xy, z
+}
+
+func jogSegmentDuration(cfg Config) time.Duration {
+	cfg = cfg.normalize()
+	d := 4 * cfg.Tick
+	if d < minJogSegment {
+		d = minJogSegment
+	}
+	if d > maxJogSegment {
+		d = maxJogSegment
+	}
+	return d
+}
+
+func jogLookahead(cfg Config) time.Duration {
+	d := 2 * jogSegmentDuration(cfg.normalize())
+	if d < minJogLookahead {
+		d = minJogLookahead
+	}
+	if d > maxJogLookahead {
+		d = maxJogLookahead
+	}
+	return d
+}
+
+func queueLead(now, queuedUntil time.Time) time.Duration {
+	if queuedUntil.IsZero() || !queuedUntil.After(now) {
+		return 0
+	}
+	return queuedUntil.Sub(now)
+}
+
+func motionInputActive(haveInput bool, in Input, now time.Time, cfg Config) bool {
+	cfg = cfg.normalize()
+	if !haveInput || !in.Deadman || now.Sub(in.At) > cfg.DeadmanTimeout {
+		return false
+	}
+	return response(in.Axes.X) != 0 || response(in.Axes.Y) != 0 || response(in.Axes.Z) != 0
+}
+
+func activeStatusPollInterval(cfg Config) time.Duration {
+	cfg = cfg.normalize()
+	d := 8 * cfg.StatusInterval
+	if d < minActiveStatusGap {
+		d = minActiveStatusGap
+	}
+	if d > maxActiveStatusGap {
+		d = maxActiveStatusGap
+	}
+	return d
+}
+
+func activeStatusMaxAge(cfg Config) time.Duration {
+	cfg = cfg.normalize()
+	maxAge := activeStatusPollInterval(cfg) + statusQueryTimeout(cfg) + 500*time.Millisecond
+	if maxAge < cfg.DeadmanTimeout {
+		maxAge = cfg.DeadmanTimeout
+	}
+	return maxAge
 }
 
 func canContinueJog(st machine.State) bool {
@@ -686,18 +979,151 @@ func stateLabel(st machine.State) string {
 	return string(st)
 }
 
-func motionEvent(target, observed machine.AxisValues, delta Axes, cmd string) *MotionEvent {
-	return &MotionEvent{
-		Target:   copyAxes(target),
-		Observed: copyAxes(observed),
-		Delta:    delta,
-		Lead: Axes{
-			X: target["x"] - observed["x"],
-			Y: target["y"] - observed["y"],
-			Z: target["z"] - observed["z"],
-		},
-		Command: cmd,
+func appendPlannedSegment(segments []plannedSegment, seg plannedSegment, now time.Time) []plannedSegment {
+	segments = trimPlannedSegments(segments, now)
+	return append(segments, seg)
+}
+
+func trimPlannedSegments(segments []plannedSegment, now time.Time) []plannedSegment {
+	keep := 0
+	for keep+1 < len(segments) && !segments[keep].end.After(now) {
+		keep++
 	}
+	if keep == 0 {
+		return segments
+	}
+	out := append([]plannedSegment(nil), segments[keep:]...)
+	return out
+}
+
+func estimateFromSegments(segments []plannedSegment, now time.Time, fallback machine.AxisValues) machine.AxisValues {
+	if len(segments) == 0 {
+		return copyAxes(fallback)
+	}
+	for _, seg := range segments {
+		if now.Before(seg.start) || seg.end.Equal(seg.start) {
+			return copyAxes(seg.from)
+		}
+		if now.Before(seg.end) || now.Equal(seg.end) {
+			t := now.Sub(seg.start).Seconds() / seg.end.Sub(seg.start).Seconds()
+			return interpolateAxes(seg.from, seg.to, t)
+		}
+	}
+	return copyAxes(segments[len(segments)-1].to)
+}
+
+func interpolateAxes(from, to machine.AxisValues, t float64) machine.AxisValues {
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	out := copyAxes(from)
+	if out == nil {
+		out = machine.AxisValues{}
+	}
+	for axis, target := range to {
+		out[axis] = out[axis] + (target-out[axis])*t
+	}
+	return out
+}
+
+func estimatedWorkPosition(estimated machine.AxisValues, st machine.Status) machine.AxisValues {
+	if len(estimated) == 0 || len(st.MPos) == 0 || len(st.WPos) == 0 {
+		return nil
+	}
+	out := copyAxes(st.WPos)
+	if out == nil {
+		out = machine.AxisValues{}
+	}
+	for _, axis := range []string{"x", "y", "z"} {
+		m, mok := st.MPos[axis]
+		w, wok := st.WPos[axis]
+		e, eok := estimated[axis]
+		if mok && wok && eok {
+			out[axis] = e - (m - w)
+		}
+	}
+	return out
+}
+
+func motionEvent(target, observed, estimated machine.AxisValues, delta Axes, cmd string, queuedLead time.Duration, st machine.Status) *MotionEvent {
+	if estimated == nil {
+		estimated = observed
+	}
+	leadFrom := estimated
+	if leadFrom == nil {
+		leadFrom = observed
+	}
+	return &MotionEvent{
+		Target:        copyAxes(target),
+		Observed:      copyAxes(observed),
+		Estimated:     copyAxes(estimated),
+		EstimatedWPos: estimatedWorkPosition(estimated, st),
+		Delta:         delta,
+		Lead: Axes{
+			X: target["x"] - leadFrom["x"],
+			Y: target["y"] - leadFrom["y"],
+			Z: target["z"] - leadFrom["z"],
+		},
+		QueueLeadMs: queuedLead.Milliseconds(),
+		Command:     cmd,
+	}
+}
+
+func statusQueryTimeout(cfg Config) time.Duration {
+	cfg = cfg.normalize()
+	timeout := 2 * cfg.StatusInterval
+	if timeout < 100*time.Millisecond {
+		timeout = 100 * time.Millisecond
+	}
+	if timeout > 250*time.Millisecond {
+		timeout = 250 * time.Millisecond
+	}
+	return timeout
+}
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+func (s *Session) emitStatusWaiting(now time.Time) {
+	s.mu.Lock()
+	last := s.lastStatusWait
+	if !last.IsZero() && now.Sub(last) < statusWaitGap {
+		s.mu.Unlock()
+		return
+	}
+	s.lastStatusWait = now
+	s.mu.Unlock()
+	s.emit(Event{Type: "error", Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before continuing jog."})
+}
+
+func (s *Session) emitMotionEstimate(now time.Time, st machine.Status, target machine.AxisValues, delta Axes, cmd string, queuedLead time.Duration) {
+	s.mu.Lock()
+	s.segments = trimPlannedSegments(s.segments, now)
+	estimated := estimateFromSegments(s.segments, now, target)
+	s.mu.Unlock()
+	if target == nil {
+		target = estimated
+	}
+	if target == nil && estimated == nil {
+		return
+	}
+	s.emitMotion(now, motionEvent(target, st.MPos, estimated, delta, cmd, queuedLead, st))
+}
+
+func (s *Session) emitMotion(now time.Time, ev *MotionEvent) {
+	s.mu.Lock()
+	last := s.lastMotionEvent
+	if !last.IsZero() && now.Sub(last) < motionEventGap {
+		s.mu.Unlock()
+		return
+	}
+	s.lastMotionEvent = now
+	s.mu.Unlock()
+	s.emit(Event{Type: "motion", Motion: ev})
 }
 
 func (s *Session) logMotion(now time.Time, cmd string) {
@@ -747,13 +1173,22 @@ func (s *Session) release(err error) {
 	s.mu.Lock()
 	lease := s.lease
 	s.lease = nil
+	if lease != nil {
+		s.leaseID++
+	}
 	s.armed = false
+	s.statusInFlight = false
 	s.planned = nil
+	s.queuedUntil = time.Time{}
+	s.segments = nil
 	s.lastMotionCmd = ""
+	s.lastMotionEvent = time.Time{}
+	s.lastStatusWait = time.Time{}
 	s.lastAlarmRaw = ""
 	s.lastMotionLog = time.Time{}
 	s.mu.Unlock()
 	if lease != nil {
+		s.statusWG.Wait()
 		lease.Release(err)
 	}
 }
