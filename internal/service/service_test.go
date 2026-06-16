@@ -102,14 +102,130 @@ func TestDeleteAndRenameRequireExisting(t *testing.T) {
 	if err := svc.Rename("nope.nc", "x.nc"); err != ErrNotFound {
 		t.Errorf("rename missing = %v, want ErrNotFound", err)
 	}
+}
 
-	svc.Upload("a.nc", bytes.NewReader([]byte("x")))
-	if err := svc.Delete("a.nc"); err != nil {
-		t.Errorf("delete existing: %v", err)
+func TestDeletePendingUploadDiscardsLocalEntry(t *testing.T) {
+	svc, st := newService(t)
+	entry, err := svc.Upload("a.nc", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatal(err)
 	}
-	e, _ := svc.store.GetEntry("/sd/gcodes/a.nc")
+	if err := svc.Delete("a.nc"); err != nil {
+		t.Fatalf("delete pending upload: %v", err)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/a.nc"); ok {
+		t.Fatal("pending upload entry should be removed locally")
+	}
+	jobs := st.ListJobs()
+	if len(jobs) != 1 || jobs[0].State != store.Done {
+		t.Fatalf("upload job = %+v, want done", jobs)
+	}
+	if _, err := os.Stat(entry.CachePath); !os.IsNotExist(err) {
+		t.Fatalf("cache stat = %v, want removed", err)
+	}
+}
+
+func TestDeleteFailedUploadDiscardsLocalEntry(t *testing.T) {
+	svc, st := newService(t)
+	entry, err := svc.Upload("bad.nc", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/bad.nc", store.Error, "upload failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete("bad.nc"); err != nil {
+		t.Fatalf("delete failed upload: %v", err)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/bad.nc"); ok {
+		t.Fatal("failed upload entry should be removed locally")
+	}
+	jobs := st.ListJobs()
+	if len(jobs) != 1 || jobs[0].State != store.Done || jobs[0].LastError != "" {
+		t.Fatalf("failed upload job = %+v, want done without error", jobs)
+	}
+	if _, err := os.Stat(entry.CachePath); !os.IsNotExist(err) {
+		t.Fatalf("cache stat = %v, want removed", err)
+	}
+}
+
+func TestRetryFailedUploadRestoresPendingState(t *testing.T) {
+	svc, st := newService(t)
+	entry, err := svc.Upload("retry.nc", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/retry.nc", store.Error, "upload failed"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := svc.RetryJob(1)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if job.State != store.Queued || job.Attempts != 0 || job.LastError != "" {
+		t.Fatalf("retried job = %+v", job)
+	}
+	got, ok := st.GetEntry("/sd/gcodes/retry.nc")
+	if !ok || got.Sync != store.PendingUpload || got.Error != "" || got.CachePath != entry.CachePath {
+		t.Fatalf("entry after retry = %+v ok=%v", got, ok)
+	}
+}
+
+func TestDiscardLocalErrorClearsStaleFailedDelete(t *testing.T) {
+	svc, st := newService(t)
+	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/stale.nc", Sync: store.Error, Error: "delete failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enqueue(store.Job{Kind: store.JobDelete, Path: "/sd/gcodes/stale.nc"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "delete failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DiscardLocal("stale.nc"); err != nil {
+		t.Fatalf("discard local: %v", err)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/stale.nc"); ok {
+		t.Fatal("entry should be removed")
+	}
+	if got := st.ListJobs()[0]; got.State != store.Done || got.LastError != "" {
+		t.Fatalf("job after discard = %+v", got)
+	}
+}
+
+func TestDeleteSyncedEntryQueuesMachineDelete(t *testing.T) {
+	svc, st := newService(t)
+	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/a.nc", Sync: store.Synced}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete("a.nc"); err != nil {
+		t.Fatalf("delete synced: %v", err)
+	}
+	e, _ := st.GetEntry("/sd/gcodes/a.nc")
 	if e.Sync != store.PendingDelete {
 		t.Errorf("sync after delete = %q, want pending_delete", e.Sync)
+	}
+	jobs := st.ListJobs()
+	if len(jobs) != 1 || jobs[0].Kind != store.JobDelete || jobs[0].State != store.Queued {
+		t.Fatalf("delete job = %+v", jobs)
 	}
 }
 

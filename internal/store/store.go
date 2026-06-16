@@ -256,6 +256,20 @@ func (s *Store) GetEntry(path string) (Entry, bool) {
 	return *e, true
 }
 
+// GetJob returns a copy of a queued job by ID.
+func (s *Store) GetJob(id int64) (Job, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, j := range s.jobs {
+		if j.ID == id {
+			cp := *j
+			clearJobDiagnostics(&cp)
+			return cp, true
+		}
+	}
+	return Job{}, false
+}
+
 // DeleteEntry removes an entry from the catalog.
 func (s *Store) DeleteEntry(path string) error {
 	s.mu.Lock()
@@ -269,6 +283,47 @@ func (s *Store) DeleteEntry(path string) error {
 	}
 	s.publishLocked(Event{Kind: "entry", Entry: &Entry{Path: path, Sync: ""}})
 	return nil
+}
+
+// DiscardEntry removes a local catalog entry and marks matching queued/failed
+// jobs done in one persisted update. It is used when a desired local create
+// never reached the machine, so deletion is a local discard rather than a
+// machine-side rm.
+func (s *Store) DiscardEntry(path string, kinds ...JobKind) (Entry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[path]
+	if !ok {
+		return Entry{}, false, nil
+	}
+	entry := *e
+	delete(s.entries, path)
+
+	kindSet := map[JobKind]bool{}
+	for _, kind := range kinds {
+		kindSet[kind] = true
+	}
+	now := s.now()
+	var jobEvents []Job
+	for _, j := range s.jobs {
+		if j.Path != path || !kindSet[j.Kind] || (j.State != Queued && j.State != Failed) {
+			continue
+		}
+		j.State = Done
+		j.LastError = ""
+		j.UpdatedAt = now
+		jobEvents = append(jobEvents, *j)
+	}
+
+	if err := s.flushLocked(); err != nil {
+		return Entry{}, false, err
+	}
+	for i := range jobEvents {
+		cp := jobEvents[i]
+		s.publishLocked(Event{Kind: "job", Job: &cp})
+	}
+	s.publishLocked(Event{Kind: "entry", Entry: &Entry{Path: path, Sync: ""}})
+	return entry, true, nil
 }
 
 // ListEntries returns all entries sorted by path.
@@ -372,6 +427,32 @@ func (s *Store) UpdateJob(id int64, mutate func(*Job)) error {
 		}
 	}
 	return fmt.Errorf("store: job %d not found", id)
+}
+
+// RetryJob resets a failed job to queued so the sync engine will attempt it
+// again on the next drain pass.
+func (s *Store) RetryJob(id int64) (Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID != id {
+			continue
+		}
+		if j.State != Failed {
+			return *j, false, nil
+		}
+		j.State = Queued
+		j.Attempts = 0
+		j.LastError = ""
+		j.UpdatedAt = s.now()
+		if err := s.flushLocked(); err != nil {
+			return Job{}, false, err
+		}
+		cp := *j
+		s.publishLocked(Event{Kind: "job", Job: &cp})
+		return cp, true, nil
+	}
+	return Job{}, false, fmt.Errorf("store: job %d not found", id)
 }
 
 // ListJobs returns all jobs in queue order.

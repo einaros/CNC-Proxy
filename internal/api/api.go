@@ -67,6 +67,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/machine/status", s.getMachine)
 	mux.HandleFunc("GET /api/files", s.getFiles)
 	mux.HandleFunc("POST /api/files", s.postFile)
+	mux.HandleFunc("POST /api/files/retry", s.retryFileJob)
+	mux.HandleFunc("POST /api/files/discard", s.discardFile)
 	mux.HandleFunc("GET /api/files/", s.getFileContent)    // GET /api/files/{path...}
 	mux.HandleFunc("DELETE /api/files/", s.deleteFile)     // DELETE /api/files/{path...}
 	mux.HandleFunc("POST /api/files/rename", s.renameFile) // body: {from,to}
@@ -203,6 +205,43 @@ func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+func (s *Server) retryFileJob(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JobID int64 `json:"job_id"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	if body.JobID <= 0 {
+		writeErr(w, http.StatusBadRequest, "job_id required")
+		return
+	}
+	job, err := s.svc.RetryJob(body.JobID)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) discardFile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Path == "" {
+		writeErr(w, http.StatusBadRequest, "path required")
+		return
+	}
+	if err := s.svc.DiscardLocal(body.Path); err != nil {
+		s.mapError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func (s *Server) renameFile(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		From string `json:"from"`
@@ -240,6 +279,10 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 	case errors.Is(err, service.ErrNotCached):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrRecoveryUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrRetryUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrDiscardUnavailable):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrMachineStatusStale):
 		writeErr(w, http.StatusServiceUnavailable, err.Error())

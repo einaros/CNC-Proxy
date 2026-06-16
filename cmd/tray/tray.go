@@ -29,17 +29,41 @@ import (
 )
 
 var (
-	apiBase    = flag.String("api", "http://127.0.0.1:8420", "proxy API base URL")
-	authUser   = flag.String("auth-user", envDefault("CNC_AUTH_USER", "cnc"), "HTTP Basic Auth username")
-	authToken  = flag.String("auth-token", envDefault("CNC_AUTH_TOKEN", ""), "HTTP Basic Auth token/password")
-	poll       = flag.Duration("poll", 3*time.Second, "status poll interval")
-	configPath = flag.String("config", traymgr.DefaultConfigPath(), "tray manager config path")
-	explicit   = map[string]bool{}
+	apiBase               = flag.String("api", "http://127.0.0.1:8420", "proxy API base URL")
+	authUser              = flag.String("auth-user", envDefault("CNC_AUTH_USER", "cnc"), "HTTP Basic Auth username")
+	authToken             = flag.String("auth-token", envDefault("CNC_AUTH_TOKEN", ""), "HTTP Basic Auth token/password")
+	poll                  = flag.Duration("poll", 3*time.Second, "status poll interval")
+	configPath            = flag.String("config", traymgr.DefaultConfigPath(), "tray manager config path")
+	upgradeFinalize       = flag.Bool(traymgr.ManagerUpgradeFinalizeFlag, false, "finalize a staged tray manager upgrade")
+	upgradeStaged         = flag.String(traymgr.ManagerUpgradeStagedFlag, "", "staged tray manager binary")
+	upgradeTarget         = flag.String(traymgr.ManagerUpgradeTargetFlag, "", "installed tray manager binary to replace")
+	upgradeCleanup        = flag.String(traymgr.ManagerUpgradeCleanupFlag, "", "staged tray manager binary to remove after relaunch")
+	upgradeStartProxy     = flag.Bool(traymgr.ManagerUpgradeStartProxyFlag, false, "start the managed proxy after a tray manager upgrade")
+	upgradeInstallTimeout = flag.Duration(traymgr.ManagerUpgradeInstallTimeoutFlag, 45*time.Second, "tray manager upgrade install timeout")
+	explicit              = map[string]bool{}
 )
 
 func main() {
 	flag.Parse()
 	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	if *upgradeFinalize {
+		err := traymgr.FinalizeManagerUpgrade(context.Background(), traymgr.ManagerUpgradeFinalizeOptions{
+			StagedBinary:   *upgradeStaged,
+			TargetBinary:   *upgradeTarget,
+			ConfigPath:     *configPath,
+			StartProxy:     *upgradeStartProxy,
+			InstallTimeout: *upgradeInstallTimeout,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "manager upgrade:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *upgradeCleanup != "" {
+		cleanup := *upgradeCleanup
+		time.AfterFunc(3*time.Second, func() { _ = os.Remove(cleanup) })
+	}
 	systray.Run(onReady, func() {})
 }
 
@@ -57,6 +81,7 @@ func onReady() {
 	mProc.Disable()
 	systray.AddSeparator()
 	mOpen := systray.AddMenuItem("Open Web UI", "Open the proxy web UI in a browser")
+	mMount := systray.AddMenuItem("Mount WebDAV", "Mount the WebDAV file view")
 	mManager := systray.AddMenuItem("Open Manager", "Open the tray manager configuration UI")
 	systray.AddSeparator()
 	mStart := systray.AddMenuItem("Start Proxy", "Start the managed cnc-proxy process")
@@ -66,15 +91,31 @@ func onReady() {
 	mQuit := systray.AddMenuItem("Quit", "Quit the tray app")
 
 	ctx, cancel := context.WithCancel(context.Background())
+	appErrCh := make(chan error, 1)
+	managerExitCh := make(chan struct{}, 1)
+	mountDone := make(chan webDAVMountResult, 1)
 	app, err := traymgr.NewApp(*configPath, traymgr.OSNotifier{})
 	if err != nil {
 		systray.SetTitle("CNC ⚠")
 		mState.SetTitle("Manager error: " + err.Error())
+		updateMountItem(app, mMount)
 	} else {
+		app.Server.SetManagerProcessExit(func() {
+			select {
+			case managerExitCh <- struct{}{}:
+			default:
+			}
+		})
+		if *upgradeStartProxy {
+			_ = app.Supervisor.Start()
+		}
+		updateMountItem(app, mMount)
 		go func() {
 			if err := app.Run(ctx); err != nil {
-				systray.SetTitle("CNC ⚠")
-				mState.SetTitle("Manager stopped: " + err.Error())
+				select {
+				case appErrCh <- err:
+				case <-ctx.Done():
+				}
 			}
 		}()
 	}
@@ -82,18 +123,69 @@ func onReady() {
 	go func() {
 		ticker := time.NewTicker(*poll)
 		defer ticker.Stop()
+		mountBusy := false
+		beginMountSet := func(enable bool) {
+			if app == nil || mountBusy {
+				return
+			}
+			mountBusy = true
+			mMount.Disable()
+			if enable {
+				mMount.SetTitle("Mounting WebDAV…")
+			} else {
+				mMount.SetTitle("Unmounting WebDAV…")
+			}
+			go runWebDAVMountSet(ctx, app, enable, mountDone)
+		}
+		beginRemount := func() {
+			if app == nil || mountBusy || !app.Supervisor.Config().WebDAVMount.Enabled {
+				return
+			}
+			mountBusy = true
+			mMount.Disable()
+			mMount.SetTitle("Mounting WebDAV…")
+			go runWebDAVRemount(ctx, app, mountDone)
+		}
 		update(app, mState, mSync, mProc)
+		updateMountItem(app, mMount)
 		for {
 			select {
 			case <-ticker.C:
 				update(app, mState, mSync, mProc)
+				if !mountBusy {
+					updateMountItem(app, mMount)
+				}
+			case err := <-appErrCh:
+				cancel()
+				systray.SetTitle("CNC ⚠")
+				mState.SetTitle("Manager stopped: " + err.Error())
+			case <-managerExitCh:
+				cancel()
+				systray.Quit()
+				time.AfterFunc(2*time.Second, func() { os.Exit(0) })
+				return
+			case <-mountDone:
+				mountBusy = false
+				updateMountItem(app, mMount)
 			case <-mOpen.ClickedCh:
 				openBrowser(currentAPIBase(app))
+			case <-mMount.ClickedCh:
+				if app != nil && !mountBusy {
+					statusCtx, statusCancel := context.WithTimeout(context.Background(), 3*time.Second)
+					status := app.WebDAVMountStatus(statusCtx)
+					statusCancel()
+					if status.Busy {
+						updateMountItem(app, mMount)
+						continue
+					}
+					beginMountSet(!status.Mounted)
+				}
 			case <-mManager.ClickedCh:
 				openBrowser(managerURL(app))
 			case <-mStart.ClickedCh:
 				if app != nil {
 					_ = app.Supervisor.Start()
+					beginRemount()
 					update(app, mState, mSync, mProc)
 				}
 			case <-mRestart.ClickedCh:
@@ -101,6 +193,7 @@ func onReady() {
 					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 					_ = app.Supervisor.Restart(ctx)
 					cancel()
+					beginRemount()
 					update(app, mState, mSync, mProc)
 				}
 			case <-mStop.ClickedCh:
@@ -117,6 +210,67 @@ func onReady() {
 			}
 		}
 	}()
+}
+
+type webDAVMountResult struct{}
+
+func runWebDAVMountSet(parent context.Context, app *traymgr.App, enable bool, done chan<- webDAVMountResult) {
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
+	err := app.SetWebDAVMountEnabled(ctx, enable)
+	cancel()
+	sendWebDAVMountDone(done, err)
+}
+
+func runWebDAVRemount(parent context.Context, app *traymgr.App, done chan<- webDAVMountResult) {
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
+	err := app.RemountWebDAV(ctx)
+	cancel()
+	sendWebDAVMountDone(done, err)
+}
+
+func sendWebDAVMountDone(done chan<- webDAVMountResult, _ error) {
+	select {
+	case done <- webDAVMountResult{}:
+	default:
+	}
+}
+
+func updateMountItem(app *traymgr.App, item *systray.MenuItem) {
+	if app == nil {
+		item.Disable()
+		return
+	}
+	if !traymgr.WebDAVMountSupported() {
+		item.SetTitle("Mount WebDAV: unsupported")
+		item.Disable()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	status := app.WebDAVMountStatus(ctx)
+	cancel()
+	if status.Busy {
+		item.SetTitle("Mounting WebDAV…")
+		item.Disable()
+		return
+	}
+	if status.Error != "" {
+		switch status.ErrorAction {
+		case "unmount":
+			item.SetTitle("WebDAV Unmount Failed")
+		default:
+			item.SetTitle("WebDAV Mount Failed")
+		}
+		item.Enable()
+		return
+	}
+	if status.Mounted {
+		item.SetTitle("Unmount WebDAV")
+	} else if status.Desired {
+		item.SetTitle("Retry WebDAV Mount")
+	} else {
+		item.SetTitle("Mount WebDAV")
+	}
+	item.Enable()
 }
 
 func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem) {

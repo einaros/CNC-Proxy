@@ -265,13 +265,19 @@ Tray manager endpoints:
 - `POST /api/manager/restart` restarts only the manager HTTP listener inside the tray app.
 - `POST /api/notify` with JSON `{"title":"CNC Proxy","message":"...","level":"info|warning|error"}` shows a tray/Windows notification.
 - `POST /api/proxy/start|stop|restart|build` controls the supervised proxy.
-- `POST /api/deploy` accepts a source zip, builds in `source_dir`, and restarts the proxy unless `?restart=false`.
+- `POST /api/deploy` accepts a source zip, builds in `source_dir`, and restarts the proxy unless `?restart=false`. Add `?component=manager` to upgrade only the tray manager app, or `?component=all` to build both proxy and manager.
 
 Send deployments from a development machine with:
 
 ```sh
 go build -mod=mod -o deploy ./cmd/deploy
 deploy -target http://192.168.1.50:8430 -token "$CNC_TRAY_TOKEN" -source .
+```
+
+To deploy source and upgrade the tray manager app in the same pass:
+
+```sh
+deploy -target http://192.168.1.50:8430 -token "$CNC_TRAY_TOKEN" -source . -component all
 ```
 
 ### Build A Windows Installer From macOS
@@ -306,14 +312,18 @@ deploy -target http://<target-ip>:8430 -token "<printed-token>" -source .
 
 The installer includes the initial Windows `cnc-proxy.exe` and `cnc-tray.exe`.
 Later source-code deployments run the tray manager's `build_command` on the
-target PC, so the target must have Go available in `PATH` unless you change the
-manager build command to a site-specific updater.
+target PC for `cnc-proxy.exe`, so the target must have Go available in `PATH`
+unless you change the manager build command to a site-specific updater.
 
-Remote source deployments rebuild and restart `cnc-proxy.exe`; they do not
-replace the tray manager that receives the deployment. Tray/manager fixes
-therefore require running a newly built `cnc-proxy-installer.exe` on the target
-PC. If Windows keeps the existing tray executable locked, exit the tray app
-before rerunning the installer.
+Remote source deployments can also replace the tray manager that receives the
+deployment. Use `deploy ... -component all` to build both binaries, or
+`deploy ... -manager` as a shortcut. Use `deploy ... -component manager` /
+`-manager-only` to upgrade only `cnc-tray.exe`.
+The manager build uses `go build -mod=mod -tags tray ./cmd/tray` on the target
+PC, so Windows targets also need whatever local Go/cgo toolchain is required to
+build the tray app. The running tray app launches the staged new binary as a
+finalizer, exits, and the finalizer replaces and relaunches the installed tray
+app after Windows releases the old executable.
 
 The manager-owned Windows proxy build is staged beside the installed binary,
 then promoted after a successful compile. It also builds the proxy with the

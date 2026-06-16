@@ -23,10 +23,18 @@
   .state-Run, .state-Hold, .state-Home, .state-Sleep { background: rgba(217,154,58,.16); color: var(--warn); }
   .state-Alarm { background: rgba(232,106,95,.16); color: var(--err); }
   .state-Unknown, .state- { background: rgba(145,160,174,.15); color: var(--muted); }
-  main { padding: 18px 20px 28px; max-width: 1280px; margin: 0 auto; }
-  #notice { margin-bottom: 12px; border: 1px solid var(--border); padding: 8px 10px; border-radius: var(--radius); background: var(--panel); }
-  #notice.ok { border-color: rgba(68,194,123,.45); color: var(--ok); }
-  #notice.error { border-color: rgba(232,106,95,.5); color: var(--err); }
+  main { padding: 18px 20px 76px; max-width: 1280px; margin: 0 auto; }
+  #status-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; display: flex; gap: 10px; align-items: flex-end; padding: 8px 20px calc(8px + env(safe-area-inset-bottom)); background: rgba(16,19,22,.96); border-top: 1px solid var(--border); box-shadow: 0 -10px 24px rgba(0,0,0,.22); }
+  #status-bar[hidden] { display: none !important; }
+  #notice { flex: 1; min-width: 0; display: grid; gap: 5px; max-height: 30vh; overflow: auto; }
+  .status-item { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--muted); }
+  .status-item .status-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  .status-item .status-text { min-width: 0; overflow-wrap: anywhere; }
+  .status-item.ok { border-color: rgba(68,194,123,.45); color: var(--ok); }
+  .status-item.ok .status-dot { background: var(--ok); }
+  .status-item.error { border-color: rgba(232,106,95,.5); color: var(--err); }
+  .status-item.error .status-dot { background: var(--err); }
+  #notice-clear { flex: 0 0 auto; }
   .tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
   .tab { border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; padding: 7px 12px; }
   .tab.active { color: var(--accent); border-color: var(--accent); background: var(--panel); }
@@ -60,17 +68,22 @@
   table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   th { color: var(--muted); font-size: 12px; font-weight: 600; }
-  .path-cell { min-width: 260px; }
+  .path-cell { min-width: 0; overflow-wrap: anywhere; }
   .name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .num { text-align: right; white-space: nowrap; }
   .muted { color: var(--muted); }
   .err { color: var(--err); font-size: 12px; }
-  .actions { display: flex; justify-content: flex-end; gap: 6px; white-space: nowrap; }
+  .actions { text-align: right; white-space: normal; }
+  .actions > * { margin: 2px 0 2px 6px; vertical-align: middle; }
+  .actions > :first-child { margin-left: 0; }
+  .actions button, .actions a { max-width: 100%; }
   button, .actions a { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 10px; cursor: pointer; font-size: 13px; text-decoration: none; }
   button:hover, .actions a:hover { border-color: var(--accent); }
   button:focus-visible, .actions a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   .sync { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+  .status-cell { overflow-wrap: anywhere; }
+  .status-cell .sync { white-space: normal; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .s-synced .dot { background: var(--ok); }
   .s-uploading .dot, .s-pending_upload .dot, .s-deleting .dot, .s-pending_delete .dot, .s-pending_rename .dot { background: var(--warn); animation: pulse 1.2s infinite; }
@@ -78,10 +91,19 @@
   .s-remote_only .dot, .s-local_only .dot { background: var(--pending); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   .empty { color: var(--muted); padding: 18px; text-align: center; background: var(--panel); border: 1px solid var(--border); border-top: 0; }
-  #jobs { background: var(--panel); border: 1px solid var(--border); }
-  .job { display: grid; grid-template-columns: 80px minmax(220px, 1fr) 170px minmax(180px, auto); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
+  #jobs { width: 100%; background: var(--panel); border: 1px solid var(--border); overflow: hidden; }
+  .jobs-head, .job { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(120px, .42fr) minmax(280px, 1.25fr); gap: 12px; align-items: start; }
+  .jobs-head { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 600; }
+  .job { padding: 10px; border-bottom: 1px solid var(--border); }
   .job:last-child { border-bottom: 0; }
-  .job-kind { color: var(--accent); font-weight: 650; }
+  .job-main { min-width: 0; display: grid; gap: 3px; }
+  .job-kind { color: var(--accent); font-weight: 650; text-transform: capitalize; }
+  .job .name { min-width: 0; overflow-wrap: anywhere; }
+  .job-status { color: var(--muted); white-space: nowrap; }
+  .job-detail { min-width: 0; display: grid; gap: 4px; align-content: start; justify-items: start; }
+  .job-message { font-weight: 650; overflow-wrap: anywhere; }
+  .job-error { color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
+  .job-recovery { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   #run-history { background: var(--panel); border: 1px solid var(--border); }
   .run-row { display: grid; grid-template-columns: minmax(180px, 1fr) 120px 120px minmax(220px, 1.4fr); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
   .run-row:last-child { border-bottom: 0; }
@@ -171,17 +193,37 @@
   .crumb-sep { color: var(--muted); }
   #folder-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
   #current-folder { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .file-name { display: inline; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
+  .file-name { display: inline; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; overflow-wrap: anywhere; }
   .file-name:hover { color: var(--accent); border: 0; }
   .folder-name { color: var(--accent); font-weight: 650; }
   .table-scroll { overflow-x: auto; border: 1px solid var(--border); background: var(--panel); }
-  .table-scroll table { border: 0; min-width: 780px; }
+  .table-scroll table { border: 0; min-width: 0; table-layout: fixed; }
+  .file-col-name { width: auto; }
+  .file-col-type { width: 8%; }
+  .file-col-size { width: 12%; }
+  .file-col-modified { width: 18%; }
+  .file-col-status { width: 13%; }
+  .file-col-actions { width: 28%; }
+  @media (max-width: 1040px) {
+    .file-col-modified, th:nth-child(4), td:nth-child(4) { display: none; }
+    .file-col-actions { width: 32%; }
+    .file-col-status { width: 15%; }
+  }
+  @media (max-width: 880px) {
+    #file-browser { grid-template-columns: 1fr; }
+    .file-col-type, th:nth-child(2), td:nth-child(2) { display: none; }
+    .file-col-actions { width: 34%; }
+    .file-col-status { width: 16%; }
+  }
   @media (max-width: 760px) {
     header { display: grid; }
     header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .jog-body { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     input[type="search"] { width: 100%; }
-    th:nth-child(4), td:nth-child(4) { display: none; }
+    th:nth-child(3), td:nth-child(3) { display: none; }
+    .file-col-actions { width: 38%; }
+    .file-col-status { width: 22%; }
+    .jobs-head { display: none; }
     .job, .run-row { grid-template-columns: 1fr; gap: 3px; }
     #alarm-panel { grid-template-columns: 1fr; }
     #alarm-actions { justify-content: stretch; }
@@ -191,6 +233,8 @@
     #file-browser { grid-template-columns: 1fr; }
     #folder-bar { align-items: stretch; display: grid; }
     #folder-actions { justify-content: stretch; }
+    #status-bar { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); align-items: stretch; }
+    #notice-clear { align-self: flex-start; }
   }
 </style>
 </head>
@@ -205,7 +249,6 @@
   </div>
 </header>
 <main>
-  <div id="notice" hidden></div>
   <nav class="tabs" aria-label="Views">
     <button type="button" id="tab-control" class="tab active">Control</button>
     <button type="button" id="tab-files" class="tab">Files</button>
@@ -413,7 +456,15 @@
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Name</th><th>Type</th><th class="num">Size / Items</th><th>Modified</th><th>Status</th><th></th></tr></thead>
+            <colgroup>
+              <col class="file-col-name">
+              <col class="file-col-type">
+              <col class="file-col-size">
+              <col class="file-col-modified">
+              <col class="file-col-status">
+              <col class="file-col-actions">
+            </colgroup>
+            <thead><tr><th>Name</th><th>Type</th><th class="num">Size / Items</th><th>Modified</th><th>Status</th><th class="actions">Actions</th></tr></thead>
             <tbody id="files"></tbody>
           </table>
         </div>
@@ -433,6 +484,10 @@
     </div>
   </section>
 </main>
+<div id="status-bar" role="status" aria-live="polite" hidden>
+  <div id="notice"></div>
+  <button type="button" id="notice-clear">Dismiss</button>
+</div>
 <script src="/app.js?v=jog-stream-1"></script>
 </body>
 </html>

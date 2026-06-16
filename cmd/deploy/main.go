@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,21 @@ func main() {
 	target := flag.String("target", "http://127.0.0.1:8430", "tray manager URL, e.g. http://192.168.1.50:8430")
 	token := flag.String("token", envDefault("CNC_TRAY_TOKEN", ""), "tray manager admin token")
 	restart := flag.Bool("restart", true, "restart proxy after deployment")
+	component := flag.String("component", "proxy", "deployment component: proxy, manager, or all")
+	manager := flag.Bool("manager", false, "also upgrade the tray manager app (same as -component all)")
+	managerOnly := flag.Bool("manager-only", false, "upgrade only the tray manager app (same as -component manager)")
 	flag.Parse()
+	selectedComponent := strings.ToLower(strings.TrimSpace(*component))
+	if *manager {
+		selectedComponent = "all"
+	}
+	if *managerOnly {
+		selectedComponent = "manager"
+	}
+	if err := validateComponent(selectedComponent); err != nil {
+		fmt.Fprintln(os.Stderr, "deploy:", err)
+		os.Exit(1)
+	}
 
 	zipPath, err := zipSource(*source)
 	if err != nil {
@@ -29,12 +44,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer os.Remove(zipPath)
-	res, err := upload(*target, *token, *restart, zipPath)
+	res, err := upload(*target, *token, *restart, selectedComponent, zipPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "deploy:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("deployment completed: source=%s backup=%s restarted=%v\n", res.Result.SourceDir, res.Result.BackupDir, res.Result.Restarted)
+	if res.Result.ManagerUpgrade != nil {
+		fmt.Printf("manager upgrade scheduled: target=%s proxy_start_on_relaunch=%v\n", res.Result.ManagerUpgrade.TargetBinary, res.Result.ManagerUpgrade.ProxyStartOnRelaunch)
+		if res.Result.ManagerUpgrade.ProxyStartOnRelaunch {
+			fmt.Println("proxy restart deferred until the upgraded manager relaunches")
+		}
+	}
 }
 
 func zipSource(source string) (string, error) {
@@ -119,18 +140,32 @@ func shouldSkip(rel string, d os.DirEntry) bool {
 type deployResponse struct {
 	OK     bool `json:"ok"`
 	Result struct {
-		SourceDir string `json:"source_dir"`
-		BackupDir string `json:"backup_dir"`
-		BuildLog  string `json:"build_log"`
-		Restarted bool   `json:"restarted"`
+		SourceDir      string `json:"source_dir"`
+		BackupDir      string `json:"backup_dir"`
+		BuildLog       string `json:"build_log"`
+		Restarted      bool   `json:"restarted"`
+		ManagerUpgrade *struct {
+			TargetBinary         string `json:"target_binary"`
+			StagedBinary         string `json:"staged_binary"`
+			BuildLog             string `json:"build_log"`
+			RestartScheduled     bool   `json:"restart_scheduled"`
+			ProxyStartOnRelaunch bool   `json:"proxy_start_on_relaunch"`
+		} `json:"manager_upgrade"`
 	} `json:"result"`
 	Error string `json:"error"`
 }
 
-func upload(target, token string, restart bool, zipPath string) (deployResponse, error) {
+func upload(target, token string, restart bool, component, zipPath string) (deployResponse, error) {
 	u := strings.TrimRight(target, "/") + "/api/deploy"
+	q := url.Values{}
 	if !restart {
-		u += "?restart=false"
+		q.Set("restart", "false")
+	}
+	if component != "" && component != "proxy" {
+		q.Set("component", component)
+	}
+	if encoded := q.Encode(); encoded != "" {
+		u += "?" + encoded
 	}
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -184,6 +219,15 @@ func upload(target, token string, restart bool, zipPath string) (deployResponse,
 		return out, fmt.Errorf("status %d: %s", resp.StatusCode, out.Error)
 	}
 	return out, nil
+}
+
+func validateComponent(component string) error {
+	switch component {
+	case "proxy", "manager", "tray", "all", "both":
+		return nil
+	default:
+		return fmt.Errorf("component must be proxy, manager, or all")
+	}
 }
 
 func envDefault(name, fallback string) string {

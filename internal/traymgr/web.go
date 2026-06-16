@@ -65,7 +65,8 @@ pre { white-space:pre-wrap; max-height:260px; overflow:auto; border:1px solid va
     <div class="actions"><button class="primary" id="saveProxy">Save Proxy Settings</button></div>
   </section>
   <section>
-    <h2>Notifications</h2>
+    <h2>Manager Log</h2>
+    <div class="actions"><button class="danger" id="clearLog">Clear Log</button></div>
     <pre id="notifications"></pre>
   </section>
 </main>
@@ -192,13 +193,19 @@ async function refresh() {
   const data = await req("/api/config");
   cfg = data.config; options = data.options; optionSource = data.option_source || "manager fallback";
   renderConfig();
-  const st = await req("/api/status");
+  await refreshStatus();
+}
+function renderStatus(st) {
   const p = st.process;
   document.getElementById("status").textContent = p.running ? "Running PID " + p.pid : "Stopped";
   const urls = st.manager_urls || (st.manager_base ? [st.manager_base] : []);
   document.getElementById("managerStatus").textContent = "Listening: " + cfg.admin_listen + (urls.length ? " · URLs: " + urls.join(", ") : "") + " · Last manager restart: " + fmtTime(st.manager_restarted_at);
   document.getElementById("proxySchema").textContent = "Proxy fields loaded from: " + optionSource;
-  document.getElementById("notifications").textContent = (st.notifications || []).map(n => n.time + " " + (n.level || "info") + " " + n.title + ": " + n.message).join("\n");
+  document.getElementById("notifications").textContent = (st.manager_log || []).map(n => n.time + " " + (n.level || "info") + " " + (n.source || "manager") + ": " + n.message).join("\n");
+}
+async function refreshStatus() {
+  const st = await req("/api/status");
+  renderStatus(st);
 }
 async function action(path, msgEl) {
   const el = document.getElementById(msgEl);
@@ -245,11 +252,24 @@ document.getElementById("restartManager").onclick = async () => {
     waitForManagerRestart(el, r.manager_url);
   } catch (e) { el.textContent = e.message; el.className = "msg err"; }
 };
+document.getElementById("clearLog").onclick = async () => {
+  const button = document.getElementById("clearLog");
+  button.disabled = true;
+  try {
+    await req("/api/manager/log", {method:"DELETE"});
+    await refreshStatus();
+  } catch (e) {
+    document.getElementById("status").textContent = e.message;
+  } finally {
+    button.disabled = false;
+  }
+};
 document.getElementById("start").onclick = () => action("/api/proxy/start", "processMsg");
 document.getElementById("stop").onclick = () => action("/api/proxy/stop", "processMsg");
 document.getElementById("restart").onclick = () => action("/api/proxy/restart", "processMsg");
 document.getElementById("build").onclick = () => action("/api/proxy/build", "processMsg");
 refresh().catch(e => { document.getElementById("status").textContent = e.message; });
+setInterval(() => { if (cfg) refreshStatus().catch(e => { document.getElementById("status").textContent = e.message; }); }, 3000);
 </script>
 </body>
 </html>`

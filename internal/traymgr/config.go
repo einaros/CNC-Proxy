@@ -44,7 +44,14 @@ type Config struct {
 	AutoStart    bool              `json:"auto_start"`
 	AdminListen  string            `json:"admin_listen"`
 	AdminToken   string            `json:"admin_token"`
+	WebDAVMount  WebDAVMountConfig `json:"webdav_mount"`
 	Flags        map[string]string `json:"flags"`
+}
+
+type WebDAVMountConfig struct {
+	Enabled    bool   `json:"enabled"`
+	MountPoint string `json:"mount_point,omitempty"`
+	Drive      string `json:"drive,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -55,6 +62,7 @@ func DefaultConfig() Config {
 		AutoStart:    false,
 		AdminListen:  "127.0.0.1:8430",
 		AdminToken:   "",
+		WebDAVMount:  defaultWebDAVMountConfig(),
 		Flags:        map[string]string{},
 	}
 	for _, opt := range ProxyOptions {
@@ -173,6 +181,9 @@ func ValidateManagerConfig(cfg Config) error {
 	if !isLoopbackBind(cfg.AdminListen) && strings.TrimSpace(cfg.AdminToken) == "" {
 		return errors.New("manager listener beyond loopback requires manager token")
 	}
+	if err := validateWebDAVMountConfig(cfg.WebDAVMount); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -217,6 +228,22 @@ func APIBase(cfg Config) string {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+func WebDAVBase(cfg Config) string {
+	cfg = normalizeConfig(cfg)
+	addr := cfg.Flags["dav-addr"]
+	if strings.TrimSpace(addr) == "" {
+		addr = "127.0.0.1:8421"
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr + "/"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
 }
 
 func ManagerBase(cfg Config) string {
@@ -296,6 +323,7 @@ func normalizeConfigWithOptions(cfg Config, options []ProxyOption) Config {
 	if cfg.AdminListen == "" {
 		cfg.AdminListen = def.AdminListen
 	}
+	cfg.WebDAVMount = normalizeWebDAVMountConfig(cfg.WebDAVMount)
 	if cfg.Flags == nil {
 		cfg.Flags = map[string]string{}
 	}
@@ -492,6 +520,39 @@ func validateListenAddr(addr string) error {
 	p, err := strconv.Atoi(port)
 	if err != nil || p <= 0 || p > 65535 {
 		return fmt.Errorf("manager listen port must be between 1 and 65535: %q", port)
+	}
+	return nil
+}
+
+func defaultWebDAVMountConfig() WebDAVMountConfig {
+	return WebDAVMountConfig{
+		Enabled:    false,
+		MountPoint: defaultWebDAVMountPoint(),
+		Drive:      defaultWebDAVDrive(),
+	}
+}
+
+func normalizeWebDAVMountConfig(cfg WebDAVMountConfig) WebDAVMountConfig {
+	if strings.TrimSpace(cfg.MountPoint) == "" {
+		cfg.MountPoint = defaultWebDAVMountPoint()
+	}
+	if strings.TrimSpace(cfg.Drive) == "" {
+		cfg.Drive = defaultWebDAVDrive()
+	}
+	cfg.MountPoint = strings.TrimSpace(cfg.MountPoint)
+	cfg.Drive = strings.ToUpper(strings.TrimSpace(cfg.Drive))
+	return cfg
+}
+
+func validateWebDAVMountConfig(cfg WebDAVMountConfig) error {
+	cfg = normalizeWebDAVMountConfig(cfg)
+	if strings.ContainsRune(cfg.MountPoint, 0) {
+		return errors.New("webdav mount point contains an invalid character")
+	}
+	if cfg.Drive != "" {
+		if cfg.Drive != "*" && (len(cfg.Drive) != 2 || cfg.Drive[1] != ':' || cfg.Drive[0] < 'A' || cfg.Drive[0] > 'Z') {
+			return errors.New("webdav drive must be * or a Windows drive letter like Z:")
+		}
 	}
 	return nil
 }

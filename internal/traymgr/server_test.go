@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,6 +64,71 @@ func TestServerNotifyRequiresTokenAndRecordsNotification(t *testing.T) {
 	}
 }
 
+func TestManagerLogPersistsAndIsReturnedByStatus(t *testing.T) {
+	cfg := DefaultConfig()
+	configPath := filepath.Join(t.TempDir(), "tray.json")
+	srv := NewServer(configPath, NewSupervisor(cfg, ""), nil)
+	srv.addManagerLog("info", "webdav", "mount requested target=url=http://127.0.0.1:8430/webdav/ drive=*")
+
+	reloaded := NewServer(configPath, NewSupervisor(cfg, ""), nil)
+	got := reloaded.recentManagerLog()
+	if len(got) != 1 {
+		t.Fatalf("loaded manager log = %+v, want one entry", got)
+	}
+	if got[0].Source != "webdav" || got[0].Message != "mount requested target=url=http://127.0.0.1:8430/webdav/ drive=*" {
+		t.Fatalf("loaded manager log entry = %+v", got[0])
+	}
+
+	ts := httptest.NewServer(reloaded.Handler())
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/status status = %d", resp.StatusCode)
+	}
+	var body struct {
+		ManagerLog []ManagerLogEntry `json:"manager_log"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.ManagerLog) != 1 || body.ManagerLog[0].Source != "webdav" {
+		t.Fatalf("status manager_log = %+v", body.ManagerLog)
+	}
+}
+
+func TestManagerLogCanBeCleared(t *testing.T) {
+	cfg := DefaultConfig()
+	configPath := filepath.Join(t.TempDir(), "tray.json")
+	srv := NewServer(configPath, NewSupervisor(cfg, ""), nil)
+	srv.addManagerLog("error", "webdav", "mount failed")
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/manager/log", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE /api/manager/log status = %d", resp.StatusCode)
+	}
+	if got := srv.recentManagerLog(); len(got) != 0 {
+		t.Fatalf("recent manager log = %+v, want empty", got)
+	}
+	reloaded := NewServer(configPath, NewSupervisor(cfg, ""), nil)
+	if got := reloaded.recentManagerLog(); len(got) != 0 {
+		t.Fatalf("reloaded manager log = %+v, want empty", got)
+	}
+}
+
 func TestServerPutConfigPersistsAndUpdatesSupervisor(t *testing.T) {
 	cfg := DefaultConfig()
 	configPath := filepath.Join(t.TempDir(), "tray.json")
@@ -88,6 +155,62 @@ func TestServerPutConfigPersistsAndUpdatesSupervisor(t *testing.T) {
 	}
 	if loaded.Flags["name"] != "Shop CNC" || sup.Config().Flags["name"] != "Shop CNC" {
 		t.Fatalf("config was not persisted/applied: loaded=%q supervisor=%q", loaded.Flags["name"], sup.Config().Flags["name"])
+	}
+}
+
+func TestLocalWebDAVProxyInjectsConfiguredAuth(t *testing.T) {
+	var gotPath, gotAuth, gotDestination string
+	dav := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotDestination = r.Header.Get("Destination")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer dav.Close()
+
+	cfg := DefaultConfig()
+	cfg.Flags["dav-addr"] = strings.TrimPrefix(dav.URL, "http://")
+	cfg.Flags["auth-user"] = "operator"
+	cfg.Flags["auth-token"] = "secret"
+	srv := NewServer(filepath.Join(t.TempDir(), "tray.json"), NewSupervisor(cfg, ""), nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/webdav/jobs/test.nc", strings.NewReader("gcode"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Destination", ts.URL+"/webdav/jobs/renamed.nc")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("proxy status = %d", resp.StatusCode)
+	}
+	if gotPath != "/jobs/test.nc" {
+		t.Fatalf("proxied path = %q, want /jobs/test.nc", gotPath)
+	}
+	if gotAuth != "Basic b3BlcmF0b3I6c2VjcmV0" {
+		t.Fatalf("proxied auth = %q", gotAuth)
+	}
+	wantDestination := dav.URL + "/jobs/renamed.nc"
+	if gotDestination != wantDestination {
+		t.Fatalf("proxied Destination = %q, want %q", gotDestination, wantDestination)
+	}
+}
+
+func TestRequestFromLoopbackRejectsRemoteAddress(t *testing.T) {
+	if !requestFromLoopback(&http.Request{RemoteAddr: "127.0.0.1:12345"}) {
+		t.Fatal("loopback IPv4 request was rejected")
+	}
+	if !requestFromLoopback(&http.Request{RemoteAddr: "[::1]:12345"}) {
+		t.Fatal("loopback IPv6 request was rejected")
+	}
+	if requestFromLoopback(&http.Request{RemoteAddr: "192.168.1.20:12345"}) {
+		t.Fatal("remote IPv4 request was accepted")
 	}
 }
 

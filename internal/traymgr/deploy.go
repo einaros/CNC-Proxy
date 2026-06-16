@@ -13,35 +13,96 @@ import (
 )
 
 type DeployResult struct {
-	SourceDir string `json:"source_dir"`
-	BackupDir string `json:"backup_dir,omitempty"`
-	BuildLog  string `json:"build_log,omitempty"`
-	Restarted bool   `json:"restarted"`
+	SourceDir      string                `json:"source_dir"`
+	BackupDir      string                `json:"backup_dir,omitempty"`
+	BuildLog       string                `json:"build_log,omitempty"`
+	Restarted      bool                  `json:"restarted"`
+	ManagerUpgrade *ManagerUpgradeResult `json:"manager_upgrade,omitempty"`
+}
+
+type DeployOptions struct {
+	BuildProxy    bool
+	BuildManager  bool
+	RestartProxy  bool
+	ManagerBinary string
 }
 
 func (s *Supervisor) DeployZip(ctx context.Context, zipPath string, restart bool) (DeployResult, error) {
-	cfg := s.Config()
-	if strings.TrimSpace(cfg.SourceDir) == "" {
-		return DeployResult{}, errors.New("source_dir must be set before deployment")
+	return s.DeployZipWithOptions(ctx, zipPath, DeployOptions{BuildProxy: true, RestartProxy: restart})
+}
+
+func (s *Supervisor) DeployZipWithOptions(ctx context.Context, zipPath string, opts DeployOptions) (DeployResult, error) {
+	if !opts.BuildProxy && !opts.BuildManager {
+		return DeployResult{}, errors.New("at least one deployment component must be selected")
 	}
-	sourceDir, err := filepath.Abs(cfg.SourceDir)
+	result, wasRunning, err := s.installSourceZip(ctx, zipPath)
 	if err != nil {
 		return DeployResult{}, err
 	}
+
+	rollback := func() {
+		rollbackSourceDeployment(result)
+		if wasRunning {
+			_ = s.Start()
+		}
+	}
+
+	if opts.BuildManager {
+		manager, err := s.BuildManager(ctx, opts.ManagerBinary)
+		result.ManagerUpgrade = &manager
+		if err != nil {
+			rollback()
+			return result, err
+		}
+	}
+
+	if opts.BuildProxy {
+		buildLog, buildErr := s.Build(ctx)
+		result.BuildLog = buildLog
+		if buildErr != nil {
+			cleanupManagerUpgrade(result.ManagerUpgrade)
+			rollback()
+			return result, buildErr
+		}
+	}
+
+	restartProxy := opts.RestartProxy || wasRunning
+	if opts.BuildManager {
+		result.ManagerUpgrade.ProxyStartOnRelaunch = restartProxy
+		return result, nil
+	}
+	if restartProxy {
+		if err := s.Start(); err != nil {
+			return result, err
+		}
+		result.Restarted = true
+	}
+	return result, nil
+}
+
+func (s *Supervisor) installSourceZip(ctx context.Context, zipPath string) (DeployResult, bool, error) {
+	cfg := s.Config()
+	if strings.TrimSpace(cfg.SourceDir) == "" {
+		return DeployResult{}, false, errors.New("source_dir must be set before deployment")
+	}
+	sourceDir, err := filepath.Abs(cfg.SourceDir)
+	if err != nil {
+		return DeployResult{}, false, err
+	}
 	parent := filepath.Dir(sourceDir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return DeployResult{}, err
+		return DeployResult{}, false, err
 	}
 
 	incoming := sourceDir + ".incoming-" + time.Now().Format("20060102-150405")
 	if err := unzipSafe(zipPath, incoming); err != nil {
 		os.RemoveAll(incoming)
-		return DeployResult{}, err
+		return DeployResult{}, false, err
 	}
 	root, err := sourceRoot(incoming)
 	if err != nil {
 		os.RemoveAll(incoming)
-		return DeployResult{}, err
+		return DeployResult{}, false, err
 	}
 
 	wasRunning := s.State().Running
@@ -51,7 +112,7 @@ func (s *Supervisor) DeployZip(ctx context.Context, zipPath string, restart bool
 		cancel()
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			os.RemoveAll(incoming)
-			return DeployResult{}, err
+			return DeployResult{}, false, err
 		}
 	}
 
@@ -60,7 +121,7 @@ func (s *Supervisor) DeployZip(ctx context.Context, zipPath string, restart bool
 		backup = sourceDir + ".backup-" + time.Now().Format("20060102-150405")
 		if err := os.Rename(sourceDir, backup); err != nil {
 			os.RemoveAll(incoming)
-			return DeployResult{}, err
+			return DeployResult{}, false, err
 		}
 	}
 	if err := os.Rename(root, sourceDir); err != nil {
@@ -68,30 +129,27 @@ func (s *Supervisor) DeployZip(ctx context.Context, zipPath string, restart bool
 			_ = os.Rename(backup, sourceDir)
 		}
 		os.RemoveAll(incoming)
-		return DeployResult{}, err
+		return DeployResult{}, false, err
 	}
 	_ = os.RemoveAll(incoming)
+	return DeployResult{SourceDir: sourceDir, BackupDir: backup}, wasRunning, nil
+}
 
-	buildLog, buildErr := s.Build(ctx)
-	if buildErr != nil {
-		_ = os.RemoveAll(sourceDir)
-		if backup != "" {
-			_ = os.Rename(backup, sourceDir)
-		}
-		if wasRunning {
-			_ = s.Start()
-		}
-		return DeployResult{SourceDir: sourceDir, BackupDir: backup, BuildLog: buildLog}, buildErr
+func rollbackSourceDeployment(result DeployResult) {
+	if result.SourceDir == "" {
+		return
 	}
+	_ = os.RemoveAll(result.SourceDir)
+	if result.BackupDir != "" {
+		_ = os.Rename(result.BackupDir, result.SourceDir)
+	}
+}
 
-	result := DeployResult{SourceDir: sourceDir, BackupDir: backup, BuildLog: buildLog}
-	if restart || wasRunning {
-		if err := s.Start(); err != nil {
-			return result, err
-		}
-		result.Restarted = true
+func cleanupManagerUpgrade(result *ManagerUpgradeResult) {
+	if result == nil || strings.TrimSpace(result.StagedBinary) == "" {
+		return
 	}
-	return result, nil
+	_ = os.Remove(result.StagedBinary)
 }
 
 func unzipSafe(zipPath, dest string) error {

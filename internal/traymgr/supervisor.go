@@ -279,6 +279,10 @@ func managedBuildOutputPath(cfg Config) (string, error) {
 }
 
 func stagedBuildOutputPath(outputPath string) (string, error) {
+	return stagedBuildOutputPathWithPrefix(outputPath, ".cnc-proxy-build-")
+}
+
+func stagedBuildOutputPathWithPrefix(outputPath, prefix string) (string, error) {
 	dir := filepath.Dir(outputPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -288,7 +292,7 @@ func stagedBuildOutputPath(outputPath string) (string, error) {
 		ext = ".exe"
 	}
 	for i := 0; i < 100; i++ {
-		candidate := filepath.Join(dir, fmt.Sprintf(".cnc-proxy-build-%d-%d%s", time.Now().UnixNano(), i, ext))
+		candidate := filepath.Join(dir, fmt.Sprintf("%s%d-%d%s", prefix, time.Now().UnixNano(), i, ext))
 		f, err := os.OpenFile(candidate, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			if closeErr := f.Close(); closeErr != nil {

@@ -123,6 +123,7 @@ type MachineStatus struct {
 	Mode         string              `json:"mode"`
 	Connected    bool                `json:"connected"`
 	Reconnecting bool                `json:"reconnecting"`
+	PendingJobs  int                 `json:"pending_jobs"`
 	AgeMs        int64               `json:"age_ms"`
 	ObservedAt   time.Time           `json:"observed_at,omitempty"`
 	Stale        bool                `json:"stale"`
@@ -149,6 +150,7 @@ func (s *Service) Status() MachineStatus {
 		Mode:         mode,
 		Connected:    observed && st.State != machine.Unknown,
 		Reconnecting: mode == session.ModeOwner.String() && stale,
+		PendingJobs:  s.pendingJobCount(),
 		AgeMs:        age.Milliseconds(),
 		ObservedAt:   st.ObservedAt,
 		Stale:        stale,
@@ -163,6 +165,16 @@ func (s *Service) Status() MachineStatus {
 		Progress:     st.Progress,
 		Machine:      st.Machine,
 	}
+}
+
+func (s *Service) pendingJobCount() int {
+	n := 0
+	for _, j := range s.store.ListJobs() {
+		if j.State == store.Queued || j.State == store.Running {
+			n++
+		}
+	}
+	return n
 }
 
 // Files returns the catalog.
@@ -936,18 +948,153 @@ func stateLabel(st machine.State) string {
 	return string(st)
 }
 
-// Delete enqueues a delete and marks the entry pending_delete.
+// Delete removes local-only desired state immediately, or enqueues a machine
+// delete for entries that may exist remotely.
 func (s *Service) Delete(remotePath string) error {
 	remote, err := normalizeRemote(remotePath)
 	if err != nil {
 		return err
 	}
-	if _, ok := s.store.GetEntry(remote); !ok {
+	entry, ok := s.store.GetEntry(remote)
+	if !ok {
 		return ErrNotFound
+	}
+	if s.shouldDiscardLocalEntry(remote, entry) {
+		discarded, ok, err := s.store.DiscardEntry(remote, store.JobUpload, store.JobMkdir, store.JobDelete, store.JobRename)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if discarded.CachePath != "" {
+			os.Remove(discarded.CachePath)
+		}
+		return nil
 	}
 	s.store.SetEntrySync(remote, store.PendingDelete, "")
 	_, err = s.store.Enqueue(store.Job{Kind: store.JobDelete, Path: remote})
 	return err
+}
+
+// RetryJob requeues a failed sync job and restores the catalog state to the
+// corresponding in-flight state so the UI no longer shows the stale error.
+func (s *Service) RetryJob(id int64) (store.Job, error) {
+	job, ok := s.store.GetJob(id)
+	if !ok {
+		return store.Job{}, ErrNotFound
+	}
+	if job.State != store.Failed {
+		return store.Job{}, ErrRetryUnavailable
+	}
+	if err := s.restoreEntryStateForRetry(job); err != nil {
+		return store.Job{}, err
+	}
+	retried, ok, err := s.store.RetryJob(id)
+	if err != nil {
+		return store.Job{}, err
+	}
+	if !ok {
+		return store.Job{}, ErrRetryUnavailable
+	}
+	return retried, nil
+}
+
+func (s *Service) restoreEntryStateForRetry(job store.Job) error {
+	switch job.Kind {
+	case store.JobUpload:
+		if _, ok := s.store.GetEntry(job.Path); !ok {
+			return s.store.PutEntry(store.Entry{
+				Path:      job.Path,
+				Size:      job.Size,
+				MD5:       job.MD5,
+				CachePath: job.CachePath,
+				MTime:     time.Now(),
+				Sync:      store.PendingUpload,
+			})
+		}
+		return s.store.SetEntrySync(job.Path, store.PendingUpload, "")
+	case store.JobMkdir:
+		if _, ok := s.store.GetEntry(job.Path); !ok {
+			return s.store.PutEntry(store.Entry{Path: job.Path, IsDir: true, MTime: time.Now(), Sync: store.PendingUpload})
+		}
+		return s.store.SetEntrySync(job.Path, store.PendingUpload, "")
+	case store.JobDelete:
+		return s.store.SetEntrySync(job.Path, store.PendingDelete, "")
+	case store.JobRename:
+		return s.store.SetEntrySync(job.Path, store.PendingRename, "")
+	default:
+		return ErrRetryUnavailable
+	}
+}
+
+// DiscardLocal removes unsettled local catalog state and any queued/failed jobs
+// for the path without touching the machine. If the file actually exists on the
+// machine, the reconcile pass will rediscover it as remote_only.
+func (s *Service) DiscardLocal(remotePath string) error {
+	remote, err := normalizeRemote(remotePath)
+	if err != nil {
+		return err
+	}
+	entry, ok := s.store.GetEntry(remote)
+	if !ok {
+		return ErrNotFound
+	}
+	if !canDiscardLocal(entry.Sync) || s.hasRunningJob(remote) {
+		return ErrDiscardUnavailable
+	}
+	discarded, ok, err := s.store.DiscardEntry(remote, store.JobUpload, store.JobMkdir, store.JobDelete, store.JobRename)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	if discarded.CachePath != "" {
+		os.Remove(discarded.CachePath)
+	}
+	return nil
+}
+
+func canDiscardLocal(sync store.SyncState) bool {
+	switch sync {
+	case store.LocalOnly, store.PendingUpload, store.Uploading, store.PendingDelete, store.Deleting, store.PendingRename, store.Error:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) shouldDiscardLocalEntry(remote string, entry store.Entry) bool {
+	switch entry.Sync {
+	case store.LocalOnly, store.PendingUpload:
+		return true
+	case store.Error:
+		return s.hasLocalCreateJob(remote)
+	default:
+		return false
+	}
+}
+
+func (s *Service) hasLocalCreateJob(remote string) bool {
+	for _, j := range s.store.ListJobs() {
+		if j.Path != remote || (j.Kind != store.JobUpload && j.Kind != store.JobMkdir) {
+			continue
+		}
+		if j.State == store.Queued || j.State == store.Failed {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) hasRunningJob(remote string) bool {
+	for _, j := range s.store.ListJobs() {
+		if j.Path == remote && j.State == store.Running {
+			return true
+		}
+	}
+	return false
 }
 
 // Rename enqueues a rename and marks the entry pending_rename.
@@ -1122,4 +1269,6 @@ var (
 	ErrNotCached           = errors.New("service: content not cached locally")
 	ErrMachineStatusStale  = errors.New("service: machine status is stale")
 	ErrRecoveryUnavailable = errors.New("service: recovery unavailable")
+	ErrRetryUnavailable    = errors.New("service: retry unavailable")
+	ErrDiscardUnavailable  = errors.New("service: discard unavailable")
 )

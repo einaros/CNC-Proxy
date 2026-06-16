@@ -308,6 +308,64 @@ func TestDeleteEndpoint(t *testing.T) {
 	}
 }
 
+func TestFileRetryAndDiscardEndpoints(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	arb := session.New(session.Config{Dial: func() (*client.Conn, error) { return nil, io.EOF }})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(svc).Handler())
+	defer srv.Close()
+
+	respUpload := postRaw(t, srv.URL+"/api/files?path=bad.nc", "x")
+	respUpload.Body.Close()
+	if respUpload.StatusCode != http.StatusCreated {
+		t.Fatalf("upload status = %d", respUpload.StatusCode)
+	}
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/bad.nc", store.Error, "upload failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := postJSON(t, srv.URL+"/api/files/retry", map[string]int64{"job_id": 1})
+	retry.Body.Close()
+	if retry.StatusCode != http.StatusAccepted {
+		t.Fatalf("retry status = %d", retry.StatusCode)
+	}
+	if got := st.ListJobs()[0]; got.State != store.Queued || got.Attempts != 0 || got.LastError != "" {
+		t.Fatalf("job after retry = %+v", got)
+	}
+	if got, _ := st.GetEntry("/sd/gcodes/bad.nc"); got.Sync != store.PendingUpload || got.Error != "" {
+		t.Fatalf("entry after retry = %+v", got)
+	}
+
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed again"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/bad.nc", store.Error, "upload failed again"); err != nil {
+		t.Fatal(err)
+	}
+	discard := postJSON(t, srv.URL+"/api/files/discard", map[string]string{"path": "bad.nc"})
+	discard.Body.Close()
+	if discard.StatusCode != http.StatusAccepted {
+		t.Fatalf("discard status = %d", discard.StatusCode)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/bad.nc"); ok {
+		t.Fatal("entry should be discarded")
+	}
+}
+
 func TestRenameEndpoint(t *testing.T) {
 	srv, _ := newTestServer(t)
 	http.Post(srv.URL+"/api/files?path=a.nc", "application/octet-stream", strings.NewReader("x"))
@@ -324,12 +382,22 @@ func TestRenameEndpoint(t *testing.T) {
 
 func TestMachineEndpoint(t *testing.T) {
 	srv, _ := newTestServer(t)
+	reqUpload, _ := http.NewRequest("POST", srv.URL+"/api/files?path=queued.nc", strings.NewReader("x"))
+	reqUpload.Header.Set("Content-Type", "application/octet-stream")
+	respUpload := do(t, reqUpload)
+	respUpload.Body.Close()
+	if respUpload.StatusCode != http.StatusCreated {
+		t.Fatalf("upload status = %d", respUpload.StatusCode)
+	}
 	resp := get(t, srv.URL+"/api/machine")
 	defer resp.Body.Close()
 	var st service.MachineStatus
 	json.NewDecoder(resp.Body).Decode(&st)
 	if st.Mode != "owner" {
 		t.Errorf("mode = %q, want owner", st.Mode)
+	}
+	if st.PendingJobs != 1 {
+		t.Errorf("pending_jobs = %d, want 1", st.PendingJobs)
 	}
 }
 
@@ -392,7 +460,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing jog visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `/app.js?v=jog-stream-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `/app.js?v=jog-stream-1`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -433,6 +501,9 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), `clearNotice("control-sse")`) || !strings.Contains(string(jsBody), `clearNotice("files-sse")`) {
 		t.Errorf("app.js missing stream reconnect notice clearing")
 	}
+	if !strings.Contains(string(jsBody), `setNotice("Machine status unavailable: " + e.message, "error", "machine-status")`) || !strings.Contains(string(jsBody), `clearNotice("machine-status")`) {
+		t.Errorf("app.js missing machine status notice lifecycle")
+	}
 	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing jog plot, jog status messaging, or cache-only status polling")
 	}
@@ -447,7 +518,7 @@ func TestWebUIServed(t *testing.T) {
 	if strings.Contains(string(jsBody), "Emergency halt the machine?") {
 		t.Errorf("app.js must not confirm emergency halt")
 	}
-	for _, want := range []string{"directoryRows", "renderFolderTree", "renderFolderChrome", "openDir", "doMkdir", "joinRelPath"} {
+	for _, want := range []string{"directoryRows", "renderFolderTree", "renderFolderChrome", "openDir", "doMkdir", "joinRelPath", "retryJob", "discardFile", "/api/files/retry", "/api/files/discard"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -784,6 +855,13 @@ func postJSON(t *testing.T, url string, body any) *http.Response {
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
+	return do(t, req)
+}
+
+func postRaw(t *testing.T, url, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("POST", url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
 	return do(t, req)
 }
 

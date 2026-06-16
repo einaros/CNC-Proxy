@@ -148,6 +148,38 @@ func TestManagedProxyBuildArgsForWindowsUsesGUISubsystem(t *testing.T) {
 	}
 }
 
+func TestManagedManagerBuildArgsForWindowsUsesTrayTagAndGUISubsystem(t *testing.T) {
+	got := managedManagerBuildArgsForGOOS(`C:\CNC Proxy\.cnc-tray-build.exe`, "windows")
+	want := []string{
+		"build",
+		"-mod=mod",
+		"-trimpath",
+		"-tags",
+		"tray",
+		"-ldflags=-s -w -H=windowsgui",
+		"-o",
+		`C:\CNC Proxy\.cnc-tray-build.exe`,
+		"./cmd/tray",
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("managedManagerBuildArgsForGOOS(windows) = %#v, want %#v", got, want)
+	}
+}
+
+func TestStagedBuildOutputPathWithPrefixUsesRequestedPrefix(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "cnc-tray.exe")
+	staged, err := stagedBuildOutputPathWithPrefix(outputPath, ".cnc-tray-build-")
+	if err != nil {
+		t.Fatalf("stagedBuildOutputPathWithPrefix: %v", err)
+	}
+	if filepath.Dir(staged) != filepath.Dir(outputPath) {
+		t.Fatalf("staged dir = %q, want %q", filepath.Dir(staged), filepath.Dir(outputPath))
+	}
+	if !strings.HasPrefix(filepath.Base(staged), ".cnc-tray-build-") {
+		t.Fatalf("staged base = %q", filepath.Base(staged))
+	}
+}
+
 func TestBuildCommandLeavesCustomCommandAsShellCommand(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.BuildCommand = `go build -mod=mod -tags custom -o cnc-proxy.exe ./cmd/proxy`

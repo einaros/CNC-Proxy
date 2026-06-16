@@ -177,6 +177,24 @@ func TestAPIBaseNormalizesWildcardBind(t *testing.T) {
 	}
 }
 
+func TestWebDAVBaseNormalizesWildcardBind(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Flags["dav-addr"] = "0.0.0.0:8421"
+	if got := WebDAVBase(cfg); got != "http://127.0.0.1:8421/" {
+		t.Fatalf("WebDAVBase = %q", got)
+	}
+}
+
+func TestDefaultConfigIncludesWebDAVMountDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.WebDAVMount.Enabled {
+		t.Fatal("default WebDAV mount should be disabled")
+	}
+	if cfg.WebDAVMount.MountPoint == "" && cfg.WebDAVMount.Drive == "" {
+		t.Fatal("default WebDAV mount should have a mount point or drive")
+	}
+}
+
 func TestManagerBaseNormalizesWildcardBind(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AdminListen = "0.0.0.0:8430"

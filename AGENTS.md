@@ -159,6 +159,16 @@ Injection & control model (both modes — proxy alone OR with controller attache
   success/failure message at the control or panel where the operator clicked.
   When the machine can be observed afterward, verify and show the observed
   result; never leave the operator guessing whether a command was issued.
+- **No invented UX, states, or success claims.** Before adding any visible text,
+  UI element, notification, log entry, status, setting, fallback, or behavior,
+  stop and weigh whether it is explicitly requested, required for correctness,
+  or already established by the product. Do not add "helpful" affordances or
+  optimistic status messages because they seem plausible. A success message is
+  allowed only after the exact user-visible outcome has been verified through
+  the same surface the operator would inspect; otherwise report a concrete
+  failure or stay silent. Treat fabricated UI/status/log text, unverified
+  success, hidden retries that change behavior, and out-of-place controls as
+  contract-ending defects.
 - **Race detector is the bar:** `go test -race ./...` green before declaring
   done. New concurrency must respect the arbiter's `opMu` (the shared
   `client.Conn` is not concurrency-safe).

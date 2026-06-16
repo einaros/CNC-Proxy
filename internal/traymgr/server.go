@@ -2,11 +2,15 @@ package traymgr
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,36 +26,62 @@ type Notification struct {
 	Time    time.Time `json:"time"`
 }
 
+type ManagerLogEntry struct {
+	Time    time.Time `json:"time"`
+	Level   string    `json:"level"`
+	Source  string    `json:"source"`
+	Message string    `json:"message"`
+}
+
 type Notifier interface {
 	Notify(Notification) error
 }
 
 type Server struct {
-	configPath string
-	supervisor *Supervisor
-	notifier   Notifier
-	restartCh  chan struct{}
-	restartLag time.Duration
+	configPath  string
+	supervisor  *Supervisor
+	notifier    Notifier
+	restartCh   chan struct{}
+	restartLag  time.Duration
+	processExit func()
+	ready       chan struct{}
+	readyOnce   sync.Once
+	logPath     string
 
 	mu            sync.Mutex
 	notifications []Notification
+	managerLog    []ManagerLogEntry
 	startedAt     time.Time
 	restartedAt   time.Time
 }
 
 func NewServer(configPath string, supervisor *Supervisor, notifier Notifier) *Server {
 	now := time.Now()
-	return &Server{configPath: configPath, supervisor: supervisor, notifier: notifier, restartCh: make(chan struct{}, 1), restartLag: 100 * time.Millisecond, startedAt: now, restartedAt: now}
+	logPath := DefaultManagerLogPath(configPath)
+	return &Server{configPath: configPath, supervisor: supervisor, notifier: notifier, restartCh: make(chan struct{}, 1), restartLag: 100 * time.Millisecond, processExit: func() { os.Exit(0) }, ready: make(chan struct{}), logPath: logPath, managerLog: loadManagerLog(logPath), startedAt: now, restartedAt: now}
+}
+
+func (s *Server) SetManagerProcessExit(fn func()) {
+	s.processExit = fn
+}
+
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.index)
+	for _, method := range []string{"GET", "OPTIONS", "PROPFIND", "PROPPATCH", "MKCOL", "PUT", "DELETE", "COPY", "MOVE", "LOCK", "UNLOCK"} {
+		mux.HandleFunc(method+" /webdav", s.localWebDAVProxy)
+		mux.HandleFunc(method+" /webdav/", s.localWebDAVProxy)
+	}
 	mux.HandleFunc("GET /api/status", s.withAuth(s.status))
 	mux.HandleFunc("GET /api/config", s.withAuth(s.getConfig))
 	mux.HandleFunc("PUT /api/config", s.withAuth(s.putConfig))
 	mux.HandleFunc("PUT /api/manager/config", s.withAuth(s.putManagerConfig))
 	mux.HandleFunc("POST /api/manager/restart", s.withAuth(s.restartManager))
+	mux.HandleFunc("DELETE /api/manager/log", s.withAuth(s.clearManagerLogHandler))
 	mux.HandleFunc("PUT /api/proxy/config", s.withAuth(s.putProxyConfig))
 	mux.HandleFunc("POST /api/proxy/start", s.withAuth(s.startProxy))
 	mux.HandleFunc("POST /api/proxy/stop", s.withAuth(s.stopProxy))
@@ -60,6 +90,78 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/notify", s.withAuth(s.notify))
 	mux.HandleFunc("POST /api/deploy", s.withAuth(s.deploy))
 	return mux
+}
+
+func (s *Server) localWebDAVProxy(w http.ResponseWriter, r *http.Request) {
+	if !requestFromLoopback(r) {
+		http.Error(w, "webdav proxy is only available from loopback", http.StatusForbidden)
+		return
+	}
+	cfg := s.supervisor.Config()
+	target, err := url.Parse(WebDAVBase(cfg))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	user, token := Auth(cfg)
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			rewriteWebDAVProxyRequest(req, target)
+			if token != "" {
+				req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":"+token)))
+			} else {
+				req.Header.Del("Authorization")
+			}
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			http.Error(w, "webdav proxy: "+err.Error(), http.StatusBadGateway)
+		},
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func rewriteWebDAVProxyRequest(req *http.Request, target *url.URL) {
+	req.URL.Scheme = target.Scheme
+	req.URL.Host = target.Host
+	req.URL.Path = joinURLPath(target.Path, strings.TrimPrefix(req.URL.Path, "/webdav"))
+	req.URL.RawPath = ""
+	req.Host = target.Host
+	if dst := req.Header.Get("Destination"); dst != "" {
+		if rewritten, ok := rewriteWebDAVDestination(dst, target); ok {
+			req.Header.Set("Destination", rewritten)
+		}
+	}
+}
+
+func rewriteWebDAVDestination(raw string, target *url.URL) (string, bool) {
+	dst, err := url.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	dst.Scheme = target.Scheme
+	dst.Host = target.Host
+	dst.Path = joinURLPath(target.Path, strings.TrimPrefix(dst.Path, "/webdav"))
+	dst.RawPath = ""
+	return dst.String(), true
+}
+
+func joinURLPath(base, suffix string) string {
+	if base == "" {
+		base = "/"
+	}
+	if suffix == "" || suffix == "/" {
+		return base
+	}
+	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
+}
+
+func requestFromLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -85,9 +187,15 @@ func (s *Server) listenAndServeOnce(ctx context.Context) error {
 		MaxHeaderBytes:    1 << 20,
 	}
 
+	ln, err := net.Listen("tcp", cfg.AdminListen)
+	if err != nil {
+		return err
+	}
+	s.markReady()
+
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.ListenAndServe()
+		err := srv.Serve(ln)
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
@@ -158,6 +266,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"manager_started_at":   startedAt,
 		"manager_restarted_at": restartedAt,
 		"notifications":        s.recentNotifications(),
+		"manager_log":          s.recentManagerLog(),
 	})
 }
 
@@ -273,6 +382,14 @@ func (s *Server) restartManager(w http.ResponseWriter, r *http.Request) {
 	s.scheduleRestart()
 }
 
+func (s *Server) clearManagerLogHandler(w http.ResponseWriter, r *http.Request) {
+	if err := s.clearManagerLog(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, map[string]any{"ok": true, "manager_log": []ManagerLogEntry{}})
+}
+
 func (s *Server) startProxy(w http.ResponseWriter, r *http.Request) {
 	if err := s.supervisor.Start(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -336,6 +453,11 @@ func (s *Server) notify(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deploy(w http.ResponseWriter, r *http.Request) {
 	restart := r.URL.Query().Get("restart") != "false"
+	component, err := deployComponent(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	tmp, err := os.CreateTemp("", "cnc-deploy-*.zip")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -375,19 +497,78 @@ func (s *Server) deploy(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
-	res, err := s.supervisor.DeployZip(ctx, tmpName, restart)
+	targetBinary := ""
+	if component.BuildManager {
+		targetBinary, err = managerBinaryPath("")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	res, err := s.supervisor.DeployZipWithOptions(ctx, tmpName, DeployOptions{
+		BuildProxy:    component.BuildProxy,
+		BuildManager:  component.BuildManager,
+		RestartProxy:  restart,
+		ManagerBinary: targetBinary,
+	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		s.addNotification(Notification{Title: "CNC Proxy", Message: "Deployment failed: " + err.Error(), Level: "error", Time: time.Now()})
 		s.writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "result": res})
 		return
 	}
+	managerRestart := false
+	if res.ManagerUpgrade != nil {
+		if err := LaunchManagerUpgradeFinalizer(*res.ManagerUpgrade, s.configPath); err != nil {
+			cleanupManagerUpgrade(res.ManagerUpgrade)
+			if res.ManagerUpgrade.ProxyStartOnRelaunch {
+				if startErr := s.supervisor.Start(); startErr == nil {
+					res.Restarted = true
+				}
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			msg := "Manager upgrade was built, but finalizer launch failed: " + err.Error()
+			s.addNotification(Notification{Title: "CNC Proxy Manager", Message: msg, Level: "error", Time: time.Now()})
+			s.writeJSON(w, map[string]any{"ok": false, "error": msg, "result": res})
+			return
+		}
+		res.ManagerUpgrade.RestartScheduled = true
+		managerRestart = true
+	}
 	msg := "Deployment completed"
 	if res.Restarted {
 		msg += "; proxy restarted"
 	}
+	if managerRestart {
+		msg += "; manager restart scheduled"
+	}
 	s.addNotification(Notification{Title: "CNC Proxy", Message: msg, Level: "success", Time: time.Now()})
 	s.writeJSON(w, map[string]any{"ok": true, "result": res})
+	if managerRestart {
+		s.scheduleManagerProcessExit()
+	}
+}
+
+type deployComponentSelection struct {
+	BuildProxy   bool
+	BuildManager bool
+}
+
+func deployComponent(r *http.Request) (deployComponentSelection, error) {
+	component := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("component")))
+	if component == "" {
+		component = "proxy"
+	}
+	switch component {
+	case "proxy":
+		return deployComponentSelection{BuildProxy: true}, nil
+	case "manager", "tray":
+		return deployComponentSelection{BuildManager: true}, nil
+	case "all", "both":
+		return deployComponentSelection{BuildProxy: true, BuildManager: true}, nil
+	default:
+		return deployComponentSelection{}, fmt.Errorf("component must be proxy, manager, or all")
+	}
 }
 
 func (s *Server) addNotification(n Notification) {
@@ -399,10 +580,56 @@ func (s *Server) addNotification(n Notification) {
 	}
 }
 
+func (s *Server) addManagerLog(level, source, message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	entry := ManagerLogEntry{
+		Time:    time.Now(),
+		Level:   strings.TrimSpace(level),
+		Source:  strings.TrimSpace(source),
+		Message: message,
+	}
+	if entry.Level == "" {
+		entry.Level = "info"
+	}
+	if entry.Source == "" {
+		entry.Source = "manager"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.managerLog = append(s.managerLog, entry)
+	if len(s.managerLog) > 200 {
+		s.managerLog = append([]ManagerLogEntry(nil), s.managerLog[len(s.managerLog)-200:]...)
+	}
+	if s.logPath != "" {
+		_ = appendManagerLogEntry(s.logPath, entry)
+	}
+}
+
 func (s *Server) recentNotifications() []Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Notification(nil), s.notifications...)
+}
+
+func (s *Server) recentManagerLog() []ManagerLogEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ManagerLogEntry(nil), s.managerLog...)
+}
+
+func (s *Server) clearManagerLog() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logPath != "" {
+		if err := clearManagerLogFile(s.logPath); err != nil {
+			return err
+		}
+	}
+	s.managerLog = nil
+	return nil
 }
 
 func (s *Server) managerTimes() (time.Time, time.Time) {
@@ -416,6 +643,12 @@ func (s *Server) markManagerRestarted() {
 	s.restartedAt = time.Now()
 	s.mu.Unlock()
 	s.addNotification(Notification{Title: "CNC Proxy Manager", Message: "Manager listener restarted", Level: "success", Time: time.Now()})
+}
+
+func (s *Server) markReady() {
+	s.readyOnce.Do(func() {
+		close(s.ready)
+	})
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, v any) {
@@ -437,6 +670,17 @@ func (s *Server) scheduleRestart() {
 	}()
 }
 
+func (s *Server) scheduleManagerProcessExit() {
+	go func() {
+		if s.restartLag > 0 {
+			time.Sleep(s.restartLag)
+		}
+		if s.processExit != nil {
+			s.processExit()
+		}
+	}()
+}
+
 func managerSettingsChanged(a, b Config) bool {
 	a = normalizeConfig(a)
 	b = normalizeConfig(b)
@@ -451,4 +695,56 @@ func managerSettingsChanged(a, b Config) bool {
 func DefaultLogPath(configPath string) string {
 	dir := filepath.Dir(configPath)
 	return filepath.Join(dir, "cnc-proxy.log")
+}
+
+func DefaultManagerLogPath(configPath string) string {
+	dir := filepath.Dir(configPath)
+	return filepath.Join(dir, "cnc-manager.log")
+}
+
+func appendManagerLogEntry(path string, entry ManagerLogEntry) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(entry)
+}
+
+func loadManagerLog(path string) []ManagerLogEntry {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []ManagerLogEntry
+	dec := json.NewDecoder(f)
+	for {
+		var entry ManagerLogEntry
+		if err := dec.Decode(&entry); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return out
+		}
+		out = append(out, entry)
+		if len(out) > 200 {
+			out = append([]ManagerLogEntry(nil), out[len(out)-200:]...)
+		}
+	}
+	return out
+}
+
+func clearManagerLogFile(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }

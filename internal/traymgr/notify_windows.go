@@ -32,6 +32,7 @@ Start-Sleep -Seconds 6
 $n.Dispose()
 `
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", encodePowerShell(script))
+	configureBackgroundCommand(cmd)
 	return cmd.Start()
 }
 

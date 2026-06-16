@@ -195,6 +195,76 @@ func TestSupersedeQueuedUploads(t *testing.T) {
 	}
 }
 
+func TestDiscardEntryMarksMatchingJobsDone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutEntry(Entry{Path: "/sd/gcodes/a.nc", Sync: Error, Error: "upload failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Enqueue(Job{Kind: JobDelete, Path: "/sd/gcodes/a.nc"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateJob(1, func(j *Job) {
+		j.State = Failed
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, err := s.DiscardEntry("/sd/gcodes/a.nc", JobUpload, JobMkdir, JobDelete, JobRename); err != nil || !ok {
+		t.Fatalf("discard ok=%v err=%v", ok, err)
+	}
+	if _, ok := s.GetEntry("/sd/gcodes/a.nc"); ok {
+		t.Fatal("entry should be removed")
+	}
+	jobs := s.ListJobs()
+	if jobs[0].State != Done || jobs[0].LastError != "" {
+		t.Fatalf("upload job = %+v, want done without error", jobs[0])
+	}
+	if jobs[1].State != Done {
+		t.Fatalf("delete job = %+v, want done", jobs[1])
+	}
+
+	reloaded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reloaded.GetEntry("/sd/gcodes/a.nc"); ok {
+		t.Fatal("reloaded entry should be removed")
+	}
+	if got := reloaded.ListJobs()[0]; got.State != Done || got.LastError != "" {
+		t.Fatalf("reloaded job = %+v, want done without error", got)
+	}
+}
+
+func TestRetryJobRequeuesFailedJob(t *testing.T) {
+	s, _ := Open("")
+	j, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateJob(j.ID, func(j *Job) {
+		j.State = Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retried, ok, err := s.RetryJob(j.ID)
+	if err != nil || !ok {
+		t.Fatalf("retry ok=%v err=%v", ok, err)
+	}
+	if retried.State != Queued || retried.Attempts != 0 || retried.LastError != "" {
+		t.Fatalf("retried job = %+v", retried)
+	}
+}
+
 func TestSubscribeReceivesEvents(t *testing.T) {
 	s, _ := Open("")
 	ch, unsub := s.Subscribe()

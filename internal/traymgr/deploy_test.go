@@ -2,6 +2,8 @@ package traymgr
 
 import (
 	"archive/zip"
+	"context"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,6 +43,37 @@ func TestUnzipSafeExtractsSourceRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("go.mod not extracted: %v", err)
+	}
+}
+
+func TestDeployZipWithOptionsRequiresComponent(t *testing.T) {
+	sup := NewSupervisor(DefaultConfig(), "")
+	if _, err := sup.DeployZipWithOptions(context.Background(), "unused.zip", DeployOptions{}); err == nil {
+		t.Fatal("DeployZipWithOptions should require at least one component")
+	}
+}
+
+func TestDeployComponentParsesSupportedValues(t *testing.T) {
+	for _, tc := range []struct {
+		query       string
+		wantProxy   bool
+		wantManager bool
+	}{
+		{query: "", wantProxy: true},
+		{query: "?component=proxy", wantProxy: true},
+		{query: "?component=manager", wantManager: true},
+		{query: "?component=tray", wantManager: true},
+		{query: "?component=all", wantProxy: true, wantManager: true},
+		{query: "?component=both", wantProxy: true, wantManager: true},
+	} {
+		req := httptest.NewRequest("POST", "/api/deploy"+tc.query, nil)
+		got, err := deployComponent(req)
+		if err != nil {
+			t.Fatalf("deployComponent(%q): %v", tc.query, err)
+		}
+		if got.BuildProxy != tc.wantProxy || got.BuildManager != tc.wantManager {
+			t.Fatalf("deployComponent(%q) = %+v", tc.query, got)
+		}
 	}
 }
 

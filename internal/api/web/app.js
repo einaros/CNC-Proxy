@@ -27,6 +27,8 @@ const state = {
   controlPendingAction: "",
   lastControlResult: null,
   noticeKey: "",
+  noticeSeq: 0,
+  notices: new Map(),
   controlES: null,
   filesES: null,
   jog: {
@@ -413,8 +415,9 @@ async function loadUISettings() {
   try {
     const r = await request("/api/ui/settings");
     applyUISettings(await r.json());
+    clearNotice("ui-settings");
   } catch (e) {
-    setNotice("UI settings unavailable: " + e.message, "error");
+    setNotice("UI settings unavailable: " + e.message, "error", "ui-settings");
     applyUISettings(state.ui);
   }
 }
@@ -446,8 +449,9 @@ async function saveUISettings() {
       body: JSON.stringify(state.ui),
     });
     applyUISettings(await r.json());
+    clearNotice("ui-settings-save");
   } catch (e) {
-    setNotice("Saving UI settings failed: " + e.message, "error");
+    setNotice("Saving UI settings failed: " + e.message, "error", "ui-settings-save");
   }
 }
 
@@ -480,17 +484,71 @@ function normalizeSlotOrder() {
   }
 }
 
-function setNotice(text, kind = "info", key = "") {
-  const el = document.getElementById("notice");
-  el.textContent = text || "";
-  el.className = kind;
-  el.hidden = !text;
-  state.noticeKey = text ? key : "";
+function setNotice(text, kind = "info", key = "", opts = {}) {
+  if (!text) {
+    clearNotice(key);
+    return;
+  }
+  const noticeKey = key || "global";
+  const prev = state.notices.get(noticeKey);
+  if (prev?.timer) clearTimeout(prev.timer);
+  const notice = {
+    key: noticeKey,
+    text: String(text),
+    kind: kind || "info",
+    seq: ++state.noticeSeq,
+    timer: null,
+  };
+  state.notices.set(noticeKey, notice);
+  state.noticeKey = noticeKey;
+  renderNoticeBar();
+
+  const timeoutMs = Object.prototype.hasOwnProperty.call(opts, "timeoutMs")
+    ? Number(opts.timeoutMs)
+    : (notice.kind === "ok" ? 5000 : 0);
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    notice.timer = setTimeout(() => {
+      const cur = state.notices.get(noticeKey);
+      if (cur?.seq === notice.seq) clearNotice(noticeKey);
+    }, timeoutMs);
+  }
 }
 
 function clearNotice(key = "") {
-  if (key && state.noticeKey !== key) return;
-  setNotice("");
+  if (key) {
+    const notice = state.notices.get(key);
+    if (!notice) return;
+    if (notice.timer) clearTimeout(notice.timer);
+    state.notices.delete(key);
+    if (state.noticeKey === key) state.noticeKey = "";
+  } else {
+    for (const notice of state.notices.values()) {
+      if (notice.timer) clearTimeout(notice.timer);
+    }
+    state.notices.clear();
+    state.noticeKey = "";
+  }
+  renderNoticeBar();
+}
+
+function renderNoticeBar() {
+  const bar = document.getElementById("status-bar");
+  const list = document.getElementById("notice");
+  if (!bar || !list) return;
+  const notices = [...state.notices.values()].sort((a, b) => b.seq - a.seq);
+  bar.hidden = notices.length === 0;
+  list.innerHTML = "";
+  for (const notice of notices) {
+    const row = document.createElement("div");
+    row.className = "status-item " + notice.kind;
+    const dot = document.createElement("span");
+    dot.className = "status-dot";
+    const text = document.createElement("span");
+    text.className = "status-text";
+    text.textContent = notice.text;
+    row.append(dot, text);
+    list.appendChild(row);
+  }
 }
 
 async function request(url, opts = {}) {
@@ -508,12 +566,17 @@ async function request(url, opts = {}) {
   return resp;
 }
 
-function pendingCount() {
+function queuePendingCount() {
   let n = 0;
-  for (const f of state.files.values()) {
-    if (f.sync !== "synced" && f.sync !== "remote_only") n++;
+  for (const j of state.jobs.values()) {
+    if (j.state === "queued" || j.state === "running") n++;
   }
   return n;
+}
+
+function pendingCount() {
+  const n = Number(state.machine?.pending_jobs);
+  return Number.isFinite(n) ? n : queuePendingCount();
 }
 
 function renderMachine() {
@@ -564,6 +627,10 @@ function renderAlarmPanel(m) {
     if (feedback) {
       feedback.textContent = "";
       feedback.className = "";
+    }
+    if (state.controlPendingAction !== "recover") {
+      state.lastControlResult = null;
+      clearNotice("control-recover");
     }
     return;
   }
@@ -874,7 +941,7 @@ function updateGamepadButtons() {
 function addGamepadMacroBinding() {
   const macro = macroByID(state.selectedMacroId) || state.ui.macros[0];
   if (!macro) {
-    setNotice("Create a macro before assigning a gamepad button.", "error");
+    setNotice("Create a macro before assigning a gamepad button.", "error", "gamepad-macro-binding");
     return;
   }
   const used = new Set(state.ui.gamepad.macro_buttons.map((b) => b.button));
@@ -883,6 +950,7 @@ function addGamepadMacroBinding() {
   state.ui.gamepad.macro_buttons.push({ id: newID("gamepad-macro"), button, macro_id: macro.id });
   normalizeGamepadMacroOrder();
   renderGamepadMacroBindings();
+  clearNotice("gamepad-macro-binding");
   queueSaveUISettings();
 }
 
@@ -924,7 +992,7 @@ function renderFiles() {
       <td>${type}</td>
       <td class="num">${escapeHtml(f.is_dir && f.children != null ? String(f.children) : fmtSize(f.size, f.is_dir))}</td>
       <td>${escapeHtml(fmtTime(f.mtime))}</td>
-      <td>${f.virtual ? `<span class="sync"><span class="dot"></span>Folder</span>` : `<span class="sync s-${escapeHtml(f.sync)}"><span class="dot"></span>${escapeHtml(label)}</span>`}</td>
+      <td class="status-cell">${f.virtual ? `<span class="sync"><span class="dot"></span>Folder</span>` : `<span class="sync s-${escapeHtml(f.sync)}"><span class="dot"></span>${escapeHtml(label)}</span>`}</td>
       <td class="actions"></td>`;
 
     const actions = tr.querySelector(".actions");
@@ -946,17 +1014,74 @@ function renderFiles() {
       actions.append(open);
     }
     if (!f.virtual) {
-      const rename = document.createElement("button");
-      rename.type = "button";
-      rename.textContent = "Rename";
-      rename.onclick = () => doRename(f.path);
-      const del = document.createElement("button");
-      del.type = "button";
-      del.textContent = "Delete";
-      del.onclick = () => doDelete(f.path);
-      actions.append(rename, del);
+      appendFileActions(actions, f);
     }
     tbody.appendChild(tr);
+  }
+}
+
+function appendFileActions(actions, f) {
+  const failed = failedJobsForPath(f.path);
+  const retry = preferredRetryJob(failed);
+  if (retry) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = retryButtonText(retry);
+    btn.onclick = () => retryJob(retry);
+    actions.append(btn);
+  }
+  if (canDiscardFile(f)) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Discard";
+    btn.onclick = () => discardFile(f.path);
+    actions.append(btn);
+  }
+  if (f.sync === "error") return;
+
+  const rename = document.createElement("button");
+  rename.type = "button";
+  rename.textContent = "Rename";
+  rename.onclick = () => doRename(f.path);
+  const del = document.createElement("button");
+  del.type = "button";
+  del.textContent = "Delete";
+  del.onclick = () => doDelete(f.path);
+  actions.append(rename, del);
+}
+
+function jobsForPath(path) {
+  return [...state.jobs.values()].filter((j) => j.path === path);
+}
+
+function failedJobsForPath(path) {
+  return jobsForPath(path).filter((j) => j.state === "failed");
+}
+
+function preferredRetryJob(jobs) {
+  return jobs.find((j) => j.kind === "upload" || j.kind === "mkdir") || jobs[0] || null;
+}
+
+function canDiscardFile(f) {
+  if (!f || f.virtual) return false;
+  if (["local_only", "pending_upload"].includes(f.sync)) return true;
+  if (f.sync !== "error") return false;
+  const jobs = jobsForPath(f.path);
+  return !jobs.some((j) => j.state === "running");
+}
+
+function retryButtonText(job) {
+  switch (job?.kind) {
+  case "upload":
+    return "Retry Upload";
+  case "mkdir":
+    return "Retry Folder";
+  case "delete":
+    return "Retry Delete";
+  case "rename":
+    return "Retry Rename";
+  default:
+    return "Retry";
   }
 }
 
@@ -1152,17 +1277,49 @@ function renderJobs() {
     div.innerHTML = `<div class="empty">${text}</div>`;
     return;
   }
-  div.innerHTML = "";
+  div.innerHTML = `<div class="jobs-head"><span>Job</span><span>Status</span><span>Detail</span></div>`;
   for (const j of jobs) {
     const row = document.createElement("div");
     row.className = "job";
     row.innerHTML = `
-      <span class="job-kind">${escapeHtml(j.kind)}</span>
-      <span class="name">${escapeHtml(relPath(j.path))}</span>
-      <span class="muted">${escapeHtml(j.state)}${j.attempts ? `, attempt ${j.attempts}` : ""}</span>
-      <span>${j.blocked_message ? escapeHtml(j.blocked_message) : ""}${j.last_error ? `<br><span class="err">${escapeHtml(j.last_error)}</span>` : ""}</span>`;
+      <span class="job-main"><span class="job-kind">${escapeHtml(j.kind)}</span><span class="name">${escapeHtml(relPath(j.path))}</span></span>
+      <span class="job-status">${escapeHtml(jobStatusText(j))}</span>
+      <span class="job-detail">${jobDetailHTML(j)}</span>`;
+    if (j.state === "failed") appendJobRecoveryActions(row.querySelector(".job-detail"), j);
     div.appendChild(row);
   }
+}
+
+function jobStatusText(j) {
+  return `${j.state || ""}${j.attempts ? `, attempt ${j.attempts}` : ""}`;
+}
+
+function jobDetailHTML(j) {
+  if (j.state === "failed" && j.last_error) {
+    return `<span class="job-message">Failed</span><span class="job-error">${escapeHtml(j.last_error)}</span>`;
+  }
+  const message = j.blocked_message || j.last_error || "";
+  return message ? `<span class="job-message">${escapeHtml(message)}</span>` : "";
+}
+
+function appendJobRecoveryActions(box, job) {
+  const actions = document.createElement("span");
+  actions.className = "job-recovery";
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.textContent = retryButtonText(job);
+  retry.onclick = () => retryJob(job);
+  actions.append(retry);
+
+  const entry = state.files.get(job.path);
+  if (entry && canDiscardFile(entry)) {
+    const discard = document.createElement("button");
+    discard.type = "button";
+    discard.textContent = "Discard";
+    discard.onclick = () => discardFile(job.path);
+    actions.append(discard);
+  }
+  box.appendChild(actions);
 }
 
 function renderRuns() {
@@ -1280,9 +1437,9 @@ async function copyVisibleLog() {
   try {
     if (!navigator.clipboard) throw new Error("clipboard unavailable");
     await navigator.clipboard.writeText(text);
-    setNotice("Copied visible log lines.", "ok");
+    setNotice("Copied visible log lines.", "ok", "log-copy");
   } catch {
-    setNotice("Copy failed.", "error");
+    setNotice("Copy failed.", "error", "log-copy");
   }
 }
 
@@ -1310,9 +1467,10 @@ async function exportBackup() {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     document.getElementById("backup-status").textContent = "Backup exported.";
+    clearNotice("backup");
   } catch (e) {
     document.getElementById("backup-status").textContent = "Export failed: " + e.message;
-    setNotice("Backup export failed: " + e.message, "error");
+    setNotice("Backup export failed: " + e.message, "error", "backup");
   }
 }
 
@@ -1327,16 +1485,16 @@ async function importBackupFile(file) {
       body: text,
     });
     document.getElementById("backup-status").textContent = "Backup imported; reloading...";
-    setNotice("Backup imported.", "ok");
+    setNotice("Backup imported.", "ok", "backup");
     setTimeout(() => location.reload(), 600);
   } catch (e) {
     document.getElementById("backup-status").textContent = "Import failed: " + e.message;
-    setNotice("Backup import failed: " + e.message, "error");
+    setNotice("Backup import failed: " + e.message, "error", "backup");
   }
 }
 
 async function uploadFiles(fileList) {
-  setNotice("", "info");
+  clearNotice("files-action");
   for (const file of fileList) {
     const target = joinRelPath(state.currentDir, file.name);
     const fd = new FormData();
@@ -1344,9 +1502,9 @@ async function uploadFiles(fileList) {
     fd.append("path", target);
     try {
       await request("/api/files", { method: "POST", body: fd });
-      setNotice("Queued upload: " + target, "ok");
+      setNotice("Queued upload: " + target, "ok", "files-action");
     } catch (e) {
-      setNotice("Upload failed for " + file.name + ": " + e.message, "error");
+      setNotice("Upload failed for " + file.name + ": " + e.message, "error", "files-action");
     }
   }
 }
@@ -1361,11 +1519,11 @@ async function doMkdir() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: dir }),
     });
-    setNotice("Folder queued: " + dir, "ok");
+    setNotice("Folder queued: " + dir, "ok", "files-action");
     state.currentDir = cleanRelPath(dir);
     renderFiles();
   } catch (e) {
-    setNotice("Folder create failed: " + e.message, "error");
+    setNotice("Folder create failed: " + e.message, "error", "files-action");
   }
 }
 
@@ -1373,9 +1531,37 @@ async function doDelete(path) {
   if (!confirm("Delete " + relPath(path) + "?")) return;
   try {
     await request(apiFileURL(path), { method: "DELETE" });
-    setNotice("Delete queued: " + relPath(path), "ok");
+    setNotice("Delete accepted: " + relPath(path), "ok", "files-action");
   } catch (e) {
-    setNotice("Delete failed: " + e.message, "error");
+    setNotice("Delete failed: " + e.message, "error", "files-action");
+  }
+}
+
+async function retryJob(job) {
+  if (!job) return;
+  try {
+    await request("/api/files/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: job.id }),
+    });
+    setNotice(retryButtonText(job) + " queued: " + relPath(job.path), "ok", "files-action");
+  } catch (e) {
+    setNotice("Retry failed: " + e.message, "error", "files-action");
+  }
+}
+
+async function discardFile(path) {
+  if (!confirm("Discard local state for " + relPath(path) + "? This does not delete anything from the machine.")) return;
+  try {
+    await request("/api/files/discard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    setNotice("Discarded local state: " + relPath(path), "ok", "files-action");
+  } catch (e) {
+    setNotice("Discard failed: " + e.message, "error", "files-action");
   }
 }
 
@@ -1391,9 +1577,9 @@ async function doRename(path) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ from: path, to }),
     });
-    setNotice("Rename queued: " + relPath(path) + " -> " + to, "ok");
+    setNotice("Rename queued: " + relPath(path) + " -> " + to, "ok", "files-action");
   } catch (e) {
-    setNotice("Rename failed: " + e.message, "error");
+    setNotice("Rename failed: " + e.message, "error", "files-action");
   }
 }
 
@@ -1501,7 +1687,7 @@ function currentMacroFromForm() {
 function saveMacroFromForm() {
   const macro = currentMacroFromForm();
   if (!macro) {
-    setNotice("Macro requires a name and at least one line.", "error");
+    setNotice("Macro requires a name and at least one line.", "error", "macro-edit");
     return;
   }
   const idx = state.ui.macros.findIndex((m) => m.id === macro.id);
@@ -1512,6 +1698,7 @@ function saveMacroFromForm() {
   renderMacroButtons();
   renderMacroEditor();
   renderGamepadSettings();
+  clearNotice("macro-edit");
   queueSaveUISettings();
 }
 
@@ -1559,22 +1746,22 @@ function moveSelectedMacro(dir) {
 async function runMacro(macro, opts = {}) {
   if (!macro || !macro.lines.length) return;
   if (state.macroRunning) {
-    setNotice("A macro is already running.", "error");
+    setNotice("A macro is already running.", "error", "macro-run");
     return;
   }
   if (macro.lines.length > 1 && !confirm("Run macro " + macro.name + "?")) return;
   state.macroRunning = true;
-  setNotice((opts.source === "gamepad" ? "Gamepad macro: " : "Running macro: ") + macro.name, "info");
+  setNotice((opts.source === "gamepad" ? "Gamepad macro: " : "Running macro: ") + macro.name, "info", "macro-run");
   try {
     for (const line of macro.lines) {
       rememberCommand(line);
       const ok = await sendGcode(line);
       if (!ok) {
-        setNotice("Macro stopped after error: " + macro.name, "error");
+        setNotice("Macro stopped after error: " + macro.name, "error", "macro-run");
         return;
       }
     }
-    setNotice("Macro completed: " + macro.name, "ok");
+    setNotice("Macro completed: " + macro.name, "ok", "macro-run");
   } finally {
     state.macroRunning = false;
   }
@@ -1598,11 +1785,12 @@ async function sendGcode(line) {
 // Show immediate feedback because recovery commands may be sent while the log is
 // filtered or the machine remains in Alarm until the next status poll.
 async function sendControl(action) {
+  const noticeKey = "control-" + action;
   state.controlPendingAction = action;
   if (action === "recover") state.lastControlResult = null;
   setControlButtonsPending(action, true);
   renderMachine();
-  setNotice(controlPendingText(action), "info");
+  setNotice(controlPendingText(action), "info", noticeKey);
   try {
     const resp = await request("/api/control", {
       method: "POST",
@@ -1614,7 +1802,7 @@ async function sendControl(action) {
       result = await resp.json();
     }
     if (result) state.lastControlResult = result;
-    setNotice(controlSuccessText(action, result), "ok");
+    setNotice(controlSuccessText(action, result), "ok", noticeKey);
     pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
@@ -1622,7 +1810,7 @@ async function sendControl(action) {
       state.lastControlResult = { action, recovered: false, failed: true, message: e.message };
     }
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
-    setNotice(controlErrorText(action, e.message), "error");
+    setNotice(controlErrorText(action, e.message), "error", noticeKey);
   } finally {
     state.controlPendingAction = "";
     setControlButtonsPending(action, false);
@@ -1843,6 +2031,7 @@ function applyJogEvent(ev) {
       }
     }
   } else if (ev.type === "status" && ev.status) {
+    clearNotice("machine-status");
     state.jog.mpos = ev.status.mpos || state.jog.mpos;
     state.jog.wpos = ev.status.wpos || state.jog.wpos;
     state.jog.observed = ev.status.mpos || state.jog.observed;
@@ -1946,9 +2135,10 @@ function handleGamepadMacroButtons(buttons, deadman) {
     const macro = macroByID(binding.macro_id);
     if (!macro) continue;
     if (!state.jog.armed || !deadman) {
-      setNotice("Gamepad macro requires armed jog and deadman.", "error");
+      setNotice("Gamepad macro requires armed jog and deadman.", "error", "gamepad-macro");
       continue;
     }
+    clearNotice("gamepad-macro");
     runMacro(macro, { source: "gamepad" });
   }
   state.jog.buttons = buttons;
@@ -2005,12 +2195,16 @@ function clampAxis(v) {
 }
 
 function applySnapshot(snap) {
-  if (snap.machine) state.machine = snap.machine;
+  if (snap.machine) {
+    state.machine = snap.machine;
+    clearNotice("machine-status");
+  }
   if (Array.isArray(snap.files)) {
     state.files = new Map(snap.files.map((f) => [f.path, f]));
     state.filesLoaded = true;
   }
   if (Array.isArray(snap.jobs)) state.jobs = new Map(snap.jobs.map((j) => [j.id, j]));
+  if (Array.isArray(snap.jobs)) state.machine.pending_jobs = queuePendingCount();
   if (Array.isArray(snap.runs)) state.runs = snap.runs;
   renderMachine();
   renderFiles();
@@ -2026,7 +2220,7 @@ function applySnapshot(snap) {
 
 function applyChange(ev) {
   if (ev.kind === "reset") {
-    setNotice("Local state changed; reloading.", "info");
+    setNotice("Local state changed; reloading.", "info", "local-state");
     setTimeout(() => location.reload(), 400);
     return;
   }
@@ -2037,6 +2231,8 @@ function applyChange(ev) {
     renderFiles();
   } else if (ev.kind === "job" && ev.job) {
     state.jobs.set(ev.job.id, ev.job);
+    state.machine.pending_jobs = queuePendingCount();
+    renderMachine();
     renderJobs();
   }
 }
@@ -2080,9 +2276,10 @@ async function pollMachine() {
   try {
     const r = await request("/api/machine/status");
     state.machine = await r.json();
+    clearNotice("machine-status");
     renderMachine();
   } catch (e) {
-    setNotice("Machine status unavailable: " + e.message, "error");
+    setNotice("Machine status unavailable: " + e.message, "error", "machine-status");
   }
 }
 
@@ -2099,6 +2296,7 @@ async function loadRuns() {
 function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
+  document.getElementById("notice-clear").onclick = () => clearNotice();
   document.getElementById("tab-control").onclick = () => showTab("control");
   document.getElementById("tab-files").onclick = () => showTab("files");
   drop.onclick = () => input.click();
