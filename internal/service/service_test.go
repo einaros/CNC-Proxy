@@ -26,7 +26,7 @@ import (
 // seedOnMachine uploads content directly to the fake machine via a client.
 func seedOnMachine(t *testing.T, addr, remote string, content []byte) {
 	t.Helper()
-	conn, err := client.Dial(addr, 2*time.Second)
+	conn, err := client.Dial(addr, 2*time.Second, client.WithUploadStartDelay(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +211,36 @@ func TestDiscardLocalErrorClearsStaleFailedDelete(t *testing.T) {
 	}
 }
 
+func TestDiscardLocalClearsFailedJobWithoutEntry(t *testing.T) {
+	svc, st := newService(t)
+	cachePath := filepath.Join(st.CacheDir(), "orphan-cache")
+	if err := os.MkdirAll(st.CacheDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enqueue(store.Job{Kind: store.JobUpload, Path: "/sd/gcodes/orphan.nc", CachePath: cachePath}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DiscardLocal("orphan.nc"); err != nil {
+		t.Fatalf("discard local: %v", err)
+	}
+	if got := st.ListJobs()[0]; got.State != store.Done || got.LastError != "" {
+		t.Fatalf("job after discard = %+v", got)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("cache stat = %v, want removed", err)
+	}
+}
+
 func TestDeleteSyncedEntryQueuesMachineDelete(t *testing.T) {
 	svc, st := newService(t)
 	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/a.nc", Sync: store.Synced}); err != nil {
@@ -242,7 +272,9 @@ func TestDownloadOnDemand(t *testing.T) {
 	tr.Observe(machine.Idle)
 	arb := session.New(session.Config{
 		Tracker: tr,
-		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	svc, err := New(st, arb)
 	if err != nil {
@@ -287,7 +319,9 @@ func TestDownloadCompressedSidecar(t *testing.T) {
 	tr.Observe(machine.Idle)
 	arb := session.New(session.Config{
 		Tracker: tr,
-		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	svc, err := New(st, arb)
 	if err != nil {
@@ -392,7 +426,9 @@ func serviceWithMachine(t *testing.T) (*Service, *carveratest.FakeMachine, *mach
 	tr := machine.NewTracker()
 	arb := session.New(session.Config{
 		Tracker: tr,
-		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	svc, err := New(st, arb)
 	if err != nil {
@@ -548,7 +584,9 @@ func TestRecoverAlarmViaRelayInjectionVerifiesStatus(t *testing.T) {
 	tr := machine.NewTracker()
 	arb := session.New(session.Config{
 		Tracker: tr,
-		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	relaySrv := &relay.Server{
 		Dial:     func() (string, error) { return m.Addr(), nil },
@@ -689,7 +727,9 @@ func TestRecoverAlarmRefreshesStaleStatus(t *testing.T) {
 	arb := session.New(session.Config{
 		Tracker:     tr,
 		StateMaxAge: 50 * time.Millisecond,
-		Dial:        func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	svc, err := New(st, arb)
 	if err != nil {

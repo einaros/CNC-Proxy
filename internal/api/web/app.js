@@ -574,6 +574,22 @@ function queuePendingCount() {
   return n;
 }
 
+function hasLiveJobs() {
+  return [...state.jobs.values()].some((j) => j.state === "queued" || j.state === "running");
+}
+
+async function refreshJobs() {
+  if (!state.filesLoaded || !hasLiveJobs()) return;
+  const r = await request("/api/jobs");
+  const jobs = await r.json();
+  if (!Array.isArray(jobs)) return;
+  state.jobs = new Map(jobs.map((j) => [j.id, j]));
+  state.machine.pending_jobs = queuePendingCount();
+  renderMachine();
+  renderFiles();
+  renderJobs();
+}
+
 function pendingCount() {
   const n = Number(state.machine?.pending_jobs);
   return Number.isFinite(n) ? n : queuePendingCount();
@@ -1064,10 +1080,10 @@ function preferredRetryJob(jobs) {
 
 function canDiscardFile(f) {
   if (!f || f.virtual) return false;
+  if (jobsForPath(f.path).some((j) => j.state === "running")) return false;
   if (["local_only", "pending_upload"].includes(f.sync)) return true;
   if (f.sync !== "error") return false;
-  const jobs = jobsForPath(f.path);
-  return !jobs.some((j) => j.state === "running");
+  return true;
 }
 
 function retryButtonText(job) {
@@ -1285,7 +1301,7 @@ function renderJobs() {
       <span class="job-main"><span class="job-kind">${escapeHtml(j.kind)}</span><span class="name">${escapeHtml(relPath(j.path))}</span></span>
       <span class="job-status">${escapeHtml(jobStatusText(j))}</span>
       <span class="job-detail">${jobDetailHTML(j)}</span>`;
-    if (j.state === "failed") appendJobRecoveryActions(row.querySelector(".job-detail"), j);
+    appendJobActions(row.querySelector(".job-detail"), j);
     div.appendChild(row);
   }
 }
@@ -1302,24 +1318,32 @@ function jobDetailHTML(j) {
   return message ? `<span class="job-message">${escapeHtml(message)}</span>` : "";
 }
 
-function appendJobRecoveryActions(box, job) {
+function appendJobActions(box, job) {
   const actions = document.createElement("span");
   actions.className = "job-recovery";
-  const retry = document.createElement("button");
-  retry.type = "button";
-  retry.textContent = retryButtonText(job);
-  retry.onclick = () => retryJob(job);
-  actions.append(retry);
+  if (job.state === "failed") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = retryButtonText(job);
+    retry.onclick = () => retryJob(job);
+    actions.append(retry);
 
-  const entry = state.files.get(job.path);
-  if (entry && canDiscardFile(entry)) {
     const discard = document.createElement("button");
     discard.type = "button";
     discard.textContent = "Discard";
     discard.onclick = () => discardFile(job.path);
     actions.append(discard);
   }
-  box.appendChild(actions);
+
+  const entry = state.files.get(job.path);
+  if (job.state !== "failed" && job.state !== "running" && entry && canDiscardFile(entry)) {
+    const discard = document.createElement("button");
+    discard.type = "button";
+    discard.textContent = "Discard";
+    discard.onclick = () => discardFile(job.path);
+    actions.append(discard);
+  }
+  if (actions.children.length) box.appendChild(actions);
 }
 
 function renderRuns() {
@@ -2280,6 +2304,11 @@ async function pollMachine() {
     renderMachine();
   } catch (e) {
     setNotice("Machine status unavailable: " + e.message, "error", "machine-status");
+  }
+  try {
+    await refreshJobs();
+  } catch {
+    // File SSE reports its own disconnect state; avoid duplicating it here.
   }
 }
 

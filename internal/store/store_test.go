@@ -265,6 +265,71 @@ func TestRetryJobRequeuesFailedJob(t *testing.T) {
 	}
 }
 
+func TestDiscardJobsMarksQueuedAndFailedJobsDone(t *testing.T) {
+	s, _ := Open("")
+	queued, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := s.Enqueue(Job{Kind: JobDelete, Path: "/sd/gcodes/a.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateJob(failed.ID, func(j *Job) {
+		j.State = Failed
+		j.LastError = "delete failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/b.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	discarded, ok, err := s.DiscardJobs("/sd/gcodes/a.nc", JobUpload, JobDelete)
+	if err != nil || !ok {
+		t.Fatalf("discard jobs ok=%v err=%v", ok, err)
+	}
+	if len(discarded) != 2 {
+		t.Fatalf("discarded jobs = %+v, want 2", discarded)
+	}
+	jobs := s.ListJobs()
+	for _, j := range jobs {
+		switch j.ID {
+		case queued.ID, failed.ID:
+			if j.State != Done || j.LastError != "" {
+				t.Fatalf("discarded job = %+v, want done without error", j)
+			}
+		case other.ID:
+			if j.State != Queued {
+				t.Fatalf("other job = %+v, want queued", j)
+			}
+		}
+	}
+}
+
+func TestStartJobOnlyStartsQueuedJobs(t *testing.T) {
+	s, _ := Open("")
+	j, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, ok, err := s.StartJob(j.ID)
+	if err != nil || !ok {
+		t.Fatalf("start queued ok=%v err=%v", ok, err)
+	}
+	if started.State != Running {
+		t.Fatalf("started state = %q, want running", started.State)
+	}
+	again, ok, err := s.StartJob(j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("start running ok=true job=%+v, want false", again)
+	}
+}
+
 func TestSubscribeReceivesEvents(t *testing.T) {
 	s, _ := Open("")
 	ch, unsub := s.Subscribe()

@@ -504,6 +504,9 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), `setNotice("Machine status unavailable: " + e.message, "error", "machine-status")`) || !strings.Contains(string(jsBody), `clearNotice("machine-status")`) {
 		t.Errorf("app.js missing machine status notice lifecycle")
 	}
+	if !strings.Contains(string(jsBody), "refreshJobs") || !strings.Contains(string(jsBody), "/api/jobs") {
+		t.Errorf("app.js missing active job diagnostic refresh")
+	}
 	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing jog plot, jog status messaging, or cache-only status polling")
 	}
@@ -642,7 +645,9 @@ func serverWithMachine(t *testing.T) (*httptest.Server, *carveratest.FakeMachine
 	tr := machine.NewTracker()
 	arb := session.New(session.Config{
 		Tracker: tr,
-		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	svc, err := service.New(st, arb)
 	if err != nil {
@@ -670,7 +675,9 @@ func serverWithJog(t *testing.T, auth bool) (*httptest.Server, *carveratest.Fake
 	arb := session.New(session.Config{
 		Tracker:     tr,
 		StateMaxAge: time.Second,
-		Dial:        func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	svc, err := service.New(st, arb)
 	if err != nil {

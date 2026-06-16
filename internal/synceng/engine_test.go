@@ -5,6 +5,8 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/machine"
+	"github.com/uwin/cnc-proxy/internal/protocol"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
@@ -29,7 +32,9 @@ func setup(t *testing.T) (*carveratest.FakeMachine, *store.Store, *session.Arbit
 	tr := machine.NewTracker()
 	arb := session.New(session.Config{
 		Tracker: tr,
-		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), 2*time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	return m, st, arb, tr
 }
@@ -49,6 +54,23 @@ func writeCache(t *testing.T, dir string, size int) (string, string, int64) {
 	}
 	sum := md5.Sum(content)
 	return p, hex.EncodeToString(sum[:]), int64(size)
+}
+
+func readScriptFrame(c net.Conn, scan *protocol.Scanner) (protocol.Frame, error) {
+	buf := make([]byte, 1024)
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := c.Read(buf)
+		if n > 0 {
+			frames := scan.Push(buf[:n])
+			if len(frames) > 0 {
+				return frames[0], nil
+			}
+		}
+		if err != nil {
+			return protocol.Frame{}, err
+		}
+	}
 }
 
 func TestUploadJobSyncsWhenIdle(t *testing.T) {
@@ -101,7 +123,7 @@ func TestUploadJobRefreshesStaleStatusBeforeSyncing(t *testing.T) {
 		Tracker:      tr,
 		PollInterval: 10 * time.Millisecond,
 		Dial: func() (*client.Conn, error) {
-			return client.Dial(m.Addr(), 2*time.Second, client.WithFilePacketSize(client.USBPacketSize))
+			return client.Dial(m.Addr(), 2*time.Second, client.WithFilePacketSize(client.USBPacketSize), client.WithUploadStartDelay(0))
 		},
 		FilePacketSize:            client.USBPacketSize,
 		PreserveConnOnPollTimeout: true,
@@ -272,6 +294,148 @@ func TestFailureRecordedAndRetried(t *testing.T) {
 	}
 	if final := st.ListJobs()[0]; final.State != store.Failed {
 		t.Errorf("final state = %q, want failed after %d attempts", final.State, eng.maxAttempts)
+	}
+}
+
+func TestTransientUploadFailureKeepsEntryPendingUntilAttemptsExhausted(t *testing.T) {
+	_, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	eng.maxAttempts = 2
+	eng.baseBackoff = time.Millisecond
+	tr.Observe(machine.Idle)
+
+	remote := "/sd/gcodes/missing-cache.nc"
+	missingCachePath := filepath.Join(t.TempDir(), "missing-cache.bin")
+	st.PutEntry(store.Entry{Path: remote, Size: 123, MD5: "bad-md5", CachePath: missingCachePath, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: missingCachePath, MD5: "bad-md5", Size: 123})
+
+	eng.drain()
+	job := st.ListJobs()[0]
+	if job.State != store.Queued {
+		t.Fatalf("after first failure job state = %q, want queued", job.State)
+	}
+	if job.Attempts != 1 || job.LastError == "" {
+		t.Fatalf("after first failure job = %+v, want one failed attempt with error", job)
+	}
+	entry, _ := st.GetEntry(remote)
+	if entry.Sync != store.PendingUpload {
+		t.Fatalf("after first failure entry sync = %q, want pending_upload", entry.Sync)
+	}
+	if entry.Error == "" {
+		t.Fatal("after first failure entry should retain the last error text")
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	eng.drain()
+	job = st.ListJobs()[0]
+	if job.State != store.Failed {
+		t.Fatalf("after final failure job state = %q, want failed", job.State)
+	}
+	entry, _ = st.GetEntry(remote)
+	if entry.Sync != store.Error {
+		t.Fatalf("after final failure entry sync = %q, want error", entry.Sync)
+	}
+}
+
+func TestPostUploadMD5TimeoutDoesNotHoldQueueForOperationTimeout(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	tr.Observe(machine.Idle)
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial: func() (*client.Conn, error) {
+			return client.New(clientSide, client.WithUploadStartDelay(0)), nil
+		},
+	})
+	compress := false
+	eng := New(Config{
+		Store:                  st,
+		Arbiter:                arb,
+		OpTimeout:              time.Second,
+		PostUploadCheckTimeout: 25 * time.Millisecond,
+		Compress:               &compress,
+	})
+
+	cachePath, md5hex, size := writeCache(t, t.TempDir(), 5*1024)
+	remote := "/sd/gcodes/slow-md5.nc"
+	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
+
+	done := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() {
+		defer serverSide.Close()
+		var scan protocol.Scanner
+		expect := func(cmd byte) (protocol.Frame, error) {
+			f, err := readScriptFrame(serverSide, &scan)
+			if err != nil {
+				return protocol.Frame{}, err
+			}
+			if f.Cmd != cmd {
+				return protocol.Frame{}, fmt.Errorf("frame = %s, want %s", protocol.CmdName(f.Cmd), protocol.CmdName(cmd))
+			}
+			return f, nil
+		}
+		if _, err := expect(protocol.CmdFileStart); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := expect(protocol.CmdFileMD5); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileView, nil)); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := expect(protocol.CmdFileView); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileData, []byte{0, 0, 0, 1})); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := expect(protocol.CmdFileData); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileEnd, nil)); err != nil {
+			serverErr <- err
+			return
+		}
+		f, err := expect(protocol.CmdCtrlMulti)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if !bytes.Contains(f.Data, []byte("md5sum ")) {
+			serverErr <- fmt.Errorf("post-upload command = %q, want md5sum", string(f.Data))
+			return
+		}
+		<-done
+		serverErr <- nil
+	}()
+
+	start := time.Now()
+	eng.drain()
+	elapsed := time.Since(start)
+	close(done)
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("drain elapsed = %s, post-upload md5 used operation timeout instead of short check", elapsed)
+	}
+	if entry, _ := st.GetEntry(remote); entry.Sync != store.Synced {
+		t.Fatalf("entry sync = %q, want synced", entry.Sync)
+	}
+	if job := st.ListJobs()[0]; job.State != store.Done {
+		t.Fatalf("job state = %q, want done", job.State)
 	}
 }
 

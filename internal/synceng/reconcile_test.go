@@ -31,7 +31,7 @@ func uploadRaw(t *testing.T, conn *client.Conn, remote string, content []byte) {
 // case reconcile must discover).
 func seedMachineFile(t *testing.T, addr, remote string, content []byte) {
 	t.Helper()
-	conn, err := client.Dial(addr, testTimeout())
+	conn, err := client.Dial(addr, testTimeout(), client.WithUploadStartDelay(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func removeOnMachine(t *testing.T, addr, remote string) error {
 
 func TestListTreeRecurses(t *testing.T) {
 	m, _, _, _ := setup(t)
-	conn, err := client.Dial(m.Addr(), testTimeout())
+	conn, err := client.Dial(m.Addr(), testTimeout(), client.WithUploadStartDelay(0))
 	if err != nil {
 		t.Fatal(err)
 	}

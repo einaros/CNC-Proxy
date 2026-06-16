@@ -1038,7 +1038,7 @@ func (s *Service) DiscardLocal(remotePath string) error {
 	}
 	entry, ok := s.store.GetEntry(remote)
 	if !ok {
-		return ErrNotFound
+		return s.discardJobsWithoutEntry(remote)
 	}
 	if !canDiscardLocal(entry.Sync) || s.hasRunningJob(remote) {
 		return ErrDiscardUnavailable
@@ -1052,6 +1052,25 @@ func (s *Service) DiscardLocal(remotePath string) error {
 	}
 	if discarded.CachePath != "" {
 		os.Remove(discarded.CachePath)
+	}
+	return nil
+}
+
+func (s *Service) discardJobsWithoutEntry(remote string) error {
+	if s.hasRunningJob(remote) {
+		return ErrDiscardUnavailable
+	}
+	discarded, ok, err := s.store.DiscardJobs(remote, store.JobUpload, store.JobMkdir, store.JobDelete, store.JobRename)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	for _, job := range discarded {
+		if job.CachePath != "" {
+			os.Remove(job.CachePath)
+		}
 	}
 	return nil
 }

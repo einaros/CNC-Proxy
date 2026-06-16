@@ -207,7 +207,9 @@ func TestReadNotCached(t *testing.T) {
 	tr.Observe(machine.Run)
 	arb := session.New(session.Config{
 		Tracker: tr,
-		Dial:    func() (*client.Conn, error) { return client.Dial(m.Addr(), time.Second) },
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), time.Second, client.WithUploadStartDelay(0))
+		},
 	})
 	svc, err := service.New(st, arb)
 	if err != nil {
@@ -227,6 +229,119 @@ func TestReadNotCached(t *testing.T) {
 	var nce *notCachedError
 	if !errors.As(err, &nce) {
 		t.Errorf("error = %v, want notCachedError", err)
+	}
+}
+
+func TestRemoteOnlyReadDoesNotDownloadFromMount(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	tr.Observe(machine.Idle)
+	dialed := false
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial: func() (*client.Conn, error) {
+			dialed = true
+			return nil, errors.New("webdav read attempted a machine download")
+		},
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := New(svc)
+
+	if err := svc.PutRemoteOnly("remote.nc", 5*1024*1024, time.Unix(0, 0), ""); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := fs.Stat(context.Background(), "/remote.nc")
+	if err != nil {
+		t.Fatalf("remote-only stat: %v", err)
+	}
+	if got, want := fi.Size(), int64(5*1024*1024); got != want {
+		t.Fatalf("remote-only stat size = %d, want %d", got, want)
+	}
+
+	_, err = fs.OpenFile(context.Background(), "/remote.nc", os.O_RDONLY, 0)
+	if err == nil {
+		t.Fatal("expected not-cached error reading a remote-only file from the mount")
+	}
+	var nce *notCachedError
+	if !errors.As(err, &nce) {
+		t.Fatalf("error = %v, want notCachedError", err)
+	}
+	if dialed {
+		t.Fatal("WebDAV mount read dialed the machine for an uncached remote-only file")
+	}
+}
+
+func TestPropfindRemoteOnlyDoesNotDownloadFromMount(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	tr.Observe(machine.Idle)
+	dialed := false
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial: func() (*client.Conn, error) {
+			dialed = true
+			return nil, errors.New("webdav propfind attempted a machine download")
+		},
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := New(svc)
+	if err := svc.PutRemoteOnly("remote.unknowncnc", 5*1024*1024, time.Unix(0, 0), ""); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(fs.Handler(""))
+	defer srv.Close()
+
+	reqBody := strings.NewReader(`<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+    <D:getcontentlength/>
+    <D:getcontenttype/>
+    <D:getlastmodified/>
+    <D:getetag/>
+  </D:prop>
+</D:propfind>`)
+	req, err := http.NewRequest("PROPFIND", srv.URL+"/", reqBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Depth", "1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 207 {
+		t.Fatalf("PROPFIND status = %d body %q, want 207", resp.StatusCode, string(respBody))
+	}
+	if !strings.Contains(string(respBody), "remote.unknowncnc") {
+		t.Fatalf("PROPFIND body missing remote file: %q", string(respBody))
+	}
+	if !strings.Contains(string(respBody), "application/octet-stream") {
+		t.Fatalf("PROPFIND body missing metadata-only content type: %q", string(respBody))
+	}
+	if dialed {
+		t.Fatal("PROPFIND dialed the machine for an uncached remote-only file")
+	}
+
+	resp, err = http.Get(srv.URL + "/remote.unknowncnc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET remote-only status = %d, want 404", resp.StatusCode)
+	}
+	if dialed {
+		t.Fatal("GET dialed the machine for an uncached remote-only file")
 	}
 }
 

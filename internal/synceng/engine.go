@@ -21,11 +21,16 @@ import (
 	"github.com/uwin/cnc-proxy/internal/store"
 )
 
+var errJobNoLongerQueued = errors.New("synceng: job is no longer queued")
+
+const defaultPostUploadCheckTimeout = 2 * time.Second
+
 // Engine executes queued jobs against the machine via the arbiter.
 type Engine struct {
-	store     *store.Store
-	arb       *session.Arbiter
-	opTimeout time.Duration
+	store                  *store.Store
+	arb                    *session.Arbiter
+	opTimeout              time.Duration
+	postUploadCheckTimeout time.Duration
 
 	// backoff bounds. A failed job's next attempt waits up to maxBackoff.
 	baseBackoff time.Duration
@@ -52,6 +57,10 @@ type Config struct {
 	BaseBackoff time.Duration
 	MaxBackoff  time.Duration
 	MaxAttempts int
+	// PostUploadCheckTimeout bounds the best-effort md5sum after FILE_END.
+	// The upload is already accepted once FILE_END arrives; this check must
+	// never hold the queue for the full operation timeout.
+	PostUploadCheckTimeout time.Duration
 	// Compress enables QuickLZ compression for large uploads when the firmware
 	// advertises ".lz" support. Defaults to true.
 	Compress *bool
@@ -71,19 +80,23 @@ func New(cfg Config) *Engine {
 	if cfg.MaxAttempts == 0 {
 		cfg.MaxAttempts = 8
 	}
+	if cfg.PostUploadCheckTimeout == 0 {
+		cfg.PostUploadCheckTimeout = defaultPostUploadCheckTimeout
+	}
 	compress := true
 	if cfg.Compress != nil {
 		compress = *cfg.Compress
 	}
 	return &Engine{
-		store:       cfg.Store,
-		arb:         cfg.Arbiter,
-		opTimeout:   cfg.OpTimeout,
-		baseBackoff: cfg.BaseBackoff,
-		maxBackoff:  cfg.MaxBackoff,
-		maxAttempts: cfg.MaxAttempts,
-		compress:    compress,
-		now:         time.Now,
+		store:                  cfg.Store,
+		arb:                    cfg.Arbiter,
+		opTimeout:              cfg.OpTimeout,
+		postUploadCheckTimeout: cfg.PostUploadCheckTimeout,
+		baseBackoff:            cfg.BaseBackoff,
+		maxBackoff:             cfg.MaxBackoff,
+		maxAttempts:            cfg.MaxAttempts,
+		compress:               compress,
+		now:                    time.Now,
 	}
 }
 
@@ -156,9 +169,18 @@ func (e *Engine) shouldAttempt(j store.Job) bool {
 func (e *Engine) runJob(job store.Job) (bool, error) {
 	// Most jobs require idle; that is the firmware's constraint for file ops.
 	err := e.arb.WithMachine(true, func(c *client.Conn) error {
+		started, err := e.recordRunning(job)
+		if err != nil {
+			return err
+		}
+		if !started {
+			return errJobNoLongerQueued
+		}
 		return e.execute(c, job)
 	})
 	switch {
+	case errors.Is(err, errJobNoLongerQueued):
+		return true, nil
 	case session.Retryable(err):
 		return false, nil // blocked (relay/idle/busy), not a failure
 	case err != nil:
@@ -206,17 +228,16 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 		if err := e.doUpload(c, job); err != nil {
 			return err
 		}
-		// The upload handshake is itself MD5-verified: the controller sends the
-		// content MD5 up front and the firmware stores it, replying FILE_END
-		// only on a complete transfer. A post-upload md5sum is a best-effort
-		// extra check — but the firmware pauses (cachewait) right after a
-		// successful upload, so an immediate md5sum can transiently fail or
-		// race. Treat any mismatch/▽error as non-fatal: the transfer already
-		// succeeded, so mark synced and only log a discrepancy.
-		if remoteMD5, mErr := c.Md5(job.Path, e.opTimeout); mErr != nil {
-			log.Printf("synceng: post-upload md5 check skipped for %s: %v", job.Path, mErr)
-		} else if remoteMD5 != job.MD5 {
-			log.Printf("synceng: post-upload md5 mismatch for %s (got %s want %s)", job.Path, remoteMD5, job.MD5)
+		// FILE_END means the firmware accepted the transfer. It stores the
+		// controller-provided MD5 sidecar during the upload, but does not make
+		// this immediate md5sum part of the transfer contract. Keep it strictly
+		// best-effort so a cache flush race cannot hold the queue for a minute.
+		if e.postUploadCheckTimeout > 0 {
+			if remoteMD5, mErr := c.Md5(job.Path, e.postUploadCheckTimeout); mErr != nil {
+				log.Printf("synceng: post-upload md5 check skipped for %s: %v", job.Path, mErr)
+			} else if remoteMD5 != job.MD5 {
+				log.Printf("synceng: post-upload md5 mismatch for %s (got %s want %s)", job.Path, remoteMD5, job.MD5)
+			}
 		}
 		return e.store.SetEntrySync(job.Path, store.Synced, "")
 
@@ -301,20 +322,45 @@ func (e *Engine) recordSuccess(job store.Job) {
 	})
 }
 
+func (e *Engine) recordRunning(job store.Job) (bool, error) {
+	_, ok, err := e.store.StartJob(job.ID)
+	return ok, err
+}
+
 func (e *Engine) recordFailure(job store.Job, err error) {
+	attempts := job.Attempts + 1
+	terminal := attempts >= e.maxAttempts
 	e.store.UpdateJob(job.ID, func(j *store.Job) {
-		j.Attempts++
+		j.Attempts = attempts
 		j.LastError = err.Error()
-		if j.Attempts >= e.maxAttempts {
+		if terminal {
 			j.State = store.Failed
+		} else {
+			j.State = store.Queued
 		}
-		// else: stays Queued, retried after backoff.
 	})
 	// Reflect failure on the catalog entry too, unless it was a delete that
 	// removed the entry.
 	if _, ok := e.store.GetEntry(job.Path); ok {
-		if serr := e.store.SetEntrySync(job.Path, store.Error, err.Error()); serr != nil {
+		state := failedEntrySyncState(job.Kind, terminal)
+		if serr := e.store.SetEntrySync(job.Path, state, err.Error()); serr != nil {
 			log.Printf("synceng: failed to record error state for %s: %v", job.Path, serr)
 		}
+	}
+}
+
+func failedEntrySyncState(kind store.JobKind, terminal bool) store.SyncState {
+	if terminal {
+		return store.Error
+	}
+	switch kind {
+	case store.JobUpload, store.JobMkdir:
+		return store.PendingUpload
+	case store.JobDelete:
+		return store.PendingDelete
+	case store.JobRename:
+		return store.PendingRename
+	default:
+		return store.Error
 	}
 }

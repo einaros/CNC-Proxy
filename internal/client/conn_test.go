@@ -5,6 +5,8 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -18,7 +20,7 @@ const testTimeout = 3 * time.Second
 
 func dialFake(t *testing.T, m *carveratest.FakeMachine) *Conn {
 	t.Helper()
-	conn, err := Dial(m.Addr(), testTimeout)
+	conn, err := Dial(m.Addr(), testTimeout, WithUploadStartDelay(0))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -38,6 +40,32 @@ func uploadFixture(t *testing.T, conn *Conn, remote string, size int) []byte {
 		t.Fatalf("upload fixture: %v", err)
 	}
 	return content
+}
+
+func readTestFrame(t *testing.T, c net.Conn, scan *protocol.Scanner) protocol.Frame {
+	t.Helper()
+	f, err := readTestFrameErr(c, scan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func readTestFrameErr(c net.Conn, scan *protocol.Scanner) (protocol.Frame, error) {
+	buf := make([]byte, 1024)
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(testTimeout))
+		n, err := c.Read(buf)
+		if n > 0 {
+			frames := scan.Push(buf[:n])
+			if len(frames) > 0 {
+				return frames[0], nil
+			}
+		}
+		if err != nil {
+			return protocol.Frame{}, err
+		}
+	}
 }
 
 func TestListReflectsUploads(t *testing.T) {
@@ -145,6 +173,255 @@ func TestUploadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUploadWaitsAfterFileStart(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	const startDelay = 25 * time.Millisecond
+	conn := New(clientSide, WithUploadStartDelay(startDelay))
+	result := make(chan struct {
+		delta time.Duration
+		err   error
+	}, 1)
+	go func() {
+		defer serverSide.Close()
+		var scan protocol.Scanner
+		readFrame := func() (protocol.Frame, error) {
+			buf := make([]byte, 1024)
+			for {
+				_ = serverSide.SetReadDeadline(time.Now().Add(testTimeout))
+				n, err := serverSide.Read(buf)
+				if n > 0 {
+					frames := scan.Push(buf[:n])
+					if len(frames) > 0 {
+						return frames[0], nil
+					}
+				}
+				if err != nil {
+					return protocol.Frame{}, err
+				}
+			}
+		}
+
+		startFrame, err := readFrame()
+		if err != nil {
+			result <- struct {
+				delta time.Duration
+				err   error
+			}{err: err}
+			return
+		}
+		if startFrame.Cmd != protocol.CmdFileStart {
+			result <- struct {
+				delta time.Duration
+				err   error
+			}{err: errors.New("first frame was not FILE_START")}
+			return
+		}
+		started := time.Now()
+		md5Frame, err := readFrame()
+		if err != nil {
+			result <- struct {
+				delta time.Duration
+				err   error
+			}{err: err}
+			return
+		}
+		if md5Frame.Cmd != protocol.CmdFileMD5 {
+			result <- struct {
+				delta time.Duration
+				err   error
+			}{err: errors.New("second frame was not FILE_MD5")}
+			return
+		}
+		_, err = serverSide.Write(protocol.Encode(protocol.CmdFileCancel, []byte("ok\r\n")))
+		result <- struct {
+			delta time.Duration
+			err   error
+		}{delta: time.Since(started), err: err}
+	}()
+
+	sum := md5.Sum([]byte("x"))
+	err := conn.Upload("/sd/gcodes/a.nc", bytes.NewReader([]byte("x")), 1, hex.EncodeToString(sum[:]), time.Second, nil)
+	if !errors.Is(err, ErrUploadCanceled) {
+		t.Fatalf("Upload err = %v, want ErrUploadCanceled", err)
+	}
+	got := <-result
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.delta < startDelay-5*time.Millisecond {
+		t.Fatalf("FILE_MD5 sent after %s, want at least %s", got.delta, startDelay)
+	}
+}
+
+func TestUploadCanceledIncludesMachineReason(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	conn := New(clientSide, WithUploadStartDelay(0))
+	done := make(chan error, 1)
+	go func() {
+		defer serverSide.Close()
+		var scan protocol.Scanner
+		seenMD5 := false
+		buf := make([]byte, 1024)
+		for !seenMD5 {
+			_ = serverSide.SetReadDeadline(time.Now().Add(testTimeout))
+			n, err := serverSide.Read(buf)
+			if n > 0 {
+				for _, f := range scan.Push(buf[:n]) {
+					if f.Cmd == protocol.CmdFileMD5 {
+						seenMD5 = true
+						break
+					}
+				}
+			}
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileCancel, []byte("ok\r\n"))); err != nil {
+			done <- err
+			return
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("Error: failed to open file [/sd/gcodes/a.nc]!\r\n"))); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	sum := md5.Sum([]byte("x"))
+	err := conn.Upload("/sd/gcodes/a.nc", bytes.NewReader([]byte("x")), 1, hex.EncodeToString(sum[:]), time.Second, nil)
+	var cancelErr *UploadCanceledError
+	if !errors.As(err, &cancelErr) {
+		t.Fatalf("Upload err = %T %[1]v, want UploadCanceledError", err)
+	}
+	if cancelErr.Reason != "Error: failed to open file [/sd/gcodes/a.nc]!" {
+		t.Fatalf("cancel reason = %q", cancelErr.Reason)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUploadResendsLastFrameOnFileRetry(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	content := []byte("retry me")
+	sum := md5.Sum(content)
+	md5hex := hex.EncodeToString(sum[:])
+	conn := New(clientSide, WithUploadStartDelay(0))
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer serverSide.Close()
+		var scan protocol.Scanner
+		expect := func(cmd byte) (protocol.Frame, error) {
+			f, err := readTestFrameErr(serverSide, &scan)
+			if err != nil {
+				return protocol.Frame{}, err
+			}
+			if f.Cmd != cmd {
+				return protocol.Frame{}, fmt.Errorf("frame = %s, want %s", protocol.CmdName(f.Cmd), protocol.CmdName(cmd))
+			}
+			return f, nil
+		}
+		if _, err := expect(protocol.CmdFileStart); err != nil {
+			serverErr <- err
+			return
+		}
+		md5Frame, err := expect(protocol.CmdFileMD5)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if string(md5Frame.Data) != md5hex {
+			serverErr <- fmt.Errorf("md5 frame = %q, want %q", string(md5Frame.Data), md5hex)
+			return
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileRetry, nil)); err != nil {
+			serverErr <- err
+			return
+		}
+		retriedMD5, err := expect(protocol.CmdFileMD5)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if !bytes.Equal(retriedMD5.Data, md5Frame.Data) {
+			serverErr <- errors.New("FILE_RETRY did not resend the last FILE_MD5 frame")
+			return
+		}
+
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileView, nil)); err != nil {
+			serverErr <- err
+			return
+		}
+		viewFrame, err := expect(protocol.CmdFileView)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileRetry, nil)); err != nil {
+			serverErr <- err
+			return
+		}
+		retriedView, err := expect(protocol.CmdFileView)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if !bytes.Equal(retriedView.Data, viewFrame.Data) {
+			serverErr <- errors.New("FILE_RETRY did not resend the last FILE_VIEW frame")
+			return
+		}
+
+		req := []byte{0, 0, 0, 1}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileData, req)); err != nil {
+			serverErr <- err
+			return
+		}
+		dataFrame, err := expect(protocol.CmdFileData)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if !bytes.Equal(dataFrame.Data, append(append([]byte(nil), req...), content...)) {
+			serverErr <- fmt.Errorf("data frame = %x, want seq+content", dataFrame.Data)
+			return
+		}
+		if _, err := serverSide.Write(protocol.Encode(protocol.CmdFileRetry, nil)); err != nil {
+			serverErr <- err
+			return
+		}
+		retriedData, err := expect(protocol.CmdFileData)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if !bytes.Equal(retriedData.Data, dataFrame.Data) {
+			serverErr <- errors.New("FILE_RETRY did not resend the last FILE_DATA frame")
+			return
+		}
+		_, err = serverSide.Write(protocol.Encode(protocol.CmdFileEnd, nil))
+		serverErr <- err
+	}()
+
+	if err := conn.Upload("/sd/gcodes/retry.nc", bytes.NewReader(content), int64(len(content)), md5hex, testTimeout, nil); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUploadAdvertisesConfiguredPacketSize(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -157,7 +434,8 @@ func TestUploadAdvertisesConfiguredPacketSize(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := carveratest.New()
 			defer m.Close()
-			conn, err := Dial(m.Addr(), testTimeout, tc.opts...)
+			opts := append(tc.opts, WithUploadStartDelay(0))
+			conn, err := Dial(m.Addr(), testTimeout, opts...)
 			if err != nil {
 				t.Fatalf("dial: %v", err)
 			}

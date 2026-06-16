@@ -28,6 +28,8 @@ const WifiPacketSize = machinetransport.TCPPacketSize
 // SerialConsole frame-length limit.
 const USBPacketSize = machinetransport.USBPacketSize
 
+const defaultUploadStartDelay = 200 * time.Millisecond
+
 // Option tunes a protocol connection.
 type Option func(*Conn)
 
@@ -41,12 +43,24 @@ func WithFilePacketSize(n int) Option {
 	}
 }
 
+// WithUploadStartDelay overrides the controller-compatible pause between the
+// FILE_START upload command and the first FILE_MD5 handshake frame.
+func WithUploadStartDelay(d time.Duration) Option {
+	return func(k *Conn) {
+		if d < 0 {
+			d = 0
+		}
+		k.uploadStartDelay = d
+	}
+}
+
 // Conn wraps a frame transport with frame-level read/write and a resync scanner.
 type Conn struct {
-	c              machinetransport.Conn
-	filePacketSize int
-	writeMu        sync.Mutex
-	scan           protocol.Scanner
+	c                machinetransport.Conn
+	filePacketSize   int
+	uploadStartDelay time.Duration
+	writeMu          sync.Mutex
+	scan             protocol.Scanner
 	// pending holds frames already parsed from a read that returned more than
 	// one frame, so the next readFrame call drains them first.
 	pending []protocol.Frame
@@ -78,7 +92,7 @@ func NewTransport(t machinetransport.Conn, opts ...Option) *Conn {
 }
 
 func newConn(t machinetransport.Conn, opts ...Option) *Conn {
-	k := &Conn{c: t, filePacketSize: WifiPacketSize}
+	k := &Conn{c: t, filePacketSize: WifiPacketSize, uploadStartDelay: defaultUploadStartDelay}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(k)
@@ -464,6 +478,21 @@ func (k *Conn) QueryState(timeout time.Duration) (string, error) {
 
 var ErrUploadCanceled = errors.New("upload canceled by machine")
 
+// UploadCanceledError preserves the firmware's follow-up error text when it
+// sends FILE_CANCEL and then a NORMAL_INFO diagnostic.
+type UploadCanceledError struct {
+	Reason string
+}
+
+func (e *UploadCanceledError) Error() string {
+	if e != nil && e.Reason != "" {
+		return ErrUploadCanceled.Error() + ": " + e.Reason
+	}
+	return ErrUploadCanceled.Error()
+}
+
+func (e *UploadCanceledError) Unwrap() error { return ErrUploadCanceled }
+
 // Upload transfers a file to remotePath. md5hex is the MD5 of the file's
 // contents (the firmware stores it in a sidecar and the controller compares it
 // for sync confirmation). size is the file length. The handshake is firmware-
@@ -478,8 +507,30 @@ func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex strin
 	if err := k.writeFrame(protocol.UploadCommand(remotePath)); err != nil {
 		return err
 	}
-	// Proactively send MD5, as the controller does.
-	if err := k.writeFrame(protocol.Encode(protocol.CmdFileMD5, []byte(md5hex))); err != nil {
+	if k.uploadStartDelay > 0 {
+		time.Sleep(k.uploadStartDelay)
+	}
+	var lastCmd byte
+	var lastData []byte
+	send := func(cmd byte, data []byte) error {
+		cp := append([]byte(nil), data...)
+		if err := k.writeFrame(protocol.Encode(cmd, cp)); err != nil {
+			return err
+		}
+		lastCmd = cmd
+		lastData = cp
+		return nil
+	}
+	resendLast := func() error {
+		if lastCmd == 0 {
+			return nil
+		}
+		return k.writeFrame(protocol.Encode(lastCmd, lastData))
+	}
+
+	// Proactively send MD5, as the controller does after giving the firmware
+	// time to enter upload mode and reset its file-transfer frame parser.
+	if err := send(protocol.CmdFileMD5, []byte(md5hex)); err != nil {
 		return err
 	}
 
@@ -500,9 +551,13 @@ func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex strin
 
 		switch f.Cmd {
 		case protocol.CmdFileCancel:
-			return ErrUploadCanceled
+			return &UploadCanceledError{Reason: k.uploadCancelReason(f.Data, timeout)}
+		case protocol.CmdFileRetry:
+			if err := resendLast(); err != nil {
+				return err
+			}
 		case protocol.CmdFileMD5:
-			if err := k.writeFrame(protocol.Encode(protocol.CmdFileMD5, []byte(md5hex))); err != nil {
+			if err := send(protocol.CmdFileMD5, []byte(md5hex)); err != nil {
 				return err
 			}
 		case protocol.CmdFileView:
@@ -511,7 +566,7 @@ func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex strin
 				byte(totalPackets >> 24), byte(totalPackets >> 16), byte(totalPackets >> 8), byte(totalPackets),
 				byte(ps >> 8), byte(ps & 0xFF),
 			}
-			if err := k.writeFrame(protocol.Encode(protocol.CmdFileView, view)); err != nil {
+			if err := send(protocol.CmdFileView, view); err != nil {
 				return err
 			}
 		case protocol.CmdFileData:
@@ -519,7 +574,11 @@ func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex strin
 				continue
 			}
 			seq := uint32(f.Data[0])<<24 | uint32(f.Data[1])<<16 | uint32(f.Data[2])<<8 | uint32(f.Data[3])
-			if err := k.sendDataPacket(r, size, packetSize, seq); err != nil {
+			data, err := k.dataPacket(r, size, packetSize, seq)
+			if err != nil {
+				return err
+			}
+			if err := send(protocol.CmdFileData, data); err != nil {
 				return err
 			}
 			if progress != nil {
@@ -536,9 +595,53 @@ func (k *Conn) Upload(remotePath string, r io.ReaderAt, size int64, md5hex strin
 	}
 }
 
+func (k *Conn) uploadCancelReason(data []byte, timeout time.Duration) string {
+	if reason := cleanUploadCancelReason(string(data)); reason != "" {
+		return reason
+	}
+	wait := 2 * time.Second
+	if timeout > 0 && timeout < wait {
+		wait = timeout
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		f, err := k.readFrame(deadline)
+		if err != nil {
+			return ""
+		}
+		switch f.Cmd {
+		case protocol.CmdNormalInfo, protocol.CmdLoadInfo, protocol.CmdDiagRes:
+			if reason := cleanUploadCancelReason(string(f.Data)); reason != "" {
+				return reason
+			}
+		case protocol.CmdFileCancel:
+			if reason := cleanUploadCancelReason(string(f.Data)); reason != "" {
+				return reason
+			}
+		}
+	}
+}
+
+func cleanUploadCancelReason(s string) string {
+	s = strings.Trim(strings.TrimSpace(s), "\x00")
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "ok") {
+		return ""
+	}
+	return s
+}
+
 // sendDataPacket reads the chunk for the requested 1-based sequence and sends a
 // FILE_DATA frame of seq(4 BE) + chunk.
 func (k *Conn) sendDataPacket(r io.ReaderAt, size, packetSize int64, seq uint32) error {
+	data, err := k.dataPacket(r, size, packetSize, seq)
+	if err != nil {
+		return err
+	}
+	return k.writeFrame(protocol.Encode(protocol.CmdFileData, data))
+}
+
+func (k *Conn) dataPacket(r io.ReaderAt, size, packetSize int64, seq uint32) ([]byte, error) {
 	offset := int64(seq-1) * packetSize
 	n := packetSize
 	if offset+n > size {
@@ -550,7 +653,7 @@ func (k *Conn) sendDataPacket(r io.ReaderAt, size, packetSize int64, seq uint32)
 	chunk := make([]byte, n)
 	if n > 0 {
 		if _, err := r.ReadAt(chunk, offset); err != nil && err != io.EOF {
-			return err
+			return nil, err
 		}
 	}
 	data := make([]byte, 4+len(chunk))
@@ -559,7 +662,7 @@ func (k *Conn) sendDataPacket(r io.ReaderAt, size, packetSize int64, seq uint32)
 	data[2] = byte(seq >> 8)
 	data[3] = byte(seq)
 	copy(data[4:], chunk)
-	return k.writeFrame(protocol.Encode(protocol.CmdFileData, data))
+	return data, nil
 }
 
 var ErrDownloadCanceled = errors.New("download canceled by machine")

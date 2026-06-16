@@ -7,8 +7,9 @@
 //   - A write buffers locally and, on close, lands in the cache immediately and
 //     enqueues an upload. The file is visible and readable at once; it reaches
 //     the machine later, when the machine is idle and no controller is attached.
-//   - Reads are served from the local cache, fetching remote_only files from the
-//     machine on demand when the arbiter can safely run the download.
+//   - Reads from the mount are served from the local cache only. File managers
+//     probe file content while browsing folders, and a probe must not turn into
+//     a blocking firmware download of a multi-megabyte remote_only file.
 //   - Directory listings come from the catalog.
 //
 // The status of in-flight files is surfaced through the web UI / tray app, not
@@ -17,7 +18,8 @@ package davfs
 
 import (
 	"context"
-	"errors"
+	"mime"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -26,7 +28,6 @@ import (
 	"golang.org/x/net/webdav"
 
 	"github.com/uwin/cnc-proxy/internal/service"
-	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
 
@@ -39,12 +40,16 @@ type FS struct {
 func New(svc *service.Service) *FS { return &FS{svc: svc} }
 
 // Handler returns a ready-to-serve WebDAV HTTP handler.
-func (fs *FS) Handler(prefix string) *webdav.Handler {
-	return &webdav.Handler{
+func (fs *FS) Handler(prefix string) http.Handler {
+	h := &webdav.Handler{
 		Prefix:     prefix,
 		FileSystem: fs,
 		LockSystem: webdav.NewMemLS(),
 	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), requestMethodKey{}, r.Method)
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func (fs *FS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
@@ -124,15 +129,18 @@ func (fs *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileM
 	if entry.IsDir {
 		return fs.openDir(name)
 	}
-	// Open serves from cache, fetching from the machine on demand for files that
-	// are known but not yet cached (remote_only).
-	rc, e, err := fs.svc.Open(svcPath(name))
+	// WebDAV clients can issue GET/HEAD/range probes while simply opening a
+	// folder. Keep mounted reads cache-only so Explorer/Finder never blocks on
+	// an implicit firmware download of a remote_only file.
+	rc, e, err := fs.svc.ReadCache(svcPath(name))
 	if err != nil {
 		switch {
 		case err == service.ErrNotCached:
-			// On the machine but not fetchable right now (relay active / not idle).
-			return nil, &notCachedError{name: name}
-		case errors.Is(err, session.ErrRelayActive), errors.Is(err, session.ErrNotIdle):
+			if requestMethod(ctx) == "PROPFIND" {
+				return newMetadataFile(e), nil
+			}
+			// On the machine but not cached locally. Keep it visible in listings,
+			// but fail content reads quickly instead of downloading implicitly.
 			return nil, &notCachedError{name: name}
 		default:
 			return nil, os.ErrNotExist
@@ -180,6 +188,15 @@ func isJunk(name string) bool {
 	return strings.HasPrefix(base, "._")
 }
 
+type requestMethodKey struct{}
+
+func requestMethod(ctx context.Context) string {
+	if method, ok := ctx.Value(requestMethodKey{}).(string); ok {
+		return method
+	}
+	return ""
+}
+
 // svcPath converts a WebDAV mount-relative path (rooted at "/") into the
 // relative path the service expects (which it joins under GcodeRoot). The mount
 // root "/" maps to "" so the service resolves it to GcodeRoot itself.
@@ -203,6 +220,19 @@ func (fi *fileInfo) Mode() os.FileMode  { return fi.mode }
 func (fi *fileInfo) ModTime() time.Time { return fi.mtime }
 func (fi *fileInfo) IsDir() bool        { return fi.isDir }
 func (fi *fileInfo) Sys() any           { return nil }
+func (fi *fileInfo) ContentType(context.Context) (string, error) {
+	if fi.isDir {
+		return "", webdav.ErrNotImplemented
+	}
+	switch strings.ToLower(path.Ext(fi.name)) {
+	case ".cnc", ".gc", ".gcode", ".nc", ".ngc", ".tap":
+		return "text/plain; charset=utf-8", nil
+	}
+	if ctype := mime.TypeByExtension(path.Ext(fi.name)); ctype != "" {
+		return ctype, nil
+	}
+	return "application/octet-stream", nil
+}
 
 func fileInfoFromEntry(e store.Entry) *fileInfo {
 	mode := os.FileMode(0o644)
@@ -222,8 +252,9 @@ func rootInfo() *fileInfo {
 	return &fileInfo{name: "gcodes", mode: os.ModeDir | 0o755, isDir: true, mtime: time.Unix(0, 0)}
 }
 
-// notCachedError reports a file present on the machine but not fetchable right
-// now because the machine is unavailable, in relay mode, or not idle.
+// notCachedError reports a file present on the machine but not cached locally.
+// The WebDAV mount deliberately does not fetch remote_only content on open
+// because OS file managers probe files during folder browsing.
 type notCachedError struct{ name string }
 
 func (e *notCachedError) Error() string {

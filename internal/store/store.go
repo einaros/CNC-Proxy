@@ -326,6 +326,40 @@ func (s *Store) DiscardEntry(path string, kinds ...JobKind) (Entry, bool, error)
 	return entry, true, nil
 }
 
+// DiscardJobs marks matching queued/failed jobs done without requiring a
+// catalog entry. It is used to clear orphaned failed jobs from the activity
+// panel after the underlying catalog entry has already disappeared.
+func (s *Store) DiscardJobs(path string, kinds ...JobKind) ([]Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kindSet := map[JobKind]bool{}
+	for _, kind := range kinds {
+		kindSet[kind] = true
+	}
+	now := s.now()
+	var jobEvents []Job
+	for _, j := range s.jobs {
+		if j.Path != path || !kindSet[j.Kind] || (j.State != Queued && j.State != Failed) {
+			continue
+		}
+		j.State = Done
+		j.LastError = ""
+		j.UpdatedAt = now
+		jobEvents = append(jobEvents, *j)
+	}
+	if len(jobEvents) == 0 {
+		return nil, false, nil
+	}
+	if err := s.flushLocked(); err != nil {
+		return nil, false, err
+	}
+	for i := range jobEvents {
+		cp := jobEvents[i]
+		s.publishLocked(Event{Kind: "job", Job: &cp})
+	}
+	return jobEvents, true, nil
+}
+
 // ListEntries returns all entries sorted by path.
 func (s *Store) ListEntries() []Entry {
 	s.mu.RLock()
@@ -427,6 +461,30 @@ func (s *Store) UpdateJob(id int64, mutate func(*Job)) error {
 		}
 	}
 	return fmt.Errorf("store: job %d not found", id)
+}
+
+// StartJob moves a queued job to running, returning false if the job no longer
+// exists or was already completed/failed/discarded by another operation.
+func (s *Store) StartJob(id int64) (Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID != id {
+			continue
+		}
+		if j.State != Queued {
+			return *j, false, nil
+		}
+		j.State = Running
+		j.UpdatedAt = s.now()
+		if err := s.flushLocked(); err != nil {
+			return Job{}, false, err
+		}
+		cp := *j
+		s.publishLocked(Event{Kind: "job", Job: &cp})
+		return cp, true, nil
+	}
+	return Job{}, false, nil
 }
 
 // RetryJob resets a failed job to queued so the sync engine will attempt it

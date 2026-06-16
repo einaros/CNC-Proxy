@@ -42,6 +42,27 @@ func (f *readFile) Readdir(int) ([]os.FileInfo, error) {
 }
 func (f *readFile) Stat() (os.FileInfo, error) { return f.info, nil }
 
+// metadataFile lets PROPFIND inspect a remote_only file without serving its
+// content. Actual GET/HEAD opens still fail fast until the file is cached.
+type metadataFile struct {
+	info os.FileInfo
+}
+
+func newMetadataFile(e store.Entry) *metadataFile {
+	return &metadataFile{info: fileInfoFromEntry(e)}
+}
+
+func (f *metadataFile) Read([]byte) (int, error)  { return 0, io.EOF }
+func (f *metadataFile) Close() error              { return nil }
+func (f *metadataFile) Write([]byte) (int, error) { return 0, os.ErrPermission }
+func (f *metadataFile) Seek(int64, int) (int64, error) {
+	return 0, nil
+}
+func (f *metadataFile) Readdir(int) ([]os.FileInfo, error) {
+	return nil, errors.New("davfs: not a directory")
+}
+func (f *metadataFile) Stat() (os.FileInfo, error) { return f.info, nil }
+
 // dirFile presents a directory's children to the WebDAV server's PROPFIND.
 type dirFile struct {
 	info     os.FileInfo
