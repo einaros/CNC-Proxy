@@ -124,6 +124,7 @@ func onReady() {
 		ticker := time.NewTicker(*poll)
 		defer ticker.Stop()
 		mountBusy := false
+		var uploadTracker traymgr.UploadCompletionTracker
 		beginMountSet := func(enable bool) {
 			if app == nil || mountBusy {
 				return
@@ -146,12 +147,12 @@ func onReady() {
 			mMount.SetTitle("Mounting WebDAV…")
 			go runWebDAVRemount(ctx, app, mountDone)
 		}
-		update(app, mState, mSync, mProc)
+		update(app, mState, mSync, mProc, &uploadTracker)
 		updateMountItem(app, mMount)
 		for {
 			select {
 			case <-ticker.C:
-				update(app, mState, mSync, mProc)
+				update(app, mState, mSync, mProc, &uploadTracker)
 				if !mountBusy {
 					updateMountItem(app, mMount)
 				}
@@ -186,7 +187,7 @@ func onReady() {
 				if app != nil {
 					_ = app.Supervisor.Start()
 					beginRemount()
-					update(app, mState, mSync, mProc)
+					update(app, mState, mSync, mProc, &uploadTracker)
 				}
 			case <-mRestart.ClickedCh:
 				if app != nil {
@@ -194,14 +195,14 @@ func onReady() {
 					_ = app.Supervisor.Restart(ctx)
 					cancel()
 					beginRemount()
-					update(app, mState, mSync, mProc)
+					update(app, mState, mSync, mProc, &uploadTracker)
 				}
 			case <-mStop.ClickedCh:
 				if app != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					_ = app.Supervisor.Stop(ctx)
 					cancel()
-					update(app, mState, mSync, mProc)
+					update(app, mState, mSync, mProc, &uploadTracker)
 				}
 			case <-mQuit.ClickedCh:
 				cancel()
@@ -273,7 +274,7 @@ func updateMountItem(app *traymgr.App, item *systray.MenuItem) {
 	item.Enable()
 }
 
-func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem) {
+func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem, uploadTracker *traymgr.UploadCompletionTracker) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
@@ -302,6 +303,16 @@ func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem) {
 	} else {
 		systray.SetTitle(fmt.Sprintf("CNC ⟳%d", pending))
 		mSync.SetTitle(fmt.Sprintf("Sync: %d pending", pending))
+	}
+
+	jobs, err := client.Jobs(ctx)
+	if err != nil || uploadTracker == nil {
+		return
+	}
+	for _, upload := range uploadTracker.Observe(jobs) {
+		if app != nil {
+			app.NotifyUploadCompleted(upload.Path)
+		}
 	}
 }
 
