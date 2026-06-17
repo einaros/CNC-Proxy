@@ -196,11 +196,32 @@ func (s *Service) RunActiveGcode() (MachineActionResult, error) {
 	return res, nil
 }
 
-// SetCurrentToolID mirrors the controller's M493.2T<n> action for a manually
-// installed milling bit.
+func validCurrentToolID(toolID int) bool {
+	return toolID == -1 || toolID == 0 || toolID == 8888 || (toolID >= 1 && toolID <= 999)
+}
+
+func validChangeToolID(toolID int) bool {
+	return toolID == 0 || toolID == 8888 || (toolID >= 1 && toolID <= 999)
+}
+
+func toolDisplayName(toolID int) string {
+	switch toolID {
+	case -1:
+		return "Empty"
+	case 0:
+		return "Probe"
+	case 8888:
+		return "Laser"
+	default:
+		return fmt.Sprintf("Tool %d", toolID)
+	}
+}
+
+// SetCurrentToolID mirrors the controller's M493.2T<n> action for manually
+// declaring which tool is currently installed.
 func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
-	if toolID < 1 || toolID > 999 {
-		err := fmt.Errorf("service: tool_id must be between 1 and 999")
+	if !validCurrentToolID(toolID) {
+		err := fmt.Errorf("service: tool_id must be Empty (-1), Probe (0), Laser (8888), or between 1 and 999")
 		return MachineActionResult{Action: "set_tool", ToolID: toolID, Message: err.Error()}, err
 	}
 	display := strings.TrimSpace(protocol.SetCurrentToolLine(toolID))
@@ -210,7 +231,48 @@ func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
 		ToolID:  toolID,
 		Command: display,
 		Output:  out,
-		Message: fmt.Sprintf("Set-tool command sent for bit %d.", toolID),
+		Message: fmt.Sprintf("Set-tool command sent for %s.", toolDisplayName(toolID)),
+	}
+	if err != nil {
+		res.Message = err.Error()
+		return res, err
+	}
+	return res, nil
+}
+
+// ChangeTool mirrors the controller's M6T<n> action for changing to a selected
+// tool with the firmware's normal tool-change flow.
+func (s *Service) ChangeTool(toolID int) (MachineActionResult, error) {
+	if !validChangeToolID(toolID) {
+		err := fmt.Errorf("service: tool_id must be Probe (0), Laser (8888), or between 1 and 999")
+		return MachineActionResult{Action: "change_tool", ToolID: toolID, Message: err.Error()}, err
+	}
+	display := strings.TrimSpace(protocol.ChangeToolLine(toolID))
+	out, err := s.sendConsoleMachineAction(display, protocol.ChangeToolLine(toolID))
+	res := MachineActionResult{
+		Action:  "change_tool",
+		ToolID:  toolID,
+		Command: display,
+		Output:  out,
+		Message: fmt.Sprintf("Change-tool command sent for %s.", toolDisplayName(toolID)),
+	}
+	if err != nil {
+		res.Message = err.Error()
+		return res, err
+	}
+	return res, nil
+}
+
+// DropCurrentTool mirrors the controller's M6T-1 drop-tool action.
+func (s *Service) DropCurrentTool() (MachineActionResult, error) {
+	display := strings.TrimSpace(protocol.ChangeToolLine(-1))
+	out, err := s.sendConsoleMachineAction(display, protocol.ChangeToolLine(-1))
+	res := MachineActionResult{
+		Action:  "drop_tool",
+		ToolID:  -1,
+		Command: display,
+		Output:  out,
+		Message: "Drop-tool command sent.",
 	}
 	if err != nil {
 		res.Message = err.Error()

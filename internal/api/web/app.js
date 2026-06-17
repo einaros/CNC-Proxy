@@ -242,6 +242,25 @@ function fmtTool(t) {
   return active + target + offset;
 }
 
+function toolDisplayName(toolID) {
+  switch (Number(toolID)) {
+  case -1:
+    return "Empty";
+  case 0:
+    return "Probe";
+  case 8888:
+    return "Laser";
+  default:
+    return Number.isFinite(Number(toolID)) ? "Tool " + Number(toolID) : "-";
+  }
+}
+
+function validToolID(toolID, allowEmpty = false) {
+  if (!Number.isInteger(toolID)) return false;
+  if (toolID === -1) return allowEmpty;
+  return toolID === 0 || toolID === 8888 || (toolID >= 1 && toolID <= 999);
+}
+
 function haltReason(m) {
   if (m?.halt_reason) return m.halt_reason;
   const h = m?.fields?.H;
@@ -643,6 +662,7 @@ function renderMachine() {
   document.getElementById("status-feed").textContent = fmtTriple(m.feed, " mm/min");
   document.getElementById("status-spindle").textContent = fmtSpindle(m.spindle);
   document.getElementById("status-tool").textContent = fmtTool(m.tool);
+  renderToolStatus(m);
   document.getElementById("status-age").textContent = fmtAge(m.age_ms);
   document.getElementById("status-connection").textContent =
     m.reconnecting ? "reconnecting" : (m.connected ? "connected" : "not connected");
@@ -652,6 +672,22 @@ function renderMachine() {
   renderActiveGcode();
   syncJogAvailabilityFromMachine(m);
   renderJog();
+}
+
+function renderToolStatus(m) {
+  const tool = m.tool || null;
+  const active = Number.isFinite(tool?.active) ? toolDisplayName(tool.active) : "-";
+  const target = Number.isFinite(tool?.target) ? " -> " + toolDisplayName(tool.target) : "";
+  const tlo = Number.isFinite(tool?.offset) ? tool.offset.toFixed(3) : "N/A";
+  const wpRaw = String(m.fields?.W || "").split(",")[0];
+  const wp = Number.parseFloat(wpRaw);
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+  setText("tool-active-status", active + target);
+  setText("tool-tlo-status", tlo);
+  setText("tool-wp-status", Number.isFinite(wp) ? wp.toFixed(2) + "v" : "-");
 }
 
 function renderStatusFields(fields) {
@@ -1854,16 +1890,60 @@ function setActiveFeedback(text, kind) {
   el.className = "action-feedback " + (kind || "");
 }
 
-async function setCurrentTool() {
-  const input = document.getElementById("tool-id");
-  const toolID = Number(input.value);
+function customToolID(inputID) {
+  const input = document.getElementById(inputID);
+  const toolID = Number(input?.value);
   if (!Number.isInteger(toolID) || toolID < 1 || toolID > 999) {
-    setToolFeedback("Bit ID must be between 1 and 999.", "error");
+    return null;
+  }
+  return toolID;
+}
+
+function resetToolSelects() {
+  const change = document.getElementById("tool-change-select");
+  const set = document.getElementById("tool-set-select");
+  if (change) change.value = "";
+  if (set) set.value = "";
+  toggleToolCustomRow("change", false);
+  toggleToolCustomRow("set", false);
+}
+
+function toggleToolCustomRow(kind, show) {
+  const row = document.getElementById("tool-" + kind + "-custom-row");
+  if (!row) return;
+  row.hidden = !show;
+  if (show) {
+    const input = row.querySelector("input");
+    input?.focus();
+    input?.select();
+  }
+}
+
+function handleToolSelect(kind, value) {
+  if (value === "other") {
+    toggleToolCustomRow(kind, true);
+    return;
+  }
+  toggleToolCustomRow(kind, false);
+  const select = document.getElementById("tool-" + kind + "-select");
+  if (select) select.value = "";
+  if (value === "") return;
+  const toolID = Number(value);
+  if (kind === "change") changeTool(toolID);
+  else setCurrentTool(toolID);
+}
+
+async function setCurrentTool(toolID = null) {
+  if (toolID == null) {
+    toolID = customToolID("tool-id");
+  }
+  if (!validToolID(toolID, true)) {
+    setToolFeedback("Tool number must be between 1 and 999.", "error");
     return;
   }
   state.toolPending = "set";
   setToolButtonsPending(true);
-  setToolFeedback("Sending set-tool command for bit " + toolID + "...", "");
+  setToolFeedback("Sending set-tool command for " + toolDisplayName(toolID) + "...", "");
   try {
     const r = await request("/api/tool/current", {
       method: "POST",
@@ -1873,6 +1953,7 @@ async function setCurrentTool() {
     const result = await r.json();
     setToolFeedback(result.message || "Set-tool command sent.", "ok");
     clearNotice("tool");
+    resetToolSelects();
     pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
@@ -1885,8 +1966,40 @@ async function setCurrentTool() {
   }
 }
 
+async function changeTool(toolID = null) {
+  if (toolID == null) {
+    toolID = customToolID("tool-change-id");
+  }
+  if (!validToolID(toolID, false)) {
+    setToolFeedback("Tool number must be between 1 and 999.", "error");
+    return;
+  }
+  state.toolPending = "change";
+  setToolButtonsPending(true);
+  setToolFeedback("Sending change-tool command for " + toolDisplayName(toolID) + "...", "");
+  try {
+    const r = await request("/api/tool/change", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_id: toolID }),
+    });
+    const result = await r.json();
+    setToolFeedback(result.message || "Change-tool command sent.", "ok");
+    clearNotice("tool");
+    resetToolSelects();
+    pollMachine();
+    setTimeout(pollMachine, 1200);
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+    setToolFeedback("Change-tool failed: " + e.message, "error");
+    setNotice("Change-tool failed: " + e.message, "error", "tool");
+  } finally {
+    state.toolPending = "";
+    setToolButtonsPending(false);
+  }
+}
+
 async function calibrateCurrentTool() {
-  if (!confirm("Start current bit calibration?")) return;
   state.toolPending = "calibrate";
   setToolButtonsPending(true);
   setToolFeedback("Sending calibration command...", "");
@@ -1907,16 +2020,52 @@ async function calibrateCurrentTool() {
   }
 }
 
+async function dropCurrentTool() {
+  state.toolPending = "drop";
+  setToolButtonsPending(true);
+  setToolFeedback("Sending drop-tool command...", "");
+  try {
+    const r = await request("/api/tool/drop", { method: "POST" });
+    const result = await r.json();
+    setToolFeedback(result.message || "Drop-tool command sent.", "ok");
+    clearNotice("tool");
+    resetToolSelects();
+    pollMachine();
+    setTimeout(pollMachine, 1200);
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+    setToolFeedback("Drop-tool failed: " + e.message, "error");
+    setNotice("Drop-tool failed: " + e.message, "error", "tool");
+  } finally {
+    state.toolPending = "";
+    setToolButtonsPending(false);
+  }
+}
+
 function setToolButtonsPending(pending) {
   const set = document.getElementById("tool-set");
+  const change = document.getElementById("tool-change-set");
   const cal = document.getElementById("tool-calibrate");
+  const drop = document.getElementById("tool-drop");
+  const setSelect = document.getElementById("tool-set-select");
+  const changeSelect = document.getElementById("tool-change-select");
+  if (setSelect) setSelect.disabled = pending;
+  if (changeSelect) changeSelect.disabled = pending;
   if (set) {
     set.disabled = pending;
-    set.textContent = pending && state.toolPending === "set" ? "Setting..." : "Set Active Bit";
+    set.textContent = pending && state.toolPending === "set" ? "Setting..." : "Set";
+  }
+  if (change) {
+    change.disabled = pending;
+    change.textContent = pending && state.toolPending === "change" ? "Changing..." : "Change";
   }
   if (cal) {
     cal.disabled = pending;
-    cal.textContent = pending && state.toolPending === "calibrate" ? "Calibrating..." : "Calibrate Current Bit";
+    cal.textContent = pending && state.toolPending === "calibrate" ? "Calibrating..." : "Calibrate";
+  }
+  if (drop) {
+    drop.disabled = pending;
+    drop.textContent = pending && state.toolPending === "drop" ? "Dropping..." : "Drop";
   }
 }
 
@@ -2478,6 +2627,77 @@ function bindDataControlButtons() {
   });
 }
 
+function initCommandPopouts() {
+  const popouts = Array.from(document.querySelectorAll(".command-popout"));
+  const commandMenu = document.getElementById("command-menu");
+  let positionFrame = 0;
+
+  const directChild = (el, predicate) => Array.from(el.children).find(predicate) || null;
+  const clamp = (n, min, max) => Math.min(Math.max(n, min), max);
+
+  function positionPopout(popout) {
+    if (!popout.open) return;
+    const trigger = directChild(popout, (el) => el.tagName === "SUMMARY");
+    const panel = directChild(popout, (el) => el.classList.contains("command-panel"));
+    if (!trigger || !panel) return;
+
+    const rect = trigger.getBoundingClientRect();
+    const margin = 12;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1024;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 768;
+    const preferredWidth = Number.parseFloat(getComputedStyle(panel).getPropertyValue("--command-panel-pref-width")) || 440;
+    const width = Math.min(preferredWidth, Math.max(280, viewportWidth - margin * 2));
+    const top = Math.round(rect.bottom + 8);
+    const maxLeft = Math.max(margin, viewportWidth - margin - width);
+    const left = Math.round(clamp(rect.left + rect.width / 2 - width / 2, margin, maxLeft));
+    const maxHeight = Math.round(Math.max(180, viewportHeight - top - margin));
+    const arrowLeft = Math.round(clamp(rect.left + rect.width / 2 - left - 5, 16, width - 26));
+
+    panel.style.setProperty("--command-panel-top", top + "px");
+    panel.style.setProperty("--command-panel-left", left + "px");
+    panel.style.setProperty("--command-panel-width", width + "px");
+    panel.style.setProperty("--command-panel-max-height", maxHeight + "px");
+    panel.style.setProperty("--command-panel-arrow-left", arrowLeft + "px");
+  }
+
+  function positionOpenPopouts() {
+    positionFrame = 0;
+    for (const popout of popouts) positionPopout(popout);
+  }
+
+  function schedulePopoutPosition() {
+    if (positionFrame) return;
+    positionFrame = requestAnimationFrame(positionOpenPopouts);
+  }
+
+  for (const popout of popouts) {
+    const trigger = directChild(popout, (el) => el.tagName === "SUMMARY");
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+    popout.addEventListener("toggle", () => {
+      if (trigger) trigger.setAttribute("aria-expanded", String(popout.open));
+      if (!popout.open) return;
+      for (const other of popouts) {
+        if (other !== popout) other.open = false;
+      }
+      schedulePopoutPosition();
+    });
+  }
+  document.addEventListener("click", (e) => {
+    const target = e.target instanceof Element ? e.target : null;
+    if (target?.closest(".command-popout")) return;
+    for (const popout of popouts) popout.open = false;
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    for (const popout of popouts) popout.open = false;
+  });
+  window.addEventListener("resize", schedulePopoutPosition);
+  window.addEventListener("scroll", schedulePopoutPosition, true);
+  commandMenu?.addEventListener("scroll", schedulePopoutPosition, { passive: true });
+  window.visualViewport?.addEventListener("resize", schedulePopoutPosition);
+  window.visualViewport?.addEventListener("scroll", schedulePopoutPosition);
+}
+
 async function loadJogCapabilities() {
   try {
     const r = await request("/api/jog/capabilities");
@@ -2961,14 +3181,19 @@ function init() {
   document.getElementById("ctl-hold").onclick = () => sendControl("hold");
   document.getElementById("ctl-resume").onclick = () => sendControl("resume");
   document.getElementById("ctl-halt").onclick = () => sendControl("halt");
-  document.getElementById("tool-set").onclick = setCurrentTool;
+  document.getElementById("tool-set").onclick = () => setCurrentTool();
+  document.getElementById("tool-change-set").onclick = () => changeTool();
   document.getElementById("tool-calibrate").onclick = calibrateCurrentTool;
+  document.getElementById("tool-drop").onclick = dropCurrentTool;
+  document.getElementById("tool-set-select").onchange = (e) => handleToolSelect("set", e.target.value);
+  document.getElementById("tool-change-select").onchange = (e) => handleToolSelect("change", e.target.value);
   document.getElementById("active-gcode-run").onclick = runActiveGcode;
   document.getElementById("gcode-timeline").oninput = (e) => {
     gcodeView.cursor = Number(e.target.value) || 0;
     updateGcodeProgress();
   };
   bindDataControlButtons();
+  initCommandPopouts();
   document.getElementById("jog-arm").onclick = () => sendJog({ type: state.jog.armed ? "disarm" : "arm" });
 
   loadUISettings();

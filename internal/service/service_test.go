@@ -678,21 +678,46 @@ func TestToolActionsSendControllerCommands(t *testing.T) {
 	if res, err := svc.SetCurrentToolID(3); err != nil || res.Command != "M493.2T3" {
 		t.Fatalf("SetCurrentToolID result=%+v err=%v", res, err)
 	}
+	if res, err := svc.SetCurrentToolID(0); err != nil || res.Command != "M493.2T0" {
+		t.Fatalf("SetCurrentToolID probe result=%+v err=%v", res, err)
+	}
+	if res, err := svc.SetCurrentToolID(-1); err != nil || res.Command != "M493.2T-1" {
+		t.Fatalf("SetCurrentToolID empty result=%+v err=%v", res, err)
+	}
+	if res, err := svc.SetCurrentToolID(8888); err != nil || res.Command != "M493.2T8888" {
+		t.Fatalf("SetCurrentToolID laser result=%+v err=%v", res, err)
+	}
+	if res, err := svc.ChangeTool(4); err != nil || res.Command != "M6T4" {
+		t.Fatalf("ChangeTool result=%+v err=%v", res, err)
+	}
+	if res, err := svc.DropCurrentTool(); err != nil || res.Command != "M6T-1" {
+		t.Fatalf("DropCurrentTool result=%+v err=%v", res, err)
+	}
 	if res, err := svc.CalibrateCurrentTool(); err != nil || res.Command != "M491" {
 		t.Fatalf("CalibrateCurrentTool result=%+v err=%v", res, err)
 	}
-	if g := m.Gcodes(); len(g) != 2 || g[0] != "M493.2T3" || g[1] != "M491" {
-		t.Fatalf("machine gcodes = %v, want set/calibrate", g)
+	if g := m.Gcodes(); len(g) != 7 ||
+		g[0] != "M493.2T3" ||
+		g[1] != "M493.2T0" ||
+		g[2] != "M493.2T-1" ||
+		g[3] != "M493.2T8888" ||
+		g[4] != "M6T4" ||
+		g[5] != "M6T-1" ||
+		g[6] != "M491" {
+		t.Fatalf("machine gcodes = %v, want vendor tool commands", g)
 	}
 }
 
 func TestSetCurrentToolIDValidation(t *testing.T) {
 	svc, _, _ := serviceWithMachine(t)
-	if _, err := svc.SetCurrentToolID(0); err == nil {
-		t.Fatal("expected tool_id 0 to be rejected")
-	}
 	if _, err := svc.SetCurrentToolID(1000); err == nil {
 		t.Fatal("expected tool_id 1000 to be rejected")
+	}
+	if _, err := svc.SetCurrentToolID(-2); err == nil {
+		t.Fatal("expected tool_id -2 to be rejected")
+	}
+	if _, err := svc.ChangeTool(-1); err == nil {
+		t.Fatal("expected change tool_id -1 to be rejected")
 	}
 }
 

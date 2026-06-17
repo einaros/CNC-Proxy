@@ -101,6 +101,12 @@ func SetCurrentToolLine(toolID int) string {
 	return "M493.2T" + strconv.Itoa(toolID) + "\n"
 }
 
+// ChangeToolLine builds the controller's "change to tool and auto-calibrate"
+// command.
+func ChangeToolLine(toolID int) string {
+	return "M6T" + strconv.Itoa(toolID) + "\n"
+}
+
 // CalibrateCurrentToolLine builds the controller's current-tool calibration
 // command.
 func CalibrateCurrentToolLine() string {

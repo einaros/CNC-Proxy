@@ -86,6 +86,9 @@ func TestControllerActionLines(t *testing.T) {
 	if got := SetCurrentToolLine(7); got != "M493.2T7\n" {
 		t.Errorf("SetCurrentToolLine = %q", got)
 	}
+	if got := ChangeToolLine(7); got != "M6T7\n" {
+		t.Errorf("ChangeToolLine = %q", got)
+	}
 	if got := CalibrateCurrentToolLine(); got != "M491\n" {
 		t.Errorf("CalibrateCurrentToolLine = %q", got)
 	}

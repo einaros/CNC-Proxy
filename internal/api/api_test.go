@@ -499,7 +499,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing jog visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="active-gcode-panel"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-drop"`, `Tool Status`, `id="active-gcode-panel"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -561,7 +561,7 @@ func TestWebUIServed(t *testing.T) {
 	if got := three.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("three.module.min.js Cache-Control = %q, want no-store", got)
 	}
-	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderStatusFields", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "THREE.WebGLRenderer", "gcodeWorldPoint", "/api/gcode/active", "/api/tool/current", "/api/tool/calibrate"} {
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderStatusFields", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "THREE.WebGLRenderer", "gcodeWorldPoint", "/api/gcode/active", "/api/tool/current", "/api/tool/change", "/api/tool/drop", "/api/tool/calibrate"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -1016,13 +1016,34 @@ func TestToolActionEndpoints(t *testing.T) {
 	if setResp.StatusCode != http.StatusAccepted {
 		t.Fatalf("set tool status = %d", setResp.StatusCode)
 	}
+	setLaserResp := postJSON(t, srv.URL+"/api/tool/current", map[string]int{"tool_id": 8888})
+	setLaserResp.Body.Close()
+	if setLaserResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("set laser status = %d", setLaserResp.StatusCode)
+	}
+	changeResp := postJSON(t, srv.URL+"/api/tool/change", map[string]int{"tool_id": 2})
+	changeResp.Body.Close()
+	if changeResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("change tool status = %d", changeResp.StatusCode)
+	}
+	reqDrop, _ := http.NewRequest("POST", srv.URL+"/api/tool/drop", nil)
+	dropResp := do(t, reqDrop)
+	dropResp.Body.Close()
+	if dropResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("drop tool status = %d", dropResp.StatusCode)
+	}
 	req, _ := http.NewRequest("POST", srv.URL+"/api/tool/calibrate", nil)
 	calResp := do(t, req)
 	calResp.Body.Close()
 	if calResp.StatusCode != http.StatusAccepted {
 		t.Fatalf("calibrate status = %d", calResp.StatusCode)
 	}
-	if g := m.Gcodes(); len(g) != 2 || g[0] != "M493.2T4" || g[1] != "M491" {
+	if g := m.Gcodes(); len(g) != 5 ||
+		g[0] != "M493.2T4" ||
+		g[1] != "M493.2T8888" ||
+		g[2] != "M6T2" ||
+		g[3] != "M6T-1" ||
+		g[4] != "M491" {
 		t.Fatalf("machine gcodes = %v, want tool commands", g)
 	}
 }

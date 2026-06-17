@@ -80,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gcode/active", s.selectActiveGcode)      // body: {path}
 	mux.HandleFunc("POST /api/gcode/active/run", s.runActiveGcode)     // runs selected path
 	mux.HandleFunc("POST /api/tool/current", s.setCurrentTool)         // body: {tool_id}
+	mux.HandleFunc("POST /api/tool/change", s.changeTool)              // body: {tool_id}
+	mux.HandleFunc("POST /api/tool/drop", s.dropCurrentTool)           // runs M6T-1
 	mux.HandleFunc("POST /api/tool/calibrate", s.calibrateCurrentTool) // starts M491
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
@@ -373,6 +375,39 @@ func (s *Server) setCurrentTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.svc.SetCurrentToolID(*toolID)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
+}
+
+func (s *Server) changeTool(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ToolID *int `json:"tool_id"`
+		ID     *int `json:"id"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	toolID := body.ToolID
+	if toolID == nil {
+		toolID = body.ID
+	}
+	if toolID == nil {
+		writeErr(w, http.StatusBadRequest, "tool_id required")
+		return
+	}
+	res, err := s.svc.ChangeTool(*toolID)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
+}
+
+func (s *Server) dropCurrentTool(w http.ResponseWriter, r *http.Request) {
+	res, err := s.svc.DropCurrentTool()
 	if err != nil {
 		s.mapError(w, err)
 		return
