@@ -127,11 +127,11 @@
   .active-gcode-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 1.2fr); gap: 10px; align-items: stretch; }
   #active-gcode-title { font-weight: 650; overflow-wrap: anywhere; }
   #active-gcode-meta { color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
-  #gcode-preview-wrap { position: relative; min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  #gcode-preview { display: block; width: 100%; height: 100%; min-height: 320px; touch-action: none; cursor: grab; }
+  #gcode-preview-wrap { display: grid; grid-template-rows: minmax(0, 1fr) auto; position: relative; height: clamp(320px, 42vh, 560px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  #gcode-preview { grid-area: 1 / 1; display: block; width: 100%; height: 100%; min-height: 0; touch-action: none; cursor: grab; }
   #gcode-preview:active { cursor: grabbing; }
-  #gcode-preview-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); background: var(--panel-2); }
-  #gcode-timeline-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-top: 8px; }
+  #gcode-preview-empty { grid-area: 1 / 1; z-index: 1; display: grid; place-items: center; color: var(--muted); background: var(--panel-2); pointer-events: none; }
+  #gcode-timeline-row { grid-area: 2 / 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: rgba(25,31,37,.92); }
   #gcode-timeline-label { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
   #console { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #controls { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -245,7 +245,7 @@
     .metric-grid, #status-panel, #jog .jog-grid, .active-gcode-grid { grid-template-columns: 1fr; }
     #jog .metric--primary, .metric--wide { grid-column: auto; }
     .jog-plot-cell, #jog-plot { min-height: 170px; }
-    #gcode-preview-wrap, #gcode-preview { min-height: 260px; }
+    #gcode-preview-wrap { height: clamp(260px, 48vh, 420px); min-height: 260px; }
     #file-browser { grid-template-columns: 1fr; }
     #folder-bar { align-items: stretch; display: grid; }
     #folder-actions { justify-content: stretch; }
