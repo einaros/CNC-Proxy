@@ -498,6 +498,10 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		m.status = "<Idle|MPos:0,0,0|WPos:0,0,0>"
 		m.mu.Unlock()
 		m.send(c, protocol.CmdNormalInfo, "ok\n")
+	case strings.HasPrefix(strings.ToLower(line), "play "):
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, protocol.Unescape(line))
+		m.mu.Unlock()
 	case strings.HasPrefix(line, "rm"):
 		path := secondField(line)
 		m.mu.Lock()

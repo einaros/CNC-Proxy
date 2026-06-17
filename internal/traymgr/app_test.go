@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewAppCanonicalizesChoiceCasing(t *testing.T) {
@@ -68,11 +71,12 @@ func TestSetWebDAVMountEnabledPersistsDespiteInvalidProxyFlag(t *testing.T) {
 	}
 
 	var got webDAVMountRequest
+	unmounted := false
 	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
 		got = req
 		return nil
 	}, func(ctx context.Context, req webDAVMountRequest) error {
-		t.Fatal("unmount should not be called")
+		unmounted = true
 		return nil
 	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
 		return true, nil
@@ -92,12 +96,18 @@ func TestSetWebDAVMountEnabledPersistsDespiteInvalidProxyFlag(t *testing.T) {
 	if !loaded.WebDAVMount.Enabled {
 		t.Fatal("persisted mount flag = false, want true")
 	}
+	if !unmounted {
+		t.Fatal("fresh mount did not clear existing WebDAV mapping first")
+	}
 	wantURL := "http://127.0.0.1:8421/"
 	if runtime.GOOS == "windows" {
 		wantURL = "http://127.0.0.1:8430/webdav/"
 	}
 	if got.URL != wantURL {
 		t.Fatalf("mount URL = %q, want %q", got.URL, wantURL)
+	}
+	if !got.Fresh {
+		t.Fatal("mount request Fresh = false, want true")
 	}
 	if runtime.GOOS != "windows" && (got.User != "operator" || got.Password != "secret") {
 		t.Fatalf("mount auth = %q/%q, want configured auth", got.User, got.Password)
@@ -219,7 +229,6 @@ func TestSetWebDAVMountEnabledRecordsMountFailure(t *testing.T) {
 	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
 		return errors.New("net use failed")
 	}, func(ctx context.Context, req webDAVMountRequest) error {
-		t.Fatal("unmount should not be called")
 		return nil
 	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
 		return false, nil
@@ -271,7 +280,6 @@ func TestRemountWebDAVRecordsFailure(t *testing.T) {
 	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
 		return errors.New("proxy refused connection")
 	}, func(ctx context.Context, req webDAVMountRequest) error {
-		t.Fatal("unmount should not be called")
 		return nil
 	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
 		return false, nil
@@ -287,6 +295,78 @@ func TestRemountWebDAVRecordsFailure(t *testing.T) {
 	}
 	if got[0].Message != "WebDAV remount failed: proxy refused connection" {
 		t.Fatalf("notification message = %q", got[0].Message)
+	}
+}
+
+func TestRemountWebDAVRefreshesMountedDriveWhenDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tray.json")
+	cfg := DefaultConfig()
+	cfg.WebDAVMount.Enabled = false
+	writeRawConfig(t, path, cfg)
+
+	app, err := NewApp(path, nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	var mounts, unmounts int
+	var fresh []bool
+	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
+		mounts++
+		fresh = append(fresh, req.Fresh)
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) error {
+		unmounts++
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
+		return true, nil
+	})
+	defer restore()
+
+	if err := app.RemountWebDAV(context.Background()); err != nil {
+		t.Fatalf("RemountWebDAV: %v", err)
+	}
+	if mounts != 1 || unmounts != 1 {
+		t.Fatalf("mounts=%d unmounts=%d, want 1/1", mounts, unmounts)
+	}
+	if got, want := fmt.Sprint(fresh), "[true]"; got != want {
+		t.Fatalf("fresh mount flags = %s, want %s", got, want)
+	}
+	if app.Supervisor.Config().WebDAVMount.Enabled {
+		t.Fatal("remount changed disabled config flag")
+	}
+}
+
+func TestRemountWebDAVSkipsWhenDisabledAndUnmounted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tray.json")
+	cfg := DefaultConfig()
+	cfg.WebDAVMount.Enabled = false
+	writeRawConfig(t, path, cfg)
+
+	app, err := NewApp(path, nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	var mounts, unmounts int
+	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
+		mounts++
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) error {
+		unmounts++
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
+		return false, nil
+	})
+	defer restore()
+
+	if err := app.RemountWebDAV(context.Background()); err != nil {
+		t.Fatalf("RemountWebDAV: %v", err)
+	}
+	if mounts != 0 || unmounts != 0 {
+		t.Fatalf("mounts=%d unmounts=%d, want 0/0", mounts, unmounts)
+	}
+	logText := managerLogText(app.Server.recentManagerLog())
+	if !strings.Contains(logText, "remount skipped because WebDAV mount is disabled and no mount is present") {
+		t.Fatalf("manager log = %q", logText)
 	}
 }
 
@@ -327,6 +407,63 @@ func TestWebDAVMountStatusReportsBusyWithoutBlocking(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("RemountWebDAV: %v", err)
 	}
+}
+
+func TestQuietRemountFreshensAfterProxyRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tray.json")
+	cfg := DefaultConfig()
+	cfg.WebDAVMount.Enabled = true
+	writeRawConfig(t, path, cfg)
+
+	app, err := NewApp(path, nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	var mounts, unmounts int
+	var fresh []bool
+	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
+		mounts++
+		fresh = append(fresh, req.Fresh)
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) error {
+		unmounts++
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
+		return true, nil
+	})
+	defer restore()
+
+	started := time.Now()
+	setSupervisorStartedForTest(app.Supervisor, started)
+	if err := app.remountWebDAVQuiet(context.Background()); err != nil {
+		t.Fatalf("first quiet remount: %v", err)
+	}
+	if mounts != 1 || unmounts != 1 {
+		t.Fatalf("first quiet remount mounts=%d unmounts=%d, want 1/1", mounts, unmounts)
+	}
+	if err := app.remountWebDAVQuiet(context.Background()); err != nil {
+		t.Fatalf("second quiet remount: %v", err)
+	}
+	if mounts != 2 || unmounts != 1 {
+		t.Fatalf("second quiet remount mounts=%d unmounts=%d, want 2/1", mounts, unmounts)
+	}
+	setSupervisorStartedForTest(app.Supervisor, started.Add(time.Second))
+	if err := app.remountWebDAVQuiet(context.Background()); err != nil {
+		t.Fatalf("quiet remount after restart: %v", err)
+	}
+	if mounts != 3 || unmounts != 2 {
+		t.Fatalf("after restart mounts=%d unmounts=%d, want 3/2", mounts, unmounts)
+	}
+	if got, want := fmt.Sprint(fresh), "[true false true]"; got != want {
+		t.Fatalf("fresh mount flags = %s, want %s", got, want)
+	}
+}
+
+func setSupervisorStartedForTest(s *Supervisor, started time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cmd = &exec.Cmd{Process: &os.Process{Pid: 12345}}
+	s.started = started
 }
 
 func managerLogText(entries []ManagerLogEntry) string {

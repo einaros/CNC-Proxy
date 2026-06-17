@@ -265,6 +265,135 @@ func TestDeleteJob(t *testing.T) {
 	}
 }
 
+func TestDeleteJobDoesNotRemoveReplacementUploadEntry(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	eng := New(Config{Store: st, OpTimeout: time.Second})
+	remote := "/sd/gcodes/race.nc"
+	cachePath := filepath.Join(t.TempDir(), "cache.bin")
+	oldContent := []byte("old\n")
+	if err := os.WriteFile(cachePath, oldContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldSum := md5.Sum(oldContent)
+	if err := st.PutEntry(store.Entry{
+		Path:      remote,
+		Size:      int64(len(oldContent)),
+		MD5:       hex.EncodeToString(oldSum[:]),
+		CachePath: cachePath,
+		Sync:      store.PendingDelete,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+	conn := client.New(clientSide)
+	done := make(chan error, 1)
+	go func() {
+		defer clientSide.Close()
+		done <- eng.execute(conn, store.Job{Kind: store.JobDelete, Path: remote})
+	}()
+
+	var scan protocol.Scanner
+	frame, err := readScriptFrame(serverSide, &scan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Cmd != protocol.CmdCtrlMulti {
+		t.Fatalf("frame command = 0x%x, want CTRL_MULTI", frame.Cmd)
+	}
+	if got, want := protocol.Unescape(string(frame.Data)), "rm "+remote+" -e\n"; got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+
+	newContent := []byte("new content\n")
+	if err := os.WriteFile(cachePath, newContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newSum := md5.Sum(newContent)
+	newMD5 := hex.EncodeToString(newSum[:])
+	if err := st.PutEntry(store.Entry{
+		Path:      remote,
+		Size:      int64(len(newContent)),
+		MD5:       newMD5,
+		CachePath: cachePath,
+		Sync:      store.PendingUpload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: newMD5, Size: int64(len(newContent))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverSide.Write(protocol.Encode(protocol.CmdLoadFinish, []byte("ok\r\n"))); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("execute delete: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete execute did not finish")
+	}
+
+	entry, ok := st.GetEntry(remote)
+	if !ok {
+		t.Fatal("replacement entry was removed by stale delete completion")
+	}
+	if entry.Sync != store.PendingUpload || entry.CachePath != cachePath || entry.MD5 != newMD5 || entry.Size != int64(len(newContent)) {
+		t.Fatalf("entry after stale delete completion = %+v, want replacement upload", entry)
+	}
+	got, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, newContent) {
+		t.Fatalf("cache = %q, want %q", string(got), string(newContent))
+	}
+	if queued, ok := st.NextQueued(); !ok || queued.Kind != store.JobUpload || queued.Path != remote {
+		t.Fatalf("next queued job = %+v ok=%v, want replacement upload", queued, ok)
+	}
+}
+
+func TestUploadJobSyncUpdateRequiresCurrentContent(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	eng := New(Config{Store: st, OpTimeout: time.Second})
+	remote := "/sd/gcodes/overwrite.nc"
+	cachePath := filepath.Join(t.TempDir(), "cache.bin")
+	oldContent := []byte("old\n")
+	oldSum := md5.Sum(oldContent)
+	oldMD5 := hex.EncodeToString(oldSum[:])
+	job := store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: oldMD5, Size: int64(len(oldContent))}
+
+	newContent := []byte("new content\n")
+	if err := os.WriteFile(cachePath, newContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newSum := md5.Sum(newContent)
+	newMD5 := hex.EncodeToString(newSum[:])
+	if err := st.PutEntry(store.Entry{
+		Path:      remote,
+		Size:      int64(len(newContent)),
+		MD5:       newMD5,
+		CachePath: cachePath,
+		Sync:      store.PendingUpload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := eng.setUploadJobSync(job, store.Synced, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("stale upload job updated replacement entry")
+	}
+	entry, _ := st.GetEntry(remote)
+	if entry.Sync != store.PendingUpload || entry.MD5 != newMD5 || entry.Size != int64(len(newContent)) {
+		t.Fatalf("entry = %+v, want replacement pending upload", entry)
+	}
+}
+
 func TestFailureRecordedAndRetried(t *testing.T) {
 	m, st, arb, tr := setup(t)
 	eng := newEngine(st, arb)
@@ -480,7 +609,8 @@ func TestEmptyFileUploadSyncs(t *testing.T) {
 	sum := md5.Sum(nil)
 	remote := "/sd/gcodes/empty.nc"
 	st.PutEntry(store.Entry{Path: remote, Size: 0, MD5: hex.EncodeToString(sum[:]), CachePath: p, Sync: store.PendingUpload})
-	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: p, MD5: hex.EncodeToString(sum[:]), Size: 0})
+	job, _ := st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: p, MD5: hex.EncodeToString(sum[:]), Size: 0})
+	eng.now = func() time.Time { return job.CreatedAt.Add(zeroByteUploadSettle + time.Second) }
 
 	eng.drain()
 	if e, _ := st.GetEntry(remote); e.Sync != store.Synced {
@@ -488,5 +618,80 @@ func TestEmptyFileUploadSyncs(t *testing.T) {
 	}
 	if b, ok := m.File(remote); !ok || len(b) != 0 {
 		t.Errorf("machine empty file = %v ok=%v", b, ok)
+	}
+}
+
+func TestZeroByteUploadWaitsForSettle(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	tr.Observe(machine.Idle)
+	now := time.Now()
+	eng.now = func() time.Time { return now }
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "empty.nc")
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := md5.Sum(nil)
+	remote := "/sd/gcodes/empty-placeholder.nc"
+	st.PutEntry(store.Entry{Path: remote, Size: 0, MD5: hex.EncodeToString(sum[:]), CachePath: p, Sync: store.PendingUpload})
+	job, _ := st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: p, MD5: hex.EncodeToString(sum[:]), Size: 0})
+	now = job.CreatedAt
+
+	eng.drain()
+	if _, ok := m.File(remote); ok {
+		t.Fatal("zero-byte upload ran before settle window")
+	}
+	if j, ok := st.NextQueued(); !ok || j.Path != remote {
+		t.Fatalf("zero-byte job = %+v ok=%v, want queued", j, ok)
+	}
+
+	now = now.Add(zeroByteUploadSettle + time.Second)
+	eng.drain()
+	if b, ok := m.File(remote); !ok || len(b) != 0 {
+		t.Fatalf("settled zero-byte file = %v ok=%v, want empty upload", b, ok)
+	}
+}
+
+func TestZeroByteUploadSupersededBeforeSettleUploadsContent(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	tr.Observe(machine.Idle)
+	now := time.Now()
+	eng.now = func() time.Time { return now }
+
+	dir := t.TempDir()
+	emptyPath := filepath.Join(dir, "empty.nc")
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	emptySum := md5.Sum(nil)
+	remote := "/sd/gcodes/placeholder.nc"
+	st.PutEntry(store.Entry{Path: remote, Size: 0, MD5: hex.EncodeToString(emptySum[:]), CachePath: emptyPath, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: emptyPath, MD5: hex.EncodeToString(emptySum[:]), Size: 0})
+
+	content := []byte("G0 X0\nG1 X1\n")
+	contentPath := filepath.Join(dir, "content.nc")
+	if err := os.WriteFile(contentPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contentSum := md5.Sum(content)
+	md5hex := hex.EncodeToString(contentSum[:])
+	if _, err := st.SupersedeQueuedUploads(remote); err != nil {
+		t.Fatal(err)
+	}
+	st.PutEntry(store.Entry{Path: remote, Size: int64(len(content)), MD5: md5hex, CachePath: contentPath, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: contentPath, MD5: md5hex, Size: int64(len(content))})
+
+	eng.drain()
+	got, ok := m.File(remote)
+	if !ok || !bytes.Equal(got, content) {
+		t.Fatalf("machine content = %q ok=%v, want %q", string(got), ok, string(content))
+	}
+	for _, j := range st.ListJobs() {
+		if j.Size == 0 && j.State != store.Done {
+			t.Fatalf("zero placeholder job = %+v, want done", j)
+		}
 	}
 }

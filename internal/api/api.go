@@ -75,9 +75,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/dirs", s.postDir)            // body: {path}
 	mux.HandleFunc("GET /api/jobs", s.getJobs)
 	mux.HandleFunc("GET /api/runs", s.getRuns)
-	mux.HandleFunc("POST /api/gcode", s.postGcode)      // body: {line}
-	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog) // recent gcode I/O lines
-	mux.HandleFunc("POST /api/control", s.postControl)  // body: {action: hold|resume|halt|recover|unlock|home|reset}
+	mux.HandleFunc("POST /api/gcode", s.postGcode) // body: {line}
+	mux.HandleFunc("GET /api/gcode/active", s.getActiveGcode)
+	mux.HandleFunc("POST /api/gcode/active", s.selectActiveGcode)      // body: {path}
+	mux.HandleFunc("POST /api/gcode/active/run", s.runActiveGcode)     // runs selected path
+	mux.HandleFunc("POST /api/tool/current", s.setCurrentTool)         // body: {tool_id}
+	mux.HandleFunc("POST /api/tool/calibrate", s.calibrateCurrentTool) // starts M491
+	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
+	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
 	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
 	mux.HandleFunc("PUT /api/ui/settings", s.putUISettings)
 	mux.HandleFunc("GET /api/backup", s.getBackup)
@@ -284,6 +289,10 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrDiscardUnavailable):
 		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrNoActiveGcode):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrActiveGcodeUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrMachineStatusStale):
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case session.Retryable(err):
@@ -313,6 +322,71 @@ func (s *Server) postGcode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"output": out})
+}
+
+func (s *Server) getActiveGcode(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.svc.ActiveGcode())
+}
+
+func (s *Server) selectActiveGcode(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Path == "" {
+		writeErr(w, http.StatusBadRequest, "path required")
+		return
+	}
+	active, err := s.svc.SelectActiveGcode(body.Path)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, active)
+}
+
+func (s *Server) runActiveGcode(w http.ResponseWriter, r *http.Request) {
+	res, err := s.svc.RunActiveGcode()
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
+}
+
+func (s *Server) setCurrentTool(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ToolID *int `json:"tool_id"`
+		ID     *int `json:"id"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	toolID := body.ToolID
+	if toolID == nil {
+		toolID = body.ID
+	}
+	if toolID == nil {
+		writeErr(w, http.StatusBadRequest, "tool_id required")
+		return
+	}
+	res, err := s.svc.SetCurrentToolID(*toolID)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
+}
+
+func (s *Server) calibrateCurrentTool(w http.ResponseWriter, r *http.Request) {
+	res, err := s.svc.CalibrateCurrentTool()
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
 }
 
 // getGcodeLog returns the retained gcode I/O lines (oldest first), so a client

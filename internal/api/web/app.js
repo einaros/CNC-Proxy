@@ -1,4 +1,4 @@
-"use strict";
+import * as THREE from "./three.module.min.js";
 
 const ROOT = "/sd/gcodes";
 const GCODE_MAX_LINES = 500;
@@ -26,6 +26,10 @@ const state = {
   currentDir: "",
   controlPendingAction: "",
   lastControlResult: null,
+  activeGcode: { path: "", runnable: false, message: "" },
+  activeGcodePending: "",
+  activeSelectPendingPath: "",
+  toolPending: "",
   noticeKey: "",
   noticeSeq: 0,
   notices: new Map(),
@@ -57,6 +61,37 @@ const state = {
     sampleTimer: null,
     preferredPadIndex: null,
   },
+};
+
+const gcodeView = {
+  key: "",
+  canvas: null,
+  empty: null,
+  renderer: null,
+  scene: null,
+  camera: null,
+  pathGroup: null,
+  progressLine: null,
+  marker: null,
+  target: new THREE.Vector3(),
+  orbit: { theta: -Math.PI / 4, phi: Math.PI / 3, radius: 120 },
+  segments: [],
+  cursor: 0,
+  has4Axis: false,
+  dragging: false,
+  dragX: 0,
+  dragY: 0,
+  renderQueued: false,
+  resizeObserver: null,
+  width: 0,
+  height: 0,
+};
+
+const GCODE_KIND_COLORS = {
+  rapid: 0x91a0ae,
+  cut: 0x57a6d6,
+  arc: 0x44c27b,
+  probe: 0xd99a3a,
 };
 
 const SYNC_LABEL = {
@@ -614,6 +649,7 @@ function renderMachine() {
   document.getElementById("status-raw").textContent = m.raw || "-";
   renderStatusFields(m.fields || {});
   renderAlarmPanel(m);
+  renderActiveGcode();
   syncJogAvailabilityFromMachine(m);
   renderJog();
 }
@@ -1055,6 +1091,16 @@ function appendFileActions(actions, f) {
   }
   if (f.sync === "error") return;
 
+  if (canSelectGcodeFile(f)) {
+    const select = document.createElement("button");
+    select.type = "button";
+    const pending = state.activeSelectPendingPath === f.path;
+    select.textContent = pending ? "Selecting..." : "Select";
+    select.disabled = pending;
+    select.onclick = () => selectActiveGcode(f.path);
+    actions.append(select);
+  }
+
   const rename = document.createElement("button");
   rename.type = "button";
   rename.textContent = "Rename";
@@ -1083,6 +1129,12 @@ function canDiscardFile(f) {
   if (jobsForPath(f.path).some((j) => j.state === "running")) return false;
   if (["local_only", "pending_upload"].includes(f.sync)) return true;
   if (f.sync !== "error") return false;
+  return true;
+}
+
+function canSelectGcodeFile(f) {
+  if (!f || f.virtual || f.is_dir) return false;
+  if (["pending_delete", "deleting", "error"].includes(f.sync)) return false;
   return true;
 }
 
@@ -1379,6 +1431,500 @@ function renderRuns() {
 
 function lastOverride(values) {
   return Array.isArray(values) && values.length ? values[values.length - 1] : null;
+}
+
+function renderActiveGcode() {
+  const active = state.activeGcode || {};
+  const title = document.getElementById("active-gcode-title");
+  const meta = document.getElementById("active-gcode-meta");
+  const run = document.getElementById("active-gcode-run");
+  const feedback = document.getElementById("active-gcode-feedback");
+  if (!title || !meta || !run) return;
+
+  if (!active.path) {
+    title.textContent = "No active gcode selected.";
+    meta.textContent = "-";
+    run.disabled = true;
+    drawGcodePreview(null);
+    if (!state.activeGcodePending) {
+      feedback.textContent = "";
+      feedback.className = "action-feedback";
+    }
+    return;
+  }
+
+  title.textContent = relPath(active.path);
+  const preview = active.preview || {};
+  const tools = Array.isArray(preview.tools) && preview.tools.length ? " tools T" + preview.tools.join(", T") : "";
+  const entry = active.entry || state.files.get(active.path) || {};
+  const sync = SYNC_LABEL[entry.sync] || entry.sync || "";
+  const bounds = preview.bounds ? previewBoundsText(preview.bounds) : "no plotted bounds";
+  const truncated = preview.truncated ? " preview truncated" : "";
+  meta.textContent = [
+    fmtSize(entry.size || 0, false),
+    sync,
+    `${preview.line_count || 0} lines`,
+    `${preview.move_count || 0} moves`,
+    `${preview.plotted_segments || 0} segments`,
+    preview.has_4axis ? "4-axis" : "3-axis",
+    bounds,
+    tools,
+    truncated,
+  ].filter(Boolean).join(" | ");
+  const machineReady = state.machine?.state === "Idle";
+  run.disabled = !!state.activeGcodePending || !active.runnable || !machineReady;
+  if (!state.activeGcodePending && active.message) {
+    feedback.textContent = active.message;
+    feedback.className = "action-feedback error";
+  } else if (!state.activeGcodePending && !machineReady) {
+    feedback.textContent = "Machine must be Idle before starting the active gcode.";
+    feedback.className = "action-feedback";
+  } else if (!state.activeGcodePending && machineReady && feedback.className === "action-feedback") {
+    feedback.textContent = "";
+  }
+  drawGcodePreview(preview);
+}
+
+function previewBoundsText(bounds) {
+  const min = bounds.min || [];
+  const max = bounds.max || [];
+  const dx = Number(max[0]) - Number(min[0]);
+  const dy = Number(max[1]) - Number(min[1]);
+  const dz = Number(max[2]) - Number(min[2]);
+  if (![dx, dy, dz].every(Number.isFinite)) return "";
+  const xyz = `X ${dx.toFixed(2)} Y ${dy.toFixed(2)} Z ${dz.toFixed(2)} mm`;
+  const da = Number(bounds.max_a) - Number(bounds.min_a);
+  if (Number.isFinite(da) && Math.abs(da) > 0.0001) return `${xyz} A ${Math.abs(da).toFixed(2)} deg`;
+  return xyz;
+}
+
+function drawGcodePreview(preview) {
+  const segments = Array.isArray(preview?.segments) ? preview.segments : [];
+  if (!segments.length || !preview?.bounds) {
+    clearGcodeScene();
+    setGcodePreviewEmpty("No plotted moves");
+    updateGcodeTimeline(0);
+    return;
+  }
+  if (!ensureGcodeViewer()) return;
+  const key = [
+    state.activeGcode?.path || "",
+    preview.line_count || 0,
+    preview.plotted_segments || segments.length,
+    preview.total_distance || 0,
+    preview.has_4axis ? "4" : "3",
+  ].join(":");
+  if (gcodeView.key !== key) {
+    gcodeView.key = key;
+    gcodeView.segments = segments;
+    gcodeView.has4Axis = !!preview.has_4axis;
+    gcodeView.cursor = segments.length;
+    rebuildGcodeScene(preview, segments);
+    fitGcodeCamera(preview.bounds);
+  }
+  setGcodePreviewEmpty("");
+  updateGcodeTimeline(segments.length);
+  updateGcodeProgress();
+  scheduleGcodeRender();
+}
+
+function ensureGcodeViewer() {
+  if (gcodeView.renderer) return true;
+  const canvas = document.getElementById("gcode-preview");
+  if (!canvas) return false;
+  gcodeView.canvas = canvas;
+  gcodeView.empty = document.getElementById("gcode-preview-empty");
+  try {
+    gcodeView.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  } catch (e) {
+    setGcodePreviewEmpty("3D preview unavailable");
+    return false;
+  }
+  gcodeView.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
+  gcodeView.renderer.setClearColor(0x202832, 1);
+  gcodeView.scene = new THREE.Scene();
+  gcodeView.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
+  gcodeView.pathGroup = new THREE.Group();
+  gcodeView.scene.add(gcodeView.pathGroup);
+  const markerGeometry = new THREE.SphereGeometry(1, 16, 12);
+  const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xd99a3a });
+  gcodeView.marker = new THREE.Mesh(markerGeometry, markerMaterial);
+  gcodeView.marker.visible = false;
+  gcodeView.scene.add(gcodeView.marker);
+  bindGcodeOrbitControls(canvas);
+  if (globalThis.ResizeObserver) {
+    gcodeView.resizeObserver = new ResizeObserver(() => scheduleGcodeRender());
+    gcodeView.resizeObserver.observe(canvas);
+  }
+  window.addEventListener("resize", scheduleGcodeRender);
+  return true;
+}
+
+function bindGcodeOrbitControls(canvas) {
+  canvas.addEventListener("pointerdown", (e) => {
+    gcodeView.dragging = true;
+    gcodeView.dragX = e.clientX;
+    gcodeView.dragY = e.clientY;
+    canvas.setPointerCapture?.(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!gcodeView.dragging) return;
+    const dx = e.clientX - gcodeView.dragX;
+    const dy = e.clientY - gcodeView.dragY;
+    gcodeView.dragX = e.clientX;
+    gcodeView.dragY = e.clientY;
+    gcodeView.orbit.theta -= dx * 0.008;
+    gcodeView.orbit.phi = Math.max(0.08, Math.min(Math.PI - 0.08, gcodeView.orbit.phi + dy * 0.008));
+    updateGcodeCamera();
+  });
+  const stopDrag = (e) => {
+    gcodeView.dragging = false;
+    canvas.releasePointerCapture?.(e.pointerId);
+  };
+  canvas.addEventListener("pointerup", stopDrag);
+  canvas.addEventListener("pointercancel", stopDrag);
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const scale = Math.exp(e.deltaY * 0.001);
+    gcodeView.orbit.radius = Math.max(1, Math.min(100000, gcodeView.orbit.radius * scale));
+    updateGcodeCamera();
+  }, { passive: false });
+}
+
+function rebuildGcodeScene(preview, segments) {
+  clearThreeGroup(gcodeView.pathGroup);
+  disposeObject(gcodeView.progressLine);
+  gcodeView.progressLine = null;
+  const bounds = preview.bounds || {};
+  addGcodeGrid(bounds);
+  const byKind = { rapid: [], cut: [], arc: [], probe: [] };
+  const progress = new Float32Array(segments.length * 6);
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i] || {};
+    const a = gcodeWorldPoint(seg.from || [0, 0, 0, 0], preview.has_4axis);
+    const b = gcodeWorldPoint(seg.to || [0, 0, 0, 0], preview.has_4axis);
+    const kind = byKind[seg.kind] ? seg.kind : "cut";
+    byKind[kind].push(a.x, a.y, a.z, b.x, b.y, b.z);
+    const j = i * 6;
+    progress[j] = a.x;
+    progress[j + 1] = a.y;
+    progress[j + 2] = a.z;
+    progress[j + 3] = b.x;
+    progress[j + 4] = b.y;
+    progress[j + 5] = b.z;
+  }
+  for (const kind of ["rapid", "cut", "arc", "probe"]) {
+    if (!byKind[kind].length) continue;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(byKind[kind], 3));
+    const material = new THREE.LineBasicMaterial({
+      color: GCODE_KIND_COLORS[kind],
+      transparent: true,
+      opacity: kind === "rapid" ? 0.42 : 0.82,
+    });
+    gcodeView.pathGroup.add(new THREE.LineSegments(geometry, material));
+  }
+  const progressGeometry = new THREE.BufferGeometry();
+  progressGeometry.setAttribute("position", new THREE.BufferAttribute(progress, 3));
+  progressGeometry.setDrawRange(0, progress.length / 3);
+  const progressMaterial = new THREE.LineBasicMaterial({ color: 0xf2f6fa, transparent: true, opacity: 0.95 });
+  gcodeView.progressLine = new THREE.LineSegments(progressGeometry, progressMaterial);
+  gcodeView.scene.add(gcodeView.progressLine);
+}
+
+function addGcodeGrid(bounds) {
+  const min = bounds.min || [0, 0, 0];
+  const max = bounds.max || [1, 1, 1];
+  const spanX = Math.max(Math.abs(Number(max[0]) - Number(min[0])), 1);
+  const spanY = Math.max(Math.abs(Number(max[1]) - Number(min[1])), 1);
+  const size = Math.max(spanX, spanY, 20) * 1.15;
+  const divisions = Math.max(4, Math.min(80, Math.round(size / 10)));
+  const grid = new THREE.GridHelper(size, divisions, 0x5f6c78, 0x303946);
+  grid.position.x = (Number(min[0]) + Number(max[0])) / 2;
+  grid.position.y = Number(min[2]) || 0;
+  grid.position.z = -(Number(min[1]) + Number(max[1])) / 2;
+  gcodeView.pathGroup.add(grid);
+  const axes = new THREE.AxesHelper(Math.max(5, size * 0.12));
+  axes.position.copy(grid.position);
+  gcodeView.pathGroup.add(axes);
+}
+
+function clearGcodeScene() {
+  if (!gcodeView.renderer) return;
+  clearThreeGroup(gcodeView.pathGroup);
+  disposeObject(gcodeView.progressLine);
+  gcodeView.progressLine = null;
+  gcodeView.marker.visible = false;
+  gcodeView.key = "";
+  gcodeView.segments = [];
+  gcodeView.cursor = 0;
+  scheduleGcodeRender();
+}
+
+function clearThreeGroup(group) {
+  if (!group) return;
+  while (group.children.length) {
+    const child = group.children.pop();
+    disposeObject(child);
+  }
+}
+
+function disposeObject(obj) {
+  if (!obj) return;
+  if (obj.parent) obj.parent.remove(obj);
+  if (obj.geometry) obj.geometry.dispose();
+  if (Array.isArray(obj.material)) {
+    for (const material of obj.material) material.dispose();
+  } else if (obj.material) {
+    obj.material.dispose();
+  }
+}
+
+function fitGcodeCamera(bounds) {
+  const min = bounds.min || [0, 0, 0];
+  const max = bounds.max || [1, 1, 1];
+  const cx = (Number(min[0]) + Number(max[0])) / 2;
+  const cy = (Number(min[1]) + Number(max[1])) / 2;
+  const cz = (Number(min[2]) + Number(max[2])) / 2;
+  gcodeView.target.set(cx || 0, cz || 0, -(cy || 0));
+  const spanX = Math.abs(Number(max[0]) - Number(min[0]));
+  const spanY = Math.abs(Number(max[1]) - Number(min[1]));
+  const spanZ = Math.abs(Number(max[2]) - Number(min[2]));
+  const radius = Math.max(spanX, spanY, spanZ, 1);
+  gcodeView.orbit.radius = radius * 2.4 + 20;
+  gcodeView.camera.near = Math.max(0.01, gcodeView.orbit.radius / 1000);
+  gcodeView.camera.far = Math.max(1000, gcodeView.orbit.radius * 100);
+  gcodeView.camera.updateProjectionMatrix();
+  updateGcodeCamera();
+}
+
+function updateGcodeCamera() {
+  if (!gcodeView.camera) return;
+  const o = gcodeView.orbit;
+  const sinPhi = Math.sin(o.phi);
+  const x = gcodeView.target.x + o.radius * sinPhi * Math.sin(o.theta);
+  const y = gcodeView.target.y + o.radius * Math.cos(o.phi);
+  const z = gcodeView.target.z + o.radius * sinPhi * Math.cos(o.theta);
+  gcodeView.camera.position.set(x, y, z);
+  gcodeView.camera.lookAt(gcodeView.target);
+  scheduleGcodeRender();
+}
+
+function updateGcodeTimeline(total) {
+  const slider = document.getElementById("gcode-timeline");
+  const label = document.getElementById("gcode-timeline-label");
+  if (!slider || !label) return;
+  slider.max = String(total);
+  slider.disabled = total <= 0;
+  gcodeView.cursor = Math.max(0, Math.min(total, gcodeView.cursor));
+  slider.value = String(gcodeView.cursor);
+  label.textContent = `${gcodeView.cursor} / ${total}`;
+}
+
+function updateGcodeProgress() {
+  const total = gcodeView.segments.length;
+  gcodeView.cursor = Math.max(0, Math.min(total, gcodeView.cursor));
+  if (gcodeView.progressLine) {
+    gcodeView.progressLine.geometry.setDrawRange(0, gcodeView.cursor * 2);
+  }
+  const seg = gcodeView.segments[Math.max(0, gcodeView.cursor - 1)];
+  if (seg) {
+    const p = gcodeWorldPoint(seg.to || [0, 0, 0, 0], gcodeView.has4Axis);
+    gcodeView.marker.position.copy(p);
+    gcodeView.marker.scale.setScalar(Math.max(0.8, gcodeView.orbit.radius * 0.008));
+    gcodeView.marker.visible = true;
+  } else {
+    gcodeView.marker.visible = false;
+  }
+  updateGcodeTimeline(total);
+  scheduleGcodeRender();
+}
+
+function gcodeWorldPoint(pos, has4Axis) {
+  let x = Number(pos[0]) || 0;
+  let y = Number(pos[1]) || 0;
+  let z = Number(pos[2]) || 0;
+  const a = Number(pos[3]) || 0;
+  if (has4Axis) {
+    const rad = a * Math.PI / 180;
+    const c = Math.cos(rad);
+    const s = Math.sin(rad);
+    const ry = y * c - z * s;
+    const rz = y * s + z * c;
+    y = ry;
+    z = rz;
+  }
+  return new THREE.Vector3(x, z, -y);
+}
+
+function setGcodePreviewEmpty(text) {
+  const empty = gcodeView.empty || document.getElementById("gcode-preview-empty");
+  if (!empty) return;
+  empty.textContent = text || "";
+  empty.hidden = !text;
+}
+
+function scheduleGcodeRender() {
+  if (!gcodeView.renderer || gcodeView.renderQueued) return;
+  gcodeView.renderQueued = true;
+  requestAnimationFrame(() => {
+    gcodeView.renderQueued = false;
+    renderGcodeScene();
+  });
+}
+
+function renderGcodeScene() {
+  if (!gcodeView.renderer || !gcodeView.camera || !gcodeView.canvas) return;
+  const rect = gcodeView.canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  if (gcodeView.width !== width || gcodeView.height !== height) {
+    gcodeView.width = width;
+    gcodeView.height = height;
+    gcodeView.renderer.setSize(width, height, false);
+    gcodeView.camera.aspect = width / height;
+    gcodeView.camera.updateProjectionMatrix();
+  }
+  gcodeView.renderer.render(gcodeView.scene, gcodeView.camera);
+}
+
+async function loadActiveGcode() {
+  try {
+    const r = await request("/api/gcode/active");
+    state.activeGcode = await r.json();
+    renderActiveGcode();
+  } catch (e) {
+    setNotice("Active gcode unavailable: " + e.message, "error", "active-gcode");
+  }
+}
+
+async function selectActiveGcode(path) {
+  state.activeSelectPendingPath = path;
+  setActiveFeedback("Loading preview for " + relPath(path) + "...", "");
+  renderFiles();
+  try {
+    const r = await request("/api/gcode/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    state.activeGcode = await r.json();
+    setActiveFeedback("Preview loaded for " + relPath(path) + ".", "ok");
+    clearNotice("active-gcode");
+    showTab("control");
+  } catch (e) {
+    setActiveFeedback("Preview failed: " + e.message, "error");
+    setNotice("Select gcode failed: " + e.message, "error", "active-gcode");
+  } finally {
+    state.activeSelectPendingPath = "";
+    renderFiles();
+    renderActiveGcode();
+  }
+}
+
+async function runActiveGcode() {
+  const active = state.activeGcode || {};
+  if (!active.path) return;
+  if (!confirm("Start " + relPath(active.path) + "?")) return;
+  state.activeGcodePending = "run";
+  setActiveFeedback("Sending run command for " + relPath(active.path) + "...", "");
+  renderActiveGcode();
+  try {
+    const r = await request("/api/gcode/active/run", { method: "POST" });
+    const result = await r.json();
+    setActiveFeedback(result.message || "Run command sent.", "ok");
+    clearNotice("active-gcode-run");
+    pollMachine();
+    setTimeout(pollMachine, 1200);
+    setTimeout(loadRuns, 1600);
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+    setActiveFeedback("Run failed: " + e.message, "error");
+    setNotice("Run failed: " + e.message, "error", "active-gcode-run");
+  } finally {
+    state.activeGcodePending = "";
+    renderActiveGcode();
+  }
+}
+
+function setActiveFeedback(text, kind) {
+  const el = document.getElementById("active-gcode-feedback");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "action-feedback " + (kind || "");
+}
+
+async function setCurrentTool() {
+  const input = document.getElementById("tool-id");
+  const toolID = Number(input.value);
+  if (!Number.isInteger(toolID) || toolID < 1 || toolID > 999) {
+    setToolFeedback("Bit ID must be between 1 and 999.", "error");
+    return;
+  }
+  state.toolPending = "set";
+  setToolButtonsPending(true);
+  setToolFeedback("Sending set-tool command for bit " + toolID + "...", "");
+  try {
+    const r = await request("/api/tool/current", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_id: toolID }),
+    });
+    const result = await r.json();
+    setToolFeedback(result.message || "Set-tool command sent.", "ok");
+    clearNotice("tool");
+    pollMachine();
+    setTimeout(pollMachine, 1200);
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+    setToolFeedback("Set-tool failed: " + e.message, "error");
+    setNotice("Set-tool failed: " + e.message, "error", "tool");
+  } finally {
+    state.toolPending = "";
+    setToolButtonsPending(false);
+  }
+}
+
+async function calibrateCurrentTool() {
+  if (!confirm("Start current bit calibration?")) return;
+  state.toolPending = "calibrate";
+  setToolButtonsPending(true);
+  setToolFeedback("Sending calibration command...", "");
+  try {
+    const r = await request("/api/tool/calibrate", { method: "POST" });
+    const result = await r.json();
+    setToolFeedback(result.message || "Calibration command sent.", "ok");
+    clearNotice("tool");
+    pollMachine();
+    setTimeout(pollMachine, 1200);
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+    setToolFeedback("Calibration failed: " + e.message, "error");
+    setNotice("Calibration failed: " + e.message, "error", "tool");
+  } finally {
+    state.toolPending = "";
+    setToolButtonsPending(false);
+  }
+}
+
+function setToolButtonsPending(pending) {
+  const set = document.getElementById("tool-set");
+  const cal = document.getElementById("tool-calibrate");
+  if (set) {
+    set.disabled = pending;
+    set.textContent = pending && state.toolPending === "set" ? "Setting..." : "Set Active Bit";
+  }
+  if (cal) {
+    cal.disabled = pending;
+    cal.textContent = pending && state.toolPending === "calibrate" ? "Calibrating..." : "Calibrate Current Bit";
+  }
+}
+
+function setToolFeedback(text, kind) {
+  const el = document.getElementById("tool-feedback");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "action-feedback " + (kind || "");
 }
 
 function appendGcodeLine(ln) {
@@ -2251,6 +2797,7 @@ function applyChange(ev) {
   if (ev.kind === "entry" && ev.entry) {
     if (ev.entry.sync === "") state.files.delete(ev.entry.path);
     else state.files.set(ev.entry.path, ev.entry);
+    if (state.activeGcode?.path === ev.entry.path) loadActiveGcode();
     renderMachine();
     renderFiles();
   } else if (ev.kind === "job" && ev.job) {
@@ -2414,10 +2961,18 @@ function init() {
   document.getElementById("ctl-hold").onclick = () => sendControl("hold");
   document.getElementById("ctl-resume").onclick = () => sendControl("resume");
   document.getElementById("ctl-halt").onclick = () => sendControl("halt");
+  document.getElementById("tool-set").onclick = setCurrentTool;
+  document.getElementById("tool-calibrate").onclick = calibrateCurrentTool;
+  document.getElementById("active-gcode-run").onclick = runActiveGcode;
+  document.getElementById("gcode-timeline").oninput = (e) => {
+    gcodeView.cursor = Number(e.target.value) || 0;
+    updateGcodeProgress();
+  };
   bindDataControlButtons();
   document.getElementById("jog-arm").onclick = () => sendJog({ type: state.jog.armed ? "disarm" : "arm" });
 
   loadUISettings();
+  loadActiveGcode();
   loadJogCapabilities();
   connectJog();
   window.addEventListener("online", () => {

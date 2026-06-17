@@ -48,6 +48,14 @@ pre { white-space:pre-wrap; max-height:260px; overflow:auto; border:1px solid va
     <p class="msg" id="processMsg"></p>
   </section>
   <section>
+    <h2>WebDAV Mount</h2>
+    <p class="info" id="webdavStatus"></p>
+    <p class="msg" id="webdavMsg"></p>
+    <div class="actions">
+      <button id="refreshWebDAV">Refresh WebDAV Mount</button>
+    </div>
+  </section>
+  <section>
     <h2>Manager Settings</h2>
     <div class="grid" id="managerFields"></div>
     <p class="info" id="managerStatus"></p>
@@ -202,6 +210,19 @@ function renderStatus(st) {
   document.getElementById("managerStatus").textContent = "Listening: " + cfg.admin_listen + (urls.length ? " · URLs: " + urls.join(", ") : "") + " · Last manager restart: " + fmtTime(st.manager_restarted_at);
   document.getElementById("proxySchema").textContent = "Proxy fields loaded from: " + optionSource;
   document.getElementById("notifications").textContent = (st.manager_log || []).map(n => n.time + " " + (n.level || "info") + " " + (n.source || "manager") + ": " + n.message).join("\n");
+  renderWebDAVStatus(st.webdav_mount || {});
+}
+function renderWebDAVStatus(mount) {
+  const status = document.getElementById("webdavStatus");
+  const button = document.getElementById("refreshWebDAV");
+  const bits = [
+    "Desired: " + (mount.desired ? "yes" : "no"),
+    "Mounted: " + (mount.mounted ? "yes" : "no"),
+  ];
+  if (mount.busy) bits.push("Busy");
+  if (mount.error) bits.push("Last error: " + mount.error);
+  status.textContent = bits.join(" · ");
+  button.disabled = !!mount.busy || (!mount.desired && !mount.mounted);
 }
 async function refreshStatus() {
   const st = await req("/api/status");
@@ -251,6 +272,24 @@ document.getElementById("restartManager").onclick = async () => {
     const r = await req("/api/manager/restart", {method:"POST"});
     waitForManagerRestart(el, r.manager_url);
   } catch (e) { el.textContent = e.message; el.className = "msg err"; }
+};
+document.getElementById("refreshWebDAV").onclick = async () => {
+  const el = document.getElementById("webdavMsg");
+  const button = document.getElementById("refreshWebDAV");
+  button.disabled = true;
+  el.textContent = "Refreshing WebDAV mount...";
+  el.className = "msg";
+  try {
+    const r = await req("/api/webdav/remount", {method:"POST"});
+    renderWebDAVStatus(r.mount || {});
+    el.textContent = "WebDAV mount refreshed.";
+    el.className = "msg ok";
+    await refreshStatus();
+  } catch (e) {
+    el.textContent = e.message;
+    el.className = "msg err";
+    await refreshStatus().catch(() => {});
+  }
 };
 document.getElementById("clearLog").onclick = async () => {
   const button = document.getElementById("clearLog");

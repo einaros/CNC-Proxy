@@ -1,11 +1,15 @@
 package davfs
 
 import (
+	"encoding/xml"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"runtime"
+
+	"golang.org/x/net/webdav"
 
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -41,6 +45,12 @@ func (f *readFile) Readdir(int) ([]os.FileInfo, error) {
 	return nil, errors.New("davfs: not a directory")
 }
 func (f *readFile) Stat() (os.FileInfo, error) { return f.info, nil }
+func (f *readFile) DeadProps() (map[xml.Name]webdav.Property, error) {
+	return map[xml.Name]webdav.Property{}, nil
+}
+func (f *readFile) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error) {
+	return acceptDeadPropPatches(patches), nil
+}
 
 // metadataFile lets PROPFIND inspect a remote_only file without serving its
 // content. Actual GET/HEAD opens still fail fast until the file is cached.
@@ -62,6 +72,25 @@ func (f *metadataFile) Readdir(int) ([]os.FileInfo, error) {
 	return nil, errors.New("davfs: not a directory")
 }
 func (f *metadataFile) Stat() (os.FileInfo, error) { return f.info, nil }
+func (f *metadataFile) DeadProps() (map[xml.Name]webdav.Property, error) {
+	return map[xml.Name]webdav.Property{}, nil
+}
+func (f *metadataFile) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error) {
+	return acceptDeadPropPatches(patches), nil
+}
+
+func acceptDeadPropPatches(patches []webdav.Proppatch) []webdav.Propstat {
+	pstat := webdav.Propstat{Status: http.StatusOK}
+	for _, patch := range patches {
+		for _, prop := range patch.Props {
+			pstat.Props = append(pstat.Props, webdav.Property{XMLName: prop.XMLName})
+		}
+	}
+	if len(pstat.Props) == 0 {
+		return nil
+	}
+	return []webdav.Propstat{pstat}
+}
 
 // dirFile presents a directory's children to the WebDAV server's PROPFIND.
 type dirFile struct {
@@ -111,15 +140,16 @@ type writeFile struct {
 	name    string
 	tmp     *os.File
 	tmpPath string
+	cr      *contentRange
 	closed  bool
 }
 
-func newWriteFile(svc *service.Service, name string) (*writeFile, error) {
+func newWriteFile(svc *service.Service, name string, cr *contentRange) (*writeFile, error) {
 	tmp, err := os.CreateTemp("", "davfs-upload-*")
 	if err != nil {
 		return nil, err
 	}
-	wf := &writeFile{svc: svc, name: name, tmp: tmp, tmpPath: tmp.Name()}
+	wf := &writeFile{svc: svc, name: name, tmp: tmp, tmpPath: tmp.Name(), cr: cr}
 	// A WebDAV client may abandon a write without calling Close (crash, dropped
 	// connection). A finalizer reclaims the temp file so they can't accumulate.
 	runtime.SetFinalizer(wf, func(f *writeFile) {
@@ -187,7 +217,12 @@ func (f *writeFile) Close() error {
 		f.tmp.Close()
 		return err
 	}
-	_, upErr := f.svc.Upload(f.name, f.tmp)
+	var upErr error
+	if f.cr != nil {
+		_, _, upErr = f.svc.UploadRange(f.name, f.cr.start, f.cr.end, f.cr.total, f.tmp)
+	} else {
+		_, upErr = f.svc.Upload(f.name, f.tmp)
+	}
 	closeErr := f.tmp.Close()
 	if upErr != nil {
 		return upErr

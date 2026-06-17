@@ -104,6 +104,56 @@ func TestDeleteAndRenameRequireExisting(t *testing.T) {
 	}
 }
 
+func TestRenamePendingUploadMovesLocalContentToDestination(t *testing.T) {
+	svc, st := newService(t)
+	content := []byte("G0 X0\nG1 X1\n")
+	entry, err := svc.Upload("upload.tmp", bytes.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Rename("upload.tmp", "final.nc"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if _, ok := svc.Lookup("upload.tmp"); ok {
+		t.Fatal("source entry still exists after local pending rename")
+	}
+	got, ok := svc.Lookup("final.nc")
+	if !ok {
+		t.Fatal("destination entry missing after local pending rename")
+	}
+	if got.Size != int64(len(content)) || got.MD5 != md5hex(content) || got.CachePath == entry.CachePath {
+		t.Fatalf("destination entry = %+v, want moved cached content", got)
+	}
+	rc, _, err := svc.ReadCache("final.nc")
+	if err != nil {
+		t.Fatalf("ReadCache final: %v", err)
+	}
+	read, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read, content) {
+		t.Fatalf("final cache = %q, want %q", string(read), string(content))
+	}
+	if _, err := os.Stat(entry.CachePath); !os.IsNotExist(err) {
+		t.Fatalf("source cache still exists: %v", err)
+	}
+
+	var finalUploads, remoteRenames int
+	for _, j := range st.ListJobs() {
+		if j.Kind == store.JobUpload && j.Path == "/sd/gcodes/final.nc" && j.State == store.Queued {
+			finalUploads++
+		}
+		if j.Kind == store.JobRename {
+			remoteRenames++
+		}
+	}
+	if finalUploads != 1 || remoteRenames != 0 {
+		t.Fatalf("jobs = %+v, want one destination upload and no remote rename", st.ListJobs())
+	}
+}
+
 func TestDeletePendingUploadDiscardsLocalEntry(t *testing.T) {
 	svc, st := newService(t)
 	entry, err := svc.Upload("a.nc", bytes.NewReader([]byte("x")))
@@ -256,6 +306,58 @@ func TestDeleteSyncedEntryQueuesMachineDelete(t *testing.T) {
 	jobs := st.ListJobs()
 	if len(jobs) != 1 || jobs[0].Kind != store.JobDelete || jobs[0].State != store.Queued {
 		t.Fatalf("delete job = %+v", jobs)
+	}
+}
+
+func TestUploadAfterQueuedDeleteReplacesDeleteIntent(t *testing.T) {
+	svc, st := newService(t)
+	if _, err := svc.Upload("a.nc", bytes.NewReader([]byte("old\n"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/a.nc", store.Synced, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete("a.nc"); err != nil {
+		t.Fatalf("delete synced: %v", err)
+	}
+
+	content := []byte("new content\n")
+	entry, err := svc.Upload("a.nc", bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("upload replacement: %v", err)
+	}
+	if entry.Sync != store.PendingUpload || entry.Size != int64(len(content)) || entry.MD5 != md5hex(content) {
+		t.Fatalf("replacement entry = %+v, want pending upload with new content", entry)
+	}
+	rc, _, err := svc.ReadCache("a.nc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("cache = %q, want %q", string(got), string(content))
+	}
+
+	var queuedDeletes, doneDeletes, queuedUploads int
+	for _, job := range st.ListJobs() {
+		if job.Path != "/sd/gcodes/a.nc" {
+			continue
+		}
+		switch {
+		case job.Kind == store.JobDelete && job.State == store.Queued:
+			queuedDeletes++
+		case job.Kind == store.JobDelete && job.State == store.Done:
+			doneDeletes++
+		case job.Kind == store.JobUpload && job.State == store.Queued:
+			queuedUploads++
+		}
+	}
+	if queuedDeletes != 0 || doneDeletes != 1 || queuedUploads != 1 {
+		t.Fatalf("jobs = %+v, want no queued delete, one discarded delete, one replacement upload", st.ListJobs())
 	}
 }
 
@@ -435,6 +537,163 @@ func serviceWithMachine(t *testing.T) (*Service, *carveratest.FakeMachine, *mach
 		t.Fatal(err)
 	}
 	return svc, m, tr
+}
+
+func putCachedEntry(t *testing.T, svc *Service, remotePath string, content []byte, sync store.SyncState) store.Entry {
+	t.Helper()
+	remote, err := normalizeRemote(remotePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := svc.cacheNameFor(remote)
+	if err := os.WriteFile(cachePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry := store.Entry{
+		Path:      remote,
+		Size:      int64(len(content)),
+		MTime:     time.Now(),
+		MD5:       md5hex(content),
+		CachePath: cachePath,
+		Sync:      sync,
+	}
+	if err := svc.store.PutEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+	return entry
+}
+
+func TestSelectActiveGcodeParsesPreview(t *testing.T) {
+	svc, _ := newService(t)
+	content := []byte("T2 M6\nG90\nG0 X0 Y0 Z5\nG1 X10 Y0 Z-1\nG1 X10 Y5\n")
+	putCachedEntry(t, svc, "part.nc", content, store.Synced)
+
+	active, err := svc.SelectActiveGcode("part.nc")
+	if err != nil {
+		t.Fatalf("SelectActiveGcode: %v", err)
+	}
+	if active.Path != "/sd/gcodes/part.nc" || !active.Runnable {
+		t.Fatalf("active = %+v, want runnable part.nc", active)
+	}
+	if active.Preview == nil || active.Preview.LineCount != 5 || active.Preview.MoveCount != 3 || active.Preview.PlottedSegments != 3 {
+		t.Fatalf("preview = %+v", active.Preview)
+	}
+	if len(active.Preview.Tools) != 1 || active.Preview.Tools[0] != 2 {
+		t.Fatalf("tools = %v, want [2]", active.Preview.Tools)
+	}
+	if active.Preview.Bounds == nil || active.Preview.Bounds.Max[0] != 10 || active.Preview.Bounds.Max[1] != 5 || active.Preview.Bounds.Min[2] != -1 {
+		t.Fatalf("bounds = %+v", active.Preview.Bounds)
+	}
+}
+
+func TestParseGcodePreviewCoversCarveraMotionModes(t *testing.T) {
+	gcode := strings.Join([]string{
+		"G21 G90 G17",
+		"G0 X0 Y0 Z5",
+		"G1 X10 Y0 Z0",
+		"G2 X10 Y10 I0 J5",
+		"G18 G3 X0 Z0 I-5 K0",
+		"G38.2 Z-2 F50",
+		"G1 A90",
+		"G92.4 A0 S0",
+		"G98 G81 X5 Y5 Z-3 R1 F80",
+		"G99 G83 X6 Y5 Z-6 R1 Q2 F80",
+		"G80",
+		"G17 G2 I5 J0",
+	}, "\n")
+
+	preview, err := ParseGcodePreview(strings.NewReader(gcode))
+	if err != nil {
+		t.Fatalf("ParseGcodePreview: %v", err)
+	}
+	if !preview.Has4Axis {
+		t.Fatalf("Has4Axis = false, want true")
+	}
+	if preview.MoveCount < 12 || preview.PlottedSegments <= preview.MoveCount || preview.TotalDistance <= 0 {
+		t.Fatalf("preview counters = moves %d plotted %d distance %.3f", preview.MoveCount, preview.PlottedSegments, preview.TotalDistance)
+	}
+	kinds := map[string]int{}
+	for _, seg := range preview.Segments {
+		kinds[seg.Kind]++
+		if len(seg.From) != 4 || len(seg.To) != 4 {
+			t.Fatalf("segment is not 4-axis aware: %+v", seg)
+		}
+		if seg.DistanceEnd < seg.DistanceStart {
+			t.Fatalf("segment distance regressed: %+v", seg)
+		}
+	}
+	for _, kind := range []string{"rapid", "cut", "arc", "probe"} {
+		if kinds[kind] == 0 {
+			t.Fatalf("kind %q missing from preview, counts=%v", kind, kinds)
+		}
+	}
+	if preview.Bounds == nil || preview.Bounds.MinA > -89.9 || preview.Bounds.Max[0] < 10 || preview.Bounds.Min[2] > -6 {
+		t.Fatalf("bounds = %+v", preview.Bounds)
+	}
+}
+
+func TestRunActiveGcodeSendsPlayCommand(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	tr.Observe(machine.Idle)
+	putCachedEntry(t, svc, "my part.nc", []byte("G1 X1\n"), store.Synced)
+	if _, err := svc.SelectActiveGcode("my part.nc"); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+
+	res, err := svc.RunActiveGcode()
+	if err != nil {
+		t.Fatalf("run active: %v", err)
+	}
+	if res.Command != "play /sd/gcodes/my part.nc" {
+		t.Fatalf("result = %+v", res)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "play /sd/gcodes/my part.nc" {
+		t.Fatalf("machine gcodes = %v, want play command", g)
+	}
+}
+
+func TestRunActiveGcodeRejectsUnsyncedSelection(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	tr.Observe(machine.Idle)
+	putCachedEntry(t, svc, "queued.nc", []byte("G1 X1\n"), store.PendingUpload)
+	active, err := svc.SelectActiveGcode("queued.nc")
+	if err != nil {
+		t.Fatalf("select pending upload: %v", err)
+	}
+	if active.Runnable {
+		t.Fatalf("pending upload should not be runnable: %+v", active)
+	}
+	if _, err := svc.RunActiveGcode(); !errors.Is(err, ErrActiveGcodeUnavailable) {
+		t.Fatalf("RunActiveGcode err = %v, want ErrActiveGcodeUnavailable", err)
+	}
+	if g := m.Gcodes(); len(g) != 0 {
+		t.Fatalf("unsynced run leaked to machine: %v", g)
+	}
+}
+
+func TestToolActionsSendControllerCommands(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	tr.Observe(machine.Idle)
+
+	if res, err := svc.SetCurrentToolID(3); err != nil || res.Command != "M493.2T3" {
+		t.Fatalf("SetCurrentToolID result=%+v err=%v", res, err)
+	}
+	if res, err := svc.CalibrateCurrentTool(); err != nil || res.Command != "M491" {
+		t.Fatalf("CalibrateCurrentTool result=%+v err=%v", res, err)
+	}
+	if g := m.Gcodes(); len(g) != 2 || g[0] != "M493.2T3" || g[1] != "M491" {
+		t.Fatalf("machine gcodes = %v, want set/calibrate", g)
+	}
+}
+
+func TestSetCurrentToolIDValidation(t *testing.T) {
+	svc, _, _ := serviceWithMachine(t)
+	if _, err := svc.SetCurrentToolID(0); err == nil {
+		t.Fatal("expected tool_id 0 to be rejected")
+	}
+	if _, err := svc.SetCurrentToolID(1000); err == nil {
+		t.Fatal("expected tool_id 1000 to be rejected")
+	}
 }
 
 // TestSendGcodeQueryRunsRegardlessOfState confirms a read-only query (M114)

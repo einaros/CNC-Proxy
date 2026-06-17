@@ -68,6 +68,13 @@ type Service struct {
 	// status stream. It never performs machine I/O.
 	runHistory *runhistory.History
 
+	// activeGcode is the web/API-selected file and cached preview. This mirrors
+	// the controller's selected_remote_filename concept and is intentionally
+	// proxy-local state; the machine is only touched when RunActiveGcode sends
+	// the controller-compatible play command.
+	activeMu    sync.Mutex
+	activeGcode activeGcodeState
+
 	// commitMu makes a mutation's "publish to cache + update catalog + enqueue
 	// job" sequence atomic across concurrent callers, so the cache file, the
 	// catalog entry's MD5/size, and the queued job always describe the same
@@ -607,6 +614,9 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 	if err := s.store.PutEntry(entry); err != nil {
 		return store.Entry{}, err
 	}
+	if err := s.discardQueuedDeletesForWrite(remote); err != nil {
+		return store.Entry{}, err
+	}
 	if _, err := s.store.SupersedeQueuedUploads(remote); err != nil {
 		return store.Entry{}, err
 	}
@@ -620,6 +630,182 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 		return store.Entry{}, err
 	}
 	return entry, nil
+}
+
+// UploadRange stages one Content-Range PUT from WebDAV. Incomplete contiguous
+// ranges are kept local_only and are not queued for the machine; the upload job
+// is queued only after the final byte has arrived.
+func (s *Service) UploadRange(remotePath string, start, end, total int64, r io.Reader) (store.Entry, bool, error) {
+	if start < 0 || end < start || total <= 0 || end >= total {
+		return store.Entry{}, false, fmt.Errorf("service: invalid upload range")
+	}
+	remote, err := normalizeRemote(remotePath)
+	if err != nil {
+		return store.Entry{}, false, err
+	}
+
+	expected := end - start + 1
+	part, err := os.CreateTemp(s.cacheDir, "upload-range-part-*.tmp")
+	if err != nil {
+		return store.Entry{}, false, err
+	}
+	partPath := part.Name()
+	n, err := io.Copy(part, r)
+	if cerr := part.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(partPath)
+		return store.Entry{}, false, err
+	}
+	if n != expected {
+		os.Remove(partPath)
+		return store.Entry{}, false, fmt.Errorf("service: upload range length %d does not match Content-Range length %d", n, expected)
+	}
+	defer os.Remove(partPath)
+
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+
+	cachePath := s.cacheNameFor(remote)
+	entry, complete, err := s.mergeUploadRange(remote, cachePath, partPath, start, end, total)
+	if err != nil {
+		return store.Entry{}, false, err
+	}
+	return entry, complete, nil
+}
+
+func (s *Service) mergeUploadRange(remote, cachePath, partPath string, start, end, total int64) (store.Entry, bool, error) {
+	merge, err := os.CreateTemp(s.cacheDir, "upload-range-*.tmp")
+	if err != nil {
+		return store.Entry{}, false, err
+	}
+	mergePath := merge.Name()
+	cleanup := true
+	defer func() {
+		merge.Close()
+		if cleanup {
+			os.Remove(mergePath)
+		}
+	}()
+
+	currentSize := int64(0)
+	if existing, ok := s.store.GetEntry(remote); ok && existing.CachePath != "" {
+		old, err := os.Open(existing.CachePath)
+		if err != nil {
+			return store.Entry{}, false, err
+		}
+		currentSize, err = io.Copy(merge, old)
+		closeErr := old.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return store.Entry{}, false, err
+		}
+	}
+	if start > currentSize {
+		return store.Entry{}, false, fmt.Errorf("service: upload range starts at %d with only %d contiguous bytes staged", start, currentSize)
+	}
+
+	part, err := os.Open(partPath)
+	if err != nil {
+		return store.Entry{}, false, err
+	}
+	if _, err := merge.Seek(start, io.SeekStart); err != nil {
+		part.Close()
+		return store.Entry{}, false, err
+	}
+	written, err := io.Copy(merge, part)
+	closeErr := part.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return store.Entry{}, false, err
+	}
+	if written != end-start+1 {
+		return store.Entry{}, false, fmt.Errorf("service: staged upload range changed size")
+	}
+
+	contiguous := currentSize
+	if end+1 > contiguous {
+		contiguous = end + 1
+	}
+	complete := contiguous >= total
+	stagedSize := contiguous
+	if complete {
+		stagedSize = total
+	}
+	if err := merge.Truncate(stagedSize); err != nil {
+		return store.Entry{}, false, err
+	}
+	if err := merge.Close(); err != nil {
+		return store.Entry{}, false, err
+	}
+	if err := os.Rename(mergePath, cachePath); err != nil {
+		return store.Entry{}, false, err
+	}
+	cleanup = false
+
+	entry := store.Entry{
+		Path:      remote,
+		Size:      stagedSize,
+		MTime:     time.Now(),
+		CachePath: cachePath,
+		Sync:      store.LocalOnly,
+	}
+	if complete {
+		md5hex, err := fileMD5(cachePath, total)
+		if err != nil {
+			return store.Entry{}, false, err
+		}
+		entry.MD5 = md5hex
+		entry.Sync = store.PendingUpload
+	}
+	if err := s.store.PutEntry(entry); err != nil {
+		return store.Entry{}, false, err
+	}
+	if err := s.discardQueuedDeletesForWrite(remote); err != nil {
+		return store.Entry{}, false, err
+	}
+	if _, err := s.store.SupersedeQueuedUploads(remote); err != nil {
+		return store.Entry{}, false, err
+	}
+	if complete {
+		if _, err := s.store.Enqueue(store.Job{
+			Kind:      store.JobUpload,
+			Path:      remote,
+			CachePath: cachePath,
+			MD5:       entry.MD5,
+			Size:      total,
+		}); err != nil {
+			return store.Entry{}, false, err
+		}
+	}
+	return entry, complete, nil
+}
+
+func fileMD5(path string, wantSize int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := md5.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", err
+	}
+	if n != wantSize {
+		return "", fmt.Errorf("service: staged upload size %d does not match Content-Range total %d", n, wantSize)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (s *Service) discardQueuedDeletesForWrite(remote string) error {
+	_, _, err := s.store.DiscardJobs(remote, store.JobDelete)
+	return err
 }
 
 // gcodeReplyCap bounds a reply-expected query (M114, version, $G, M503, …). The
@@ -1116,7 +1302,9 @@ func (s *Service) hasRunningJob(remote string) bool {
 	return false
 }
 
-// Rename enqueues a rename and marks the entry pending_rename.
+// Rename enqueues a machine rename for synced/remote files. If the source is a
+// not-yet-synced local upload, move the cached content locally and enqueue an
+// upload for the destination instead; the machine has nothing to rename yet.
 func (s *Service) Rename(fromPath, toPath string) error {
 	from, err := normalizeRemote(fromPath)
 	if err != nil {
@@ -1126,11 +1314,71 @@ func (s *Service) Rename(fromPath, toPath string) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := s.store.GetEntry(from); !ok {
+	entry, ok := s.store.GetEntry(from)
+	if !ok {
 		return ErrNotFound
+	}
+	if s.canRenameLocalUpload(from, entry) {
+		return s.renameLocalUpload(from, to, entry)
 	}
 	s.store.SetEntrySync(from, store.PendingRename, "")
 	_, err = s.store.Enqueue(store.Job{Kind: store.JobRename, Path: from, DestPath: to})
+	return err
+}
+
+func (s *Service) canRenameLocalUpload(from string, entry store.Entry) bool {
+	return !entry.IsDir && entry.CachePath != "" && s.hasLocalCreateJob(from) && !s.hasRunningJob(from)
+}
+
+func (s *Service) renameLocalUpload(from, to string, entry store.Entry) error {
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+
+	// Re-read under commitMu in case a concurrent upload/delete changed it while
+	// Rename was normalizing paths.
+	current, ok := s.store.GetEntry(from)
+	if !ok {
+		return ErrNotFound
+	}
+	if !s.canRenameLocalUpload(from, current) {
+		s.store.SetEntrySync(from, store.PendingRename, "")
+		_, err := s.store.Enqueue(store.Job{Kind: store.JobRename, Path: from, DestPath: to})
+		return err
+	}
+	entry = current
+
+	cachePath := s.cacheNameFor(to)
+	if entry.CachePath != cachePath {
+		_ = os.Remove(cachePath)
+		if err := os.Rename(entry.CachePath, cachePath); err != nil {
+			return err
+		}
+	}
+	if _, _, err := s.store.DiscardJobs(from, store.JobUpload, store.JobMkdir); err != nil {
+		return err
+	}
+	if err := s.store.DeleteEntry(from); err != nil {
+		return err
+	}
+
+	entry.Path = to
+	entry.CachePath = cachePath
+	entry.Sync = store.PendingUpload
+	entry.Error = ""
+	entry.MTime = time.Now()
+	if err := s.store.PutEntry(entry); err != nil {
+		return err
+	}
+	if _, err := s.store.SupersedeQueuedUploads(to); err != nil {
+		return err
+	}
+	_, err := s.store.Enqueue(store.Job{
+		Kind:      store.JobUpload,
+		Path:      to,
+		CachePath: cachePath,
+		MD5:       entry.MD5,
+		Size:      entry.Size,
+	})
 	return err
 }
 
@@ -1284,10 +1532,12 @@ func md5hex(b []byte) string {
 
 // Errors returned by the service.
 var (
-	ErrNotFound            = errors.New("service: not found")
-	ErrNotCached           = errors.New("service: content not cached locally")
-	ErrMachineStatusStale  = errors.New("service: machine status is stale")
-	ErrRecoveryUnavailable = errors.New("service: recovery unavailable")
-	ErrRetryUnavailable    = errors.New("service: retry unavailable")
-	ErrDiscardUnavailable  = errors.New("service: discard unavailable")
+	ErrNotFound               = errors.New("service: not found")
+	ErrNotCached              = errors.New("service: content not cached locally")
+	ErrMachineStatusStale     = errors.New("service: machine status is stale")
+	ErrRecoveryUnavailable    = errors.New("service: recovery unavailable")
+	ErrRetryUnavailable       = errors.New("service: retry unavailable")
+	ErrDiscardUnavailable     = errors.New("service: discard unavailable")
+	ErrNoActiveGcode          = errors.New("service: no active gcode selected")
+	ErrActiveGcodeUnavailable = errors.New("service: active gcode is not runnable")
 )

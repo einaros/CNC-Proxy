@@ -47,6 +47,8 @@ type Server struct {
 	ready       chan struct{}
 	readyOnce   sync.Once
 	logPath     string
+	mountStatus func(context.Context) WebDAVMountStatus
+	remount     func(context.Context) error
 
 	mu            sync.Mutex
 	notifications []Notification
@@ -63,6 +65,11 @@ func NewServer(configPath string, supervisor *Supervisor, notifier Notifier) *Se
 
 func (s *Server) SetManagerProcessExit(fn func()) {
 	s.processExit = fn
+}
+
+func (s *Server) SetWebDAVMountControls(status func(context.Context) WebDAVMountStatus, remount func(context.Context) error) {
+	s.mountStatus = status
+	s.remount = remount
 }
 
 func (s *Server) Ready() <-chan struct{} {
@@ -87,6 +94,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/proxy/stop", s.withAuth(s.stopProxy))
 	mux.HandleFunc("POST /api/proxy/restart", s.withAuth(s.restartProxy))
 	mux.HandleFunc("POST /api/proxy/build", s.withAuth(s.buildProxy))
+	mux.HandleFunc("GET /api/webdav/mount", s.withAuth(s.webDAVMount))
+	mux.HandleFunc("POST /api/webdav/remount", s.withAuth(s.remountWebDAV))
 	mux.HandleFunc("POST /api/notify", s.withAuth(s.notify))
 	mux.HandleFunc("POST /api/deploy", s.withAuth(s.deploy))
 	return mux
@@ -267,6 +276,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"manager_restarted_at": restartedAt,
 		"notifications":        s.recentNotifications(),
 		"manager_log":          s.recentManagerLog(),
+		"webdav_mount":         s.webDAVMountStatus(r.Context()),
 	})
 }
 
@@ -428,6 +438,34 @@ func (s *Server) buildProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, map[string]any{"ok": true, "output": out})
+}
+
+func (s *Server) webDAVMount(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, map[string]any{"ok": true, "mount": s.webDAVMountStatus(r.Context())})
+}
+
+func (s *Server) remountWebDAV(w http.ResponseWriter, r *http.Request) {
+	if s.remount == nil {
+		http.Error(w, "webdav remount is unavailable", http.StatusNotImplemented)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	if err := s.remount(ctx); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		s.writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "mount": s.webDAVMountStatus(r.Context())})
+		return
+	}
+	s.writeJSON(w, map[string]any{"ok": true, "mount": s.webDAVMountStatus(r.Context())})
+}
+
+func (s *Server) webDAVMountStatus(ctx context.Context) WebDAVMountStatus {
+	if s.mountStatus == nil {
+		return WebDAVMountStatus{}
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return s.mountStatus(statusCtx)
 }
 
 func (s *Server) notify(w http.ResponseWriter, r *http.Request) {

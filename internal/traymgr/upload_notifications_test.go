@@ -2,6 +2,7 @@ package traymgr
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/uwin/cnc-proxy/internal/apiclient"
@@ -48,6 +49,34 @@ func TestUploadCompletionTrackerReportsNewDoneUploadsAfterBaseline(t *testing.T)
 	}
 }
 
+func TestWebDAVVisibleDeletionTrackerSkipsInitialSnapshot(t *testing.T) {
+	var tracker WebDAVVisibleDeletionTracker
+	got := tracker.Observe([]apiclient.File{{Path: "/sd/gcodes/a.nc", Sync: "synced"}})
+	if len(got) != 0 {
+		t.Fatalf("initial deleted files = %+v, want none", got)
+	}
+}
+
+func TestWebDAVVisibleDeletionTrackerReportsHiddenOrMissingPaths(t *testing.T) {
+	var tracker WebDAVVisibleDeletionTracker
+	tracker.Observe([]apiclient.File{
+		{Path: "/sd/gcodes/a.nc", Sync: "synced"},
+		{Path: "/sd/gcodes/b.nc", Sync: "remote_only"},
+		{Path: "/sd/gcodes/c.nc", Sync: "synced"},
+	})
+
+	got := tracker.Observe([]apiclient.File{
+		{Path: "/sd/gcodes/a.nc", Sync: "pending_delete"},
+		{Path: "/sd/gcodes/c.nc", Sync: "synced"},
+	})
+	if len(got) != 2 || got[0] != "/sd/gcodes/a.nc" || got[1] != "/sd/gcodes/b.nc" {
+		t.Fatalf("deleted files = %+v, want a.nc and b.nc", got)
+	}
+	if again := tracker.Observe([]apiclient.File{{Path: "/sd/gcodes/c.nc", Sync: "synced"}}); len(again) != 0 {
+		t.Fatalf("second deleted files = %+v, want none", again)
+	}
+}
+
 func TestNotifyUploadCompletedRecordsAndSendsNotification(t *testing.T) {
 	rec := &recordingNotifier{}
 	app, err := NewApp(filepath.Join(t.TempDir(), "tray.json"), rec)
@@ -66,5 +95,30 @@ func TestNotifyUploadCompletedRecordsAndSendsNotification(t *testing.T) {
 	}
 	if len(rec.got) != 1 || rec.got[0].Message != got[0].Message {
 		t.Fatalf("notifier got %+v", rec.got)
+	}
+}
+
+func TestNotifyWebDAVRefreshAfterDeleteRecordsReason(t *testing.T) {
+	rec := &recordingNotifier{}
+	app, err := NewApp(filepath.Join(t.TempDir(), "tray.json"), rec)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+
+	app.NotifyWebDAVRefreshAfterDelete([]string{"/sd/gcodes/part.nc"})
+
+	got := app.Server.recentNotifications()
+	if len(got) != 1 {
+		t.Fatalf("notifications = %+v, want one", got)
+	}
+	if got[0].Level != "info" || got[0].Message != "Refreshing WebDAV mount after web delete: part.nc" {
+		t.Fatalf("notification = %+v", got[0])
+	}
+	if len(rec.got) != 1 || rec.got[0].Message != got[0].Message {
+		t.Fatalf("notifier got %+v", rec.got)
+	}
+	logText := managerLogText(app.Server.recentManagerLog())
+	if !strings.Contains(logText, "Refreshing WebDAV mount after web delete: part.nc") {
+		t.Fatalf("manager log = %q", logText)
 	}
 }

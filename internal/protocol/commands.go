@@ -1,6 +1,9 @@
 package protocol
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Wire-level character escaping. The controller replaces these characters in
 // command arguments before sending, and the firmware decodes them (libs/
@@ -87,6 +90,23 @@ func DownloadCommand(path string) []byte {
 	return Encode(CmdFileStart, []byte("download "+Escape(path)+"\n"))
 }
 
+// PlayLine builds the controller-compatible console command that starts a file
+// from SD. The controller sends this as CTRL_MULTI text, with path escaping.
+func PlayLine(path string) string {
+	return "play " + Escape(path) + "\n"
+}
+
+// SetCurrentToolLine builds the controller's "set current tool ID" command.
+func SetCurrentToolLine(toolID int) string {
+	return "M493.2T" + strconv.Itoa(toolID) + "\n"
+}
+
+// CalibrateCurrentToolLine builds the controller's current-tool calibration
+// command.
+func CalibrateCurrentToolLine() string {
+	return "M491\n"
+}
+
 // Single-character control frames (CTRL_SINGLE).
 func QueryStatus() []byte { return Encode(CmdCtrlSingle, []byte{'?'}) }
 func Halt() []byte        { return Encode(CmdCtrlSingle, []byte{0x18}) } // Ctrl-X
@@ -154,7 +174,7 @@ const (
 // reduced to their base ("m114").
 var replyQueries = map[string]bool{
 	"m114": true, "m115": true, "m119": true, "m105": true,
-	"m503": true, // display live settings — pure read (M500 saves; not here)
+	"m503":    true, // display live settings — pure read (M500 saves; not here)
 	"version": true, "model": true, "ftype": true,
 	"time": true, "echo": true, "mem": true, "diagnose": true,
 }

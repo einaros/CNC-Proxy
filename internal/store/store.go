@@ -245,6 +245,51 @@ func (s *Store) SetEntrySync(path string, state SyncState, errMsg string) error 
 	return nil
 }
 
+// SetEntrySyncIf updates an entry only when its current sync state is one of
+// allowed. It is used by job completion paths so stale jobs cannot clobber a
+// newer desired state for the same path.
+func (s *Store) SetEntrySyncIf(path string, state SyncState, errMsg string, allowed ...SyncState) (Entry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[path]
+	if !ok || !syncStateIn(e.Sync, allowed) {
+		return Entry{}, false, nil
+	}
+	e.Sync = state
+	e.Error = errMsg
+	e.UpdatedAt = s.now()
+	if err := s.flushLocked(); err != nil {
+		return Entry{}, false, err
+	}
+	cp := *e
+	s.publishLocked(Event{Kind: "entry", Entry: &cp})
+	return cp, true, nil
+}
+
+// SetEntrySyncIfMatch updates an entry only when match accepts the current
+// entry. The predicate runs while the store lock is held and should stay cheap.
+func (s *Store) SetEntrySyncIfMatch(path string, state SyncState, errMsg string, match func(Entry) bool) (Entry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[path]
+	if !ok {
+		return Entry{}, false, nil
+	}
+	current := *e
+	if !match(current) {
+		return Entry{}, false, nil
+	}
+	e.Sync = state
+	e.Error = errMsg
+	e.UpdatedAt = s.now()
+	if err := s.flushLocked(); err != nil {
+		return Entry{}, false, err
+	}
+	cp := *e
+	s.publishLocked(Event{Kind: "entry", Entry: &cp})
+	return cp, true, nil
+}
+
 // GetEntry returns a copy of an entry.
 func (s *Store) GetEntry(path string) (Entry, bool) {
 	s.mu.RLock()
@@ -283,6 +328,34 @@ func (s *Store) DeleteEntry(path string) error {
 	}
 	s.publishLocked(Event{Kind: "entry", Entry: &Entry{Path: path, Sync: ""}})
 	return nil
+}
+
+// DeleteEntryIfSync removes an entry only when its current sync state is one of
+// allowed. This keeps stale delete jobs from removing a replacement upload that
+// arrived while the delete was running.
+func (s *Store) DeleteEntryIfSync(path string, allowed ...SyncState) (Entry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[path]
+	if !ok || !syncStateIn(e.Sync, allowed) {
+		return Entry{}, false, nil
+	}
+	entry := *e
+	delete(s.entries, path)
+	if err := s.flushLocked(); err != nil {
+		return Entry{}, false, err
+	}
+	s.publishLocked(Event{Kind: "entry", Entry: &Entry{Path: path, Sync: ""}})
+	return entry, true, nil
+}
+
+func syncStateIn(state SyncState, allowed []SyncState) bool {
+	for _, candidate := range allowed {
+		if state == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // DiscardEntry removes a local catalog entry and marks matching queued/failed

@@ -18,7 +18,8 @@ type App struct {
 
 	mountRetry time.Duration
 
-	mountMu sync.Mutex
+	mountMu                    sync.Mutex
+	lastFreshMountProxyStarted time.Time
 
 	mu              sync.Mutex
 	lastMountAction string
@@ -55,7 +56,9 @@ func NewApp(configPath string, notifier Notifier) (*App, error) {
 	}
 	sup := NewSupervisor(cfg, DefaultLogPath(configPath))
 	srv := NewServer(configPath, sup, notifier)
-	return &App{ConfigPath: configPath, Supervisor: sup, Server: srv, mountRetry: 10 * time.Second}, nil
+	app := &App{ConfigPath: configPath, Supervisor: sup, Server: srv, mountRetry: 10 * time.Second}
+	srv.SetWebDAVMountControls(app.WebDAVMountStatus, app.RemountWebDAV)
+	return app, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -91,7 +94,7 @@ func (a *App) SetWebDAVMountEnabled(ctx context.Context, enabled bool) error {
 	var err error
 	if enabled {
 		a.logWebDAVOperation("info", "mount native call starting target="+webDAVMountLogTarget(next))
-		err = MountWebDAV(ctx, next)
+		err = MountWebDAVFresh(ctx, next)
 	} else {
 		a.logWebDAVOperation("info", "unmount native call starting target="+webDAVMountLogTarget(next))
 		err = UnmountWebDAV(ctx, next)
@@ -99,6 +102,9 @@ func (a *App) SetWebDAVMountEnabled(ctx context.Context, enabled bool) error {
 	if err != nil {
 		a.recordWebDAVMountError(action, err)
 		return err
+	}
+	if enabled {
+		a.markFreshMountLocked()
 	}
 	a.setLastMountError("", "")
 	a.logWebDAVOperation("info", action+" verified target="+webDAVMountLogTarget(next))
@@ -115,14 +121,22 @@ func (a *App) remountWebDAV(ctx context.Context) error {
 
 	cfg := a.Supervisor.Config()
 	if !cfg.WebDAVMount.Enabled {
-		a.logWebDAVOperation("info", "remount skipped because WebDAV mount is disabled")
-		return nil
+		mounted, err := WebDAVMounted(ctx, cfg)
+		if err != nil {
+			a.recordWebDAVMountError("remount", err)
+			return err
+		}
+		if !mounted {
+			a.logWebDAVOperation("info", "remount skipped because WebDAV mount is disabled and no mount is present")
+			return nil
+		}
 	}
 	a.logWebDAVOperation("info", "remount native call starting target="+webDAVMountLogTarget(cfg))
-	if err := MountWebDAV(ctx, cfg); err != nil {
+	if err := MountWebDAVFresh(ctx, cfg); err != nil {
 		a.recordWebDAVMountError("remount", err)
 		return err
 	}
+	a.markFreshMountLocked()
 	a.setLastMountError("", "")
 	a.logWebDAVOperation("info", "remount verified target="+webDAVMountLogTarget(cfg))
 	return nil
@@ -220,7 +234,26 @@ func (a *App) remountWebDAVQuiet(ctx context.Context) error {
 	if !cfg.WebDAVMount.Enabled {
 		return nil
 	}
+	if a.needsFreshMountLocked() {
+		if err := MountWebDAVFresh(ctx, cfg); err != nil {
+			return err
+		}
+		a.markFreshMountLocked()
+		return nil
+	}
 	return MountWebDAV(ctx, cfg)
+}
+
+func (a *App) needsFreshMountLocked() bool {
+	st := a.Supervisor.State()
+	return st.Running && !st.StartedAt.IsZero() && !st.StartedAt.Equal(a.lastFreshMountProxyStarted)
+}
+
+func (a *App) markFreshMountLocked() {
+	st := a.Supervisor.State()
+	if st.Running && !st.StartedAt.IsZero() {
+		a.lastFreshMountProxyStarted = st.StartedAt
+	}
 }
 
 func (a *App) recordWebDAVMountError(action string, err error) {

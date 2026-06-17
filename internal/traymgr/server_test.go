@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -129,6 +130,57 @@ func TestManagerLogCanBeCleared(t *testing.T) {
 	}
 }
 
+func TestServerWebDAVRemountEndpointUsesFreshMount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tray.json")
+	cfg := DefaultConfig()
+	cfg.WebDAVMount.Enabled = true
+	writeRawConfig(t, path, cfg)
+
+	app, err := NewApp(path, nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	var mounts, unmounts int
+	var fresh []bool
+	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
+		mounts++
+		fresh = append(fresh, req.Fresh)
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) error {
+		unmounts++
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
+		return true, nil
+	})
+	defer restore()
+
+	ts := httptest.NewServer(app.Server.Handler())
+	defer ts.Close()
+	resp, err := http.Post(ts.URL+"/api/webdav/remount", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/webdav/remount status = %d", resp.StatusCode)
+	}
+	if mounts != 1 || unmounts != 1 {
+		t.Fatalf("mounts=%d unmounts=%d, want 1/1", mounts, unmounts)
+	}
+	if got, want := fmt.Sprint(fresh), "[true]"; got != want {
+		t.Fatalf("fresh mount flags = %s, want %s", got, want)
+	}
+	var body struct {
+		Mount WebDAVMountStatus `json:"mount"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Mount.Desired || !body.Mount.Mounted {
+		t.Fatalf("mount status = %+v, want desired and mounted", body.Mount)
+	}
+}
+
 func TestServerPutConfigPersistsAndUpdatesSupervisor(t *testing.T) {
 	cfg := DefaultConfig()
 	configPath := filepath.Join(t.TempDir(), "tray.json")
@@ -159,11 +211,13 @@ func TestServerPutConfigPersistsAndUpdatesSupervisor(t *testing.T) {
 }
 
 func TestLocalWebDAVProxyInjectsConfiguredAuth(t *testing.T) {
-	var gotPath, gotAuth, gotDestination string
+	var gotPath, gotAuth, gotDestination, gotBody string
 	dav := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotDestination = r.Header.Get("Destination")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer dav.Close()
@@ -199,6 +253,9 @@ func TestLocalWebDAVProxyInjectsConfiguredAuth(t *testing.T) {
 	wantDestination := dav.URL + "/jobs/renamed.nc"
 	if gotDestination != wantDestination {
 		t.Fatalf("proxied Destination = %q, want %q", gotDestination, wantDestination)
+	}
+	if gotBody != "gcode" {
+		t.Fatalf("proxied body = %q, want gcode", gotBody)
 	}
 }
 

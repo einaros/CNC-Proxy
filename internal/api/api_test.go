@@ -191,6 +191,45 @@ func TestPostFileMultipart(t *testing.T) {
 	}
 }
 
+func TestPostFileMultipartPreservesExactBytes(t *testing.T) {
+	srv, _ := newTestServer(t)
+	content := []byte{'G', '0', ' ', 'X', '0', '\r', '\n', 0, 'G', '1', ' ', 'X', '5', '\n'}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "exact.nc")
+	if _, err := fw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+
+	resp, err := http.Post(srv.URL+"/api/files", mw.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d: %s", resp.StatusCode, b)
+	}
+	var entry store.Entry
+	if err := json.NewDecoder(resp.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Size != int64(len(content)) {
+		t.Fatalf("multipart entry size = %d, want %d", entry.Size, len(content))
+	}
+
+	gotResp := get(t, srv.URL+"/api/files/exact.nc")
+	defer gotResp.Body.Close()
+	got, err := io.ReadAll(gotResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("multipart content = %v, want %v", got, content)
+	}
+}
+
 func TestGetFilesAndContent(t *testing.T) {
 	srv, _ := newTestServer(t)
 	http.Post(srv.URL+"/api/files?path=a.nc", "application/octet-stream", strings.NewReader("hello"))
@@ -460,7 +499,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing jog visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `/app.js?v=jog-stream-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="status-fields"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="active-gcode-panel"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -513,7 +552,16 @@ func TestWebUIServed(t *testing.T) {
 	if got := js.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("app.js Cache-Control = %q, want no-store", got)
 	}
-	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderStatusFields", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter"} {
+	three := get(t, srv.URL+"/three.module.min.js")
+	threeBody, _ := io.ReadAll(three.Body)
+	three.Body.Close()
+	if three.StatusCode != http.StatusOK || !strings.Contains(string(threeBody[:min(len(threeBody), 200)]), "Three.js Authors") {
+		t.Errorf("three.module.min.js status=%d", three.StatusCode)
+	}
+	if got := three.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("three.module.min.js Cache-Control = %q, want no-store", got)
+	}
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderStatusFields", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "THREE.WebGLRenderer", "gcodeWorldPoint", "/api/gcode/active", "/api/tool/current", "/api/tool/calibrate"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -636,6 +684,12 @@ func TestUISettingsAPIRejectsInvalidGamepad(t *testing.T) {
 // control endpoints can be exercised end to end with controllable state.
 func serverWithMachine(t *testing.T) (*httptest.Server, *carveratest.FakeMachine, *machine.Tracker) {
 	t.Helper()
+	srv, m, tr, _, _ := serverWithMachineState(t)
+	return srv, m, tr
+}
+
+func serverWithMachineState(t *testing.T) (*httptest.Server, *carveratest.FakeMachine, *machine.Tracker, *service.Service, *store.Store) {
+	t.Helper()
 	m, err := carveratest.New()
 	if err != nil {
 		t.Fatal(err)
@@ -655,7 +709,7 @@ func serverWithMachine(t *testing.T) (*httptest.Server, *carveratest.FakeMachine
 	}
 	srv := httptest.NewServer(New(svc).Handler())
 	t.Cleanup(srv.Close)
-	return srv, m, tr
+	return srv, m, tr, svc, st
 }
 
 func serverWithJog(t *testing.T, auth bool) (*httptest.Server, *carveratest.FakeMachine, *machine.Tracker) {
@@ -911,6 +965,65 @@ func TestPostGcodeQueryNotGated(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&out)
 	if out["output"] != "C: X:1.0" {
 		t.Errorf("output = %q", out["output"])
+	}
+}
+
+func TestActiveGcodeEndpoints(t *testing.T) {
+	srv, m, tr, _, st := serverWithMachineState(t)
+	tr.Observe(machine.Idle)
+
+	up := postRaw(t, srv.URL+"/api/files?path=my%20part.nc", "G90\nG0 X0 Y0\nG1 X5 Y5\n")
+	up.Body.Close()
+	if up.StatusCode != http.StatusCreated {
+		t.Fatalf("upload status = %d", up.StatusCode)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/my part.nc", store.Synced, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	selectResp := postJSON(t, srv.URL+"/api/gcode/active", map[string]string{"path": "my part.nc"})
+	defer selectResp.Body.Close()
+	if selectResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(selectResp.Body)
+		t.Fatalf("select status=%d body=%s", selectResp.StatusCode, b)
+	}
+	var active service.ActiveGcode
+	if err := json.NewDecoder(selectResp.Body).Decode(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active.Path != "/sd/gcodes/my part.nc" || !active.Runnable || active.Preview == nil || active.Preview.MoveCount != 1 {
+		t.Fatalf("active = %+v", active)
+	}
+
+	req, _ := http.NewRequest("POST", srv.URL+"/api/gcode/active/run", nil)
+	runResp := do(t, req)
+	defer runResp.Body.Close()
+	if runResp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(runResp.Body)
+		t.Fatalf("run status=%d body=%s", runResp.StatusCode, b)
+	}
+	if g := m.Gcodes(); len(g) != 1 || g[0] != "play /sd/gcodes/my part.nc" {
+		t.Fatalf("machine gcodes = %v, want play command", g)
+	}
+}
+
+func TestToolActionEndpoints(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	tr.Observe(machine.Idle)
+
+	setResp := postJSON(t, srv.URL+"/api/tool/current", map[string]int{"tool_id": 4})
+	setResp.Body.Close()
+	if setResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("set tool status = %d", setResp.StatusCode)
+	}
+	req, _ := http.NewRequest("POST", srv.URL+"/api/tool/calibrate", nil)
+	calResp := do(t, req)
+	calResp.Body.Close()
+	if calResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("calibrate status = %d", calResp.StatusCode)
+	}
+	if g := m.Gcodes(); len(g) != 2 || g[0] != "M493.2T4" || g[1] != "M491" {
+		t.Fatalf("machine gcodes = %v, want tool commands", g)
 	}
 }
 

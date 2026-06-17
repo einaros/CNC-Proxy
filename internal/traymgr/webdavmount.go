@@ -17,6 +17,7 @@ type webDAVMountRequest struct {
 	Password   string
 	MountPoint string
 	Drive      string
+	Fresh      bool
 }
 
 var (
@@ -35,9 +36,23 @@ func WebDAVMountSupported() bool {
 }
 
 func MountWebDAV(ctx context.Context, cfg Config) error {
+	return mountWebDAV(ctx, cfg, false)
+}
+
+func MountWebDAVFresh(ctx context.Context, cfg Config) error {
+	return mountWebDAV(ctx, cfg, true)
+}
+
+func mountWebDAV(ctx context.Context, cfg Config, fresh bool) error {
 	req := webDAVMountRequestFromConfig(cfg)
+	req.Fresh = fresh
 	if strings.TrimSpace(req.URL) == "" {
 		return errors.New("webdav URL is empty")
+	}
+	if fresh {
+		if err := unmountWebDAVNativeFunc(ctx, req); err != nil {
+			return err
+		}
 	}
 	if err := mountWebDAVNativeFunc(ctx, req); err != nil {
 		return err

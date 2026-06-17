@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-//go:embed web/index.html web/app.js
+//go:embed web/index.html web/app.js web/three.module.min.js
 var webFS embed.FS
 
 // webHandler serves the embedded single-page app. index.html is served at "/"

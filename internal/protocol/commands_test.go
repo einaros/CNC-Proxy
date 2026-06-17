@@ -29,9 +29,9 @@ func TestIsStatusQuery(t *testing.T) {
 
 func TestClassifyGcode(t *testing.T) {
 	cases := []struct {
-		line         string
-		wantResp     Response
-		wantReqIdle  bool
+		line        string
+		wantResp    Response
+		wantReqIdle bool
 	}{
 		// Pure queries: reply expected, not idle-gated.
 		{"M114", ReplyExpected, false},
@@ -76,5 +76,17 @@ func TestUnescapeRoundTrip(t *testing.T) {
 		if got := Unescape(Escape(s)); got != s {
 			t.Errorf("Unescape(Escape(%q)) = %q", s, got)
 		}
+	}
+}
+
+func TestControllerActionLines(t *testing.T) {
+	if got := PlayLine("/sd/gcodes/my part.nc"); got != "play /sd/gcodes/my\x01part.nc\n" {
+		t.Errorf("PlayLine escaped = %q", got)
+	}
+	if got := SetCurrentToolLine(7); got != "M493.2T7\n" {
+		t.Errorf("SetCurrentToolLine = %q", got)
+	}
+	if got := CalibrateCurrentToolLine(); got != "M491\n" {
+		t.Errorf("CalibrateCurrentToolLine = %q", got)
 	}
 }

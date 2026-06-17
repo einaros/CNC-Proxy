@@ -24,9 +24,9 @@ var procCreateProcessWithTokenW = windows.NewLazySystemDLL("advapi32.dll").NewPr
 func mountWebDAVNative(ctx context.Context, req webDAVMountRequest) error {
 	ctx, cancel := withMountTimeout(ctx)
 	defer cancel()
-	if err := ensureWindowsWebClient(ctx); err != nil {
-		return err
-	}
+	// WebClient may be stopped after reboot but trigger-start when net use opens
+	// the WebDAV remote; keep explicit start failures as context, not a hard stop.
+	webClientErr := ensureWindowsWebClient(ctx)
 	remotes, err := windowsWebDAVRemotes(req.URL)
 	if err != nil {
 		return err
@@ -76,6 +76,9 @@ func mountWebDAVNative(ctx context.Context, req webDAVMountRequest) error {
 		}
 	}
 	var errs []error
+	if webClientErr != nil {
+		errs = append(errs, webClientErr)
+	}
 	for _, remote := range remotes {
 		if out, err := windowsNetUse(ctx, drive, remote, req.User, req.Password); err == nil {
 			uses, listOut, err := windowsAllDriveUsesWithOutput(ctx)
@@ -91,7 +94,7 @@ func mountWebDAVNative(ctx context.Context, req webDAVMountRequest) error {
 			}
 			verifyErr := fmt.Errorf("mount webdav %s exited successfully but no matching drive mapping is visible; command output: %s; net use output: %s", remote, emptyText(out), emptyText(listOut))
 			if drive != "*" {
-				return verifyErr
+				return errors.Join(webClientErr, verifyErr)
 			}
 			errs = append(errs, verifyErr)
 		} else {
@@ -285,14 +288,14 @@ func ensureWindowsWebClient(ctx context.Context) error {
 		if text == "" {
 			text = detail
 		}
-		return fmt.Errorf("Windows WebClient service is required for WebDAV mounts but is not running, and starting it failed: %w: %s", err, text)
+		return fmt.Errorf("Windows WebClient service is required for WebDAV mounts but is not running, and starting it failed: %w: %s; start it once from an elevated PowerShell with: Set-Service WebClient -StartupType Automatic; Start-Service WebClient", err, text)
 	}
 	running, detail, err = windowsWebClientRunning(ctx)
 	if err != nil {
 		return err
 	}
 	if !running {
-		return fmt.Errorf("Windows WebClient service did not reach RUNNING state: %s", detail)
+		return fmt.Errorf("Windows WebClient service did not reach RUNNING state: %s; start it once from an elevated PowerShell with: Set-Service WebClient -StartupType Automatic; Start-Service WebClient", detail)
 	}
 	return nil
 }

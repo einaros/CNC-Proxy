@@ -82,6 +82,7 @@ func onReady() {
 	systray.AddSeparator()
 	mOpen := systray.AddMenuItem("Open Web UI", "Open the proxy web UI in a browser")
 	mMount := systray.AddMenuItem("Mount WebDAV", "Mount the WebDAV file view")
+	mRefreshMount := systray.AddMenuItem("Refresh WebDAV Mount", "Clear the native WebDAV mount and mount it again")
 	mManager := systray.AddMenuItem("Open Manager", "Open the tray manager configuration UI")
 	systray.AddSeparator()
 	mStart := systray.AddMenuItem("Start Proxy", "Start the managed cnc-proxy process")
@@ -99,6 +100,7 @@ func onReady() {
 		systray.SetTitle("CNC ⚠")
 		mState.SetTitle("Manager error: " + err.Error())
 		updateMountItem(app, mMount)
+		updateRefreshMountItem(app, mRefreshMount, false)
 	} else {
 		app.Server.SetManagerProcessExit(func() {
 			select {
@@ -110,6 +112,7 @@ func onReady() {
 			_ = app.Supervisor.Start()
 		}
 		updateMountItem(app, mMount)
+		updateRefreshMountItem(app, mRefreshMount, false)
 		go func() {
 			if err := app.Run(ctx); err != nil {
 				select {
@@ -125,12 +128,15 @@ func onReady() {
 		defer ticker.Stop()
 		mountBusy := false
 		var uploadTracker traymgr.UploadCompletionTracker
+		var deletionTracker traymgr.WebDAVVisibleDeletionTracker
+		var pendingWebDAVRefresh []string
 		beginMountSet := func(enable bool) {
 			if app == nil || mountBusy {
 				return
 			}
 			mountBusy = true
 			mMount.Disable()
+			mRefreshMount.Disable()
 			if enable {
 				mMount.SetTitle("Mounting WebDAV…")
 			} else {
@@ -139,22 +145,51 @@ func onReady() {
 			go runWebDAVMountSet(ctx, app, enable, mountDone)
 		}
 		beginRemount := func() {
-			if app == nil || mountBusy || !app.Supervisor.Config().WebDAVMount.Enabled {
+			if app == nil || mountBusy {
 				return
 			}
 			mountBusy = true
 			mMount.Disable()
+			mRefreshMount.Disable()
 			mMount.SetTitle("Mounting WebDAV…")
 			go runWebDAVRemount(ctx, app, mountDone)
 		}
-		update(app, mState, mSync, mProc, &uploadTracker)
+		requestWebDAVRefresh := func(paths []string) {
+			if app == nil {
+				pendingWebDAVRefresh = nil
+				return
+			}
+			if len(paths) > 0 {
+				pendingWebDAVRefresh = append(pendingWebDAVRefresh, paths...)
+			}
+			if mountBusy || len(pendingWebDAVRefresh) == 0 {
+				return
+			}
+			if !app.Supervisor.Config().WebDAVMount.Enabled {
+				statusCtx, statusCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				status := app.WebDAVMountStatus(statusCtx)
+				statusCancel()
+				if !status.Mounted {
+					pendingWebDAVRefresh = nil
+					return
+				}
+			}
+			paths = pendingWebDAVRefresh
+			pendingWebDAVRefresh = nil
+			app.NotifyWebDAVRefreshAfterDelete(paths)
+			beginRemount()
+		}
+		update(app, mState, mSync, mProc, &uploadTracker, &deletionTracker)
 		updateMountItem(app, mMount)
+		updateRefreshMountItem(app, mRefreshMount, mountBusy)
 		for {
 			select {
 			case <-ticker.C:
-				update(app, mState, mSync, mProc, &uploadTracker)
+				deleted := update(app, mState, mSync, mProc, &uploadTracker, &deletionTracker)
+				requestWebDAVRefresh(deleted)
 				if !mountBusy {
 					updateMountItem(app, mMount)
+					updateRefreshMountItem(app, mRefreshMount, mountBusy)
 				}
 			case err := <-appErrCh:
 				cancel()
@@ -168,6 +203,8 @@ func onReady() {
 			case <-mountDone:
 				mountBusy = false
 				updateMountItem(app, mMount)
+				updateRefreshMountItem(app, mRefreshMount, mountBusy)
+				requestWebDAVRefresh(nil)
 			case <-mOpen.ClickedCh:
 				openBrowser(currentAPIBase(app))
 			case <-mMount.ClickedCh:
@@ -181,13 +218,15 @@ func onReady() {
 					}
 					beginMountSet(!status.Mounted)
 				}
+			case <-mRefreshMount.ClickedCh:
+				beginRemount()
 			case <-mManager.ClickedCh:
 				openBrowser(managerURL(app))
 			case <-mStart.ClickedCh:
 				if app != nil {
 					_ = app.Supervisor.Start()
 					beginRemount()
-					update(app, mState, mSync, mProc, &uploadTracker)
+					update(app, mState, mSync, mProc, &uploadTracker, &deletionTracker)
 				}
 			case <-mRestart.ClickedCh:
 				if app != nil {
@@ -195,14 +234,14 @@ func onReady() {
 					_ = app.Supervisor.Restart(ctx)
 					cancel()
 					beginRemount()
-					update(app, mState, mSync, mProc, &uploadTracker)
+					update(app, mState, mSync, mProc, &uploadTracker, &deletionTracker)
 				}
 			case <-mStop.ClickedCh:
 				if app != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					_ = app.Supervisor.Stop(ctx)
 					cancel()
-					update(app, mState, mSync, mProc, &uploadTracker)
+					update(app, mState, mSync, mProc, &uploadTracker, &deletionTracker)
 				}
 			case <-mQuit.ClickedCh:
 				cancel()
@@ -274,7 +313,27 @@ func updateMountItem(app *traymgr.App, item *systray.MenuItem) {
 	item.Enable()
 }
 
-func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem, uploadTracker *traymgr.UploadCompletionTracker) {
+func updateRefreshMountItem(app *traymgr.App, item *systray.MenuItem, busy bool) {
+	if app == nil || !traymgr.WebDAVMountSupported() {
+		item.Disable()
+		return
+	}
+	item.SetTitle("Refresh WebDAV Mount")
+	if busy {
+		item.Disable()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	status := app.WebDAVMountStatus(ctx)
+	cancel()
+	if status.Mounted {
+		item.Enable()
+	} else {
+		item.Disable()
+	}
+}
+
+func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem, uploadTracker *traymgr.UploadCompletionTracker, deletionTracker *traymgr.WebDAVVisibleDeletionTracker) []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
@@ -287,14 +346,18 @@ func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem, uploadTrac
 		systray.SetTitle("CNC ⚠")
 		mState.SetTitle("Machine: unreachable")
 		mSync.SetTitle("Sync: —")
-		return
+		return nil
 	}
 	mState.SetTitle(fmt.Sprintf("Machine: %s (%s)", displayState(st.State), st.Mode))
 
 	files, err := client.Files(ctx)
 	if err != nil {
 		mSync.SetTitle("Sync: —")
-		return
+		return nil
+	}
+	var deleted []string
+	if deletionTracker != nil {
+		deleted = deletionTracker.Observe(files)
 	}
 	pending := apiclient.PendingCount(files)
 	if pending == 0 {
@@ -307,13 +370,14 @@ func update(app *traymgr.App, mState, mSync, mProc *systray.MenuItem, uploadTrac
 
 	jobs, err := client.Jobs(ctx)
 	if err != nil || uploadTracker == nil {
-		return
+		return deleted
 	}
 	for _, upload := range uploadTracker.Observe(jobs) {
 		if app != nil {
 			app.NotifyUploadCompleted(upload.Path)
 		}
 	}
+	return deleted
 }
 
 func currentClient(app *traymgr.App) *apiclient.Client {

@@ -23,7 +23,10 @@ import (
 
 var errJobNoLongerQueued = errors.New("synceng: job is no longer queued")
 
-const defaultPostUploadCheckTimeout = 2 * time.Second
+const (
+	defaultPostUploadCheckTimeout = 2 * time.Second
+	zeroByteUploadSettle          = 15 * time.Second
+)
 
 // Engine executes queued jobs against the machine via the arbiter.
 type Engine struct {
@@ -153,6 +156,9 @@ func (e *Engine) drain() {
 
 // shouldAttempt applies per-job backoff based on attempts and last update.
 func (e *Engine) shouldAttempt(j store.Job) bool {
+	if j.Kind == store.JobUpload && j.Size == 0 && j.Attempts == 0 && e.now().Sub(j.CreatedAt) < zeroByteUploadSettle {
+		return false
+	}
 	if j.Attempts == 0 {
 		return true
 	}
@@ -199,15 +205,21 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 		return c.Mkdir(job.Path, e.opTimeout)
 
 	case store.JobDelete:
-		e.store.SetEntrySync(job.Path, store.Deleting, "")
+		if _, _, err := e.store.SetEntrySyncIf(job.Path, store.Deleting, "", store.PendingDelete, store.Deleting); err != nil {
+			return err
+		}
 		if err := c.Remove(job.Path, e.opTimeout); err != nil {
 			return err
 		}
-		// Drop the catalog entry and its cache file on successful delete.
-		if entry, ok := e.store.GetEntry(job.Path); ok && entry.CachePath != "" {
+		// Drop the catalog entry and its cache file on successful delete, but
+		// only if the entry still represents this delete. A WebDAV replacement
+		// upload may have arrived while the rm was in flight.
+		if entry, ok, err := e.store.DeleteEntryIfSync(job.Path, store.PendingDelete, store.Deleting); err != nil {
+			return err
+		} else if ok && entry.CachePath != "" {
 			os.Remove(entry.CachePath)
 		}
-		return e.store.DeleteEntry(job.Path)
+		return nil
 
 	case store.JobRename:
 		e.store.SetEntrySync(job.Path, store.PendingRename, "")
@@ -224,7 +236,11 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 		return nil
 
 	case store.JobUpload:
-		e.store.SetEntrySync(job.Path, store.Uploading, "")
+		if ok, err := e.setUploadJobSync(job, store.Uploading, ""); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
 		if err := e.doUpload(c, job); err != nil {
 			return err
 		}
@@ -239,11 +255,29 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 				log.Printf("synceng: post-upload md5 mismatch for %s (got %s want %s)", job.Path, remoteMD5, job.MD5)
 			}
 		}
-		return e.store.SetEntrySync(job.Path, store.Synced, "")
+		if ok, err := e.setUploadJobSync(job, store.Synced, ""); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
+		return nil
 
 	default:
 		return errors.New("synceng: unknown job kind " + string(job.Kind))
 	}
+}
+
+func (e *Engine) setUploadJobSync(job store.Job, state store.SyncState, errMsg string) (bool, error) {
+	_, ok, err := e.store.SetEntrySyncIfMatch(job.Path, state, errMsg, func(entry store.Entry) bool {
+		if entry.IsDir {
+			return false
+		}
+		if entry.CachePath != job.CachePath || entry.MD5 != job.MD5 || entry.Size != job.Size {
+			return false
+		}
+		return entry.Sync == store.PendingUpload || entry.Sync == store.Uploading || entry.Sync == state
+	})
+	return ok, err
 }
 
 // doUpload transfers a job's file, compressing it with QuickLZ first when the
@@ -341,11 +375,22 @@ func (e *Engine) recordFailure(job store.Job, err error) {
 	})
 	// Reflect failure on the catalog entry too, unless it was a delete that
 	// removed the entry.
-	if _, ok := e.store.GetEntry(job.Path); ok {
-		state := failedEntrySyncState(job.Kind, terminal)
-		if serr := e.store.SetEntrySync(job.Path, state, err.Error()); serr != nil {
-			log.Printf("synceng: failed to record error state for %s: %v", job.Path, serr)
-		}
+	state := failedEntrySyncState(job.Kind, terminal)
+	var serr error
+	switch job.Kind {
+	case store.JobUpload:
+		_, serr = e.setUploadJobSync(job, state, err.Error())
+	case store.JobDelete:
+		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingDelete, store.Deleting)
+	case store.JobRename:
+		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingRename)
+	case store.JobMkdir:
+		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingUpload)
+	default:
+		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingUpload, store.PendingDelete, store.PendingRename, store.Uploading, store.Deleting)
+	}
+	if serr != nil {
+		log.Printf("synceng: failed to record error state for %s: %v", job.Path, serr)
 	}
 }
 
