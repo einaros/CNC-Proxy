@@ -79,24 +79,71 @@ type MachineActionResult struct {
 	Message string `json:"message"`
 }
 
-// ActiveGcode returns the current in-memory file selection.
+// ActiveGcode returns the current proxy-side file selection.
 func (s *Service) ActiveGcode() ActiveGcode {
 	s.activeMu.Lock()
 	active := s.activeGcode
 	s.activeMu.Unlock()
-	if active.Path == "" {
+	storedPath := s.store.ActiveGcodePath()
+	if storedPath == "" {
+		if active.Path != "" {
+			s.clearActiveGcode(active.Path)
+		}
 		return ActiveGcode{Message: "No active gcode selected."}
+	}
+	if active.Path == "" || active.Path != storedPath {
+		return s.activeGcodeFromStoredPath(storedPath)
 	}
 	entry, ok := s.store.GetEntry(active.Path)
 	if !ok {
-		s.activeMu.Lock()
-		if s.activeGcode.Path == active.Path {
-			s.activeGcode = activeGcodeState{}
-		}
-		s.activeMu.Unlock()
+		s.clearActiveGcode(active.Path)
 		return ActiveGcode{Message: "No active gcode selected."}
 	}
 	return s.activeGcodeSnapshot(active, entry)
+}
+
+func (s *Service) activeGcodeFromStoredPath(remotePath string) ActiveGcode {
+	entry, ok := s.store.GetEntry(remotePath)
+	if !ok {
+		s.clearActiveGcode(remotePath)
+		return ActiveGcode{Message: "No active gcode selected."}
+	}
+	if !entry.IsDir {
+		rc, cacheEntry, err := s.ReadCache(remotePath)
+		if err == nil {
+			defer rc.Close()
+			preview, err := ParseGcodePreview(rc)
+			if err == nil {
+				active := activeGcodeState{Path: cacheEntry.Path, Preview: preview, SelectedAt: time.Now()}
+				s.activeMu.Lock()
+				if s.activeGcode.Path == "" || s.activeGcode.Path == active.Path {
+					s.activeGcode = active
+				}
+				s.activeMu.Unlock()
+				return s.activeGcodeSnapshot(active, cacheEntry)
+			}
+		}
+	}
+	entryCopy := entry
+	runnable, message := runnableGcode(entry)
+	return ActiveGcode{
+		Path:      entry.Path,
+		Entry:     &entryCopy,
+		Runnable:  runnable,
+		Message:   message,
+		UpdatedAt: time.Time{},
+	}
+}
+
+func (s *Service) clearActiveGcode(remotePath string) {
+	s.activeMu.Lock()
+	if s.activeGcode.Path == remotePath {
+		s.activeGcode = activeGcodeState{}
+	}
+	s.activeMu.Unlock()
+	if s.store.ActiveGcodePath() == remotePath {
+		_ = s.store.SetActiveGcodePath("")
+	}
 }
 
 // SelectActiveGcode selects a catalog file and parses a preview from its local
@@ -115,6 +162,9 @@ func (s *Service) SelectActiveGcode(remotePath string) (ActiveGcode, error) {
 		return ActiveGcode{}, err
 	}
 	active := activeGcodeState{Path: entry.Path, Preview: preview, SelectedAt: time.Now()}
+	if err := s.store.SetActiveGcodePath(entry.Path); err != nil {
+		return ActiveGcode{}, err
+	}
 	s.activeMu.Lock()
 	s.activeGcode = active
 	s.activeMu.Unlock()
@@ -167,9 +217,12 @@ func copyPreview(in GcodePreview) GcodePreview {
 // RunActiveGcode sends the same controller-compatible `play <path>` command
 // that the official UI sends for its selected remote file.
 func (s *Service) RunActiveGcode() (MachineActionResult, error) {
-	s.activeMu.Lock()
-	path := s.activeGcode.Path
-	s.activeMu.Unlock()
+	path := s.store.ActiveGcodePath()
+	if path == "" {
+		s.activeMu.Lock()
+		path = s.activeGcode.Path
+		s.activeMu.Unlock()
+	}
 	if path == "" {
 		return MachineActionResult{Action: "run_gcode", Message: ErrNoActiveGcode.Error()}, ErrNoActiveGcode
 	}

@@ -81,6 +81,10 @@ const gcodeView = {
   dragging: false,
   dragX: 0,
   dragY: 0,
+  dragMode: "orbit",
+  panKeyDown: false,
+  panKeys: new Set(),
+  hovering: false,
   renderQueued: false,
   resizeObserver: null,
   width: 0,
@@ -218,12 +222,11 @@ function fmtPos(p, estimated = false) {
   return `X ${fmtCoord(p.x)} Y ${fmtCoord(p.y)} Z ${fmtCoord(p.z)}${estimated ? " est" : ""}`;
 }
 
-function fmtTriple(v, suffix = "") {
-  if (!v) return "-";
-  const cur = Number.isFinite(v.current) ? v.current.toFixed(1) : "-";
-  const target = Number.isFinite(v.target) ? v.target.toFixed(1) : "-";
-  const over = Number.isFinite(v.override) ? Math.round(v.override) + "%" : "-";
-  return `${cur}/${target}${suffix} ${over}`;
+function fmtActiveFeed(f) {
+  const cur = Number(f?.current);
+  if (!Number.isFinite(cur)) return "-";
+  const value = Math.abs(cur) >= 100 ? Math.round(cur).toString() : cur.toFixed(1);
+  return value + " mm/min";
 }
 
 function fmtSpindle(s) {
@@ -234,12 +237,8 @@ function fmtSpindle(s) {
   return `${cur}/${target} rpm ${over}`;
 }
 
-function fmtTool(t) {
-  if (!t) return "-";
-  const active = Number.isFinite(t.active) ? "T" + t.active : "-";
-  const target = Number.isFinite(t.target) ? " -> T" + t.target : "";
-  const offset = Number.isFinite(t.offset) ? " Z " + t.offset.toFixed(3) : "";
-  return active + target + offset;
+function fmtActiveTool(t) {
+  return Number.isFinite(t?.active) ? toolDisplayName(t.active) : "-";
 }
 
 function toolDisplayName(toolID) {
@@ -659,15 +658,12 @@ function renderMachine() {
   el.className = "badge state-" + (m.state || "Unknown");
   document.getElementById("status-mpos").textContent = fmtPos(m.mpos, !!m.motion_estimated);
   document.getElementById("status-wpos").textContent = fmtPos(m.wpos, !!m.motion_estimated);
-  document.getElementById("status-feed").textContent = fmtTriple(m.feed, " mm/min");
+  document.getElementById("status-feed").textContent = fmtActiveFeed(m.feed);
   document.getElementById("status-spindle").textContent = fmtSpindle(m.spindle);
-  document.getElementById("status-tool").textContent = fmtTool(m.tool);
+  document.getElementById("status-tool").textContent = fmtActiveTool(m.tool);
   renderToolStatus(m);
-  document.getElementById("status-age").textContent = fmtAge(m.age_ms);
   document.getElementById("status-connection").textContent =
     m.reconnecting ? "reconnecting" : (m.connected ? "connected" : "not connected");
-  document.getElementById("status-raw").textContent = m.raw || "-";
-  renderStatusFields(m.fields || {});
   renderAlarmPanel(m);
   renderActiveGcode();
   syncJogAvailabilityFromMachine(m);
@@ -688,22 +684,6 @@ function renderToolStatus(m) {
   setText("tool-active-status", active + target);
   setText("tool-tlo-status", tlo);
   setText("tool-wp-status", Number.isFinite(wp) ? wp.toFixed(2) + "v" : "-");
-}
-
-function renderStatusFields(fields) {
-  const box = document.getElementById("status-fields");
-  const entries = Object.entries(fields).sort((a, b) => a[0].localeCompare(b[0]));
-  if (!entries.length) {
-    box.innerHTML = `<div class="empty">No status fields.</div>`;
-    return;
-  }
-  box.innerHTML = "";
-  for (const [k, v] of entries) {
-    const row = document.createElement("div");
-    row.className = "field";
-    row.innerHTML = `<span class="key">${escapeHtml(k)}</span><span class="val">${escapeHtml(v)}</span>`;
-    box.appendChild(row);
-  }
 }
 
 function renderAlarmPanel(m) {
@@ -1597,10 +1577,19 @@ function ensureGcodeViewer() {
 }
 
 function bindGcodeOrbitControls(canvas) {
+  const setPanKey = () => {
+    const on = gcodeView.panKeys.size > 0;
+    gcodeView.panKeyDown = on;
+    canvas.classList.toggle("pan-mode", on || gcodeView.dragMode === "pan");
+  };
   canvas.addEventListener("pointerdown", (e) => {
     gcodeView.dragging = true;
     gcodeView.dragX = e.clientX;
     gcodeView.dragY = e.clientY;
+    gcodeView.dragMode = (e.shiftKey || gcodeView.panKeyDown || e.button === 1) ? "pan" : "orbit";
+    canvas.classList.toggle("pan-mode", gcodeView.dragMode === "pan" || gcodeView.panKeyDown);
+    if (gcodeView.dragMode === "pan") e.preventDefault();
+    canvas.focus({ preventScroll: true });
     canvas.setPointerCapture?.(e.pointerId);
   });
   canvas.addEventListener("pointermove", (e) => {
@@ -1609,22 +1598,59 @@ function bindGcodeOrbitControls(canvas) {
     const dy = e.clientY - gcodeView.dragY;
     gcodeView.dragX = e.clientX;
     gcodeView.dragY = e.clientY;
-    gcodeView.orbit.theta -= dx * 0.008;
-    gcodeView.orbit.phi = Math.max(0.08, Math.min(Math.PI - 0.08, gcodeView.orbit.phi + dy * 0.008));
-    updateGcodeCamera();
+    if (e.shiftKey || gcodeView.panKeyDown || gcodeView.dragMode === "pan") {
+      gcodeView.dragMode = "pan";
+      canvas.classList.add("pan-mode");
+      panGcodeCamera(dx, dy);
+    } else {
+      gcodeView.orbit.theta -= dx * 0.008;
+      gcodeView.orbit.phi = Math.max(0.08, Math.min(Math.PI - 0.08, gcodeView.orbit.phi + dy * 0.008));
+      updateGcodeCamera();
+    }
   });
   const stopDrag = (e) => {
     gcodeView.dragging = false;
+    gcodeView.dragMode = "orbit";
+    canvas.classList.toggle("pan-mode", gcodeView.panKeyDown);
     canvas.releasePointerCapture?.(e.pointerId);
   };
   canvas.addEventListener("pointerup", stopDrag);
   canvas.addEventListener("pointercancel", stopDrag);
+  canvas.addEventListener("pointerenter", () => { gcodeView.hovering = true; });
+  canvas.addEventListener("pointerleave", () => {
+    gcodeView.hovering = false;
+    if (!gcodeView.dragging) canvas.classList.toggle("pan-mode", gcodeView.panKeyDown);
+  });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const scale = Math.exp(e.deltaY * 0.001);
     gcodeView.orbit.radius = Math.max(1, Math.min(100000, gcodeView.orbit.radius * scale));
     updateGcodeCamera();
   }, { passive: false });
+  window.addEventListener("keydown", (e) => {
+    if (isTypingTarget(e.target)) return;
+    if (e.key !== "Shift" && e.code !== "Space") return;
+    if (!gcodeView.hovering && document.activeElement !== canvas && !gcodeView.dragging) return;
+    if (e.code === "Space") e.preventDefault();
+    gcodeView.panKeys.add(e.code === "Space" ? "space" : "shift");
+    setPanKey();
+  });
+  window.addEventListener("keyup", (e) => {
+    if (e.key !== "Shift" && e.code !== "Space") return;
+    if (e.code === "Space" && (gcodeView.hovering || document.activeElement === canvas)) e.preventDefault();
+    gcodeView.panKeys.delete(e.code === "Space" ? "space" : "shift");
+    setPanKey();
+  });
+  window.addEventListener("blur", () => {
+    gcodeView.panKeys.clear();
+    setPanKey();
+  });
+}
+
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = String(el.tagName || "").toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
 }
 
 function rebuildGcodeScene(preview, segments) {
@@ -1731,6 +1757,24 @@ function fitGcodeCamera(bounds) {
   gcodeView.camera.near = Math.max(0.01, gcodeView.orbit.radius / 1000);
   gcodeView.camera.far = Math.max(1000, gcodeView.orbit.radius * 100);
   gcodeView.camera.updateProjectionMatrix();
+  updateGcodeCamera();
+}
+
+function panGcodeCamera(dx, dy) {
+  const camera = gcodeView.camera;
+  const canvas = gcodeView.canvas;
+  if (!camera || !canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, rect.width);
+  const height = Math.max(1, rect.height);
+  const distance = Math.max(0.001, camera.position.distanceTo(gcodeView.target));
+  const viewHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
+  const viewWidth = viewHeight * camera.aspect;
+  camera.updateMatrixWorld();
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+  const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+  gcodeView.target.addScaledVector(right, -dx * viewWidth / width);
+  gcodeView.target.addScaledVector(up, dy * viewHeight / height);
   updateGcodeCamera();
 }
 
@@ -3025,6 +3069,8 @@ function applyChange(ev) {
     state.machine.pending_jobs = queuePendingCount();
     renderMachine();
     renderJobs();
+  } else if (ev.kind === "active_gcode") {
+    loadActiveGcode();
   }
 }
 

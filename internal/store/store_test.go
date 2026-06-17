@@ -19,6 +19,9 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if j.ID != 1 {
 		t.Errorf("first job id = %d, want 1", j.ID)
 	}
+	if err := s.SetActiveGcodePath("/sd/gcodes/a.nc"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Reopen and verify state survived.
 	s2, err := Open(path)
@@ -32,6 +35,9 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	jobs := s2.ListJobs()
 	if len(jobs) != 1 || jobs[0].Kind != JobUpload {
 		t.Errorf("reloaded jobs = %+v", jobs)
+	}
+	if got := s2.ActiveGcodePath(); got != "/sd/gcodes/a.nc" {
+		t.Errorf("reloaded active gcode path = %q", got)
 	}
 	// Next enqueued ID continues from persisted counter.
 	j2, _ := s2.Enqueue(Job{Kind: JobDelete, Path: "/sd/gcodes/b.nc"})

@@ -23,30 +23,34 @@ type Store struct {
 	jobs    []*Job
 	nextJob int64
 	ui      UISettings
+	active  string
 	subs    map[int]chan Event
 	nextSub int
 }
 
 // Event notifies subscribers of a change, for pushing to the web UI.
 type Event struct {
-	Kind  string `json:"kind"` // "entry" | "job"
-	Entry *Entry `json:"entry,omitempty"`
-	Job   *Job   `json:"job,omitempty"`
+	Kind            string `json:"kind"` // "entry" | "job" | "active_gcode"
+	Entry           *Entry `json:"entry,omitempty"`
+	Job             *Job   `json:"job,omitempty"`
+	ActiveGcodePath string `json:"active_gcode_path,omitempty"`
 }
 
 type persisted struct {
-	Entries map[string]*Entry `json:"entries"`
-	Jobs    []*Job            `json:"jobs"`
-	NextJob int64             `json:"next_job"`
-	UI      *UISettings       `json:"ui,omitempty"`
+	Entries         map[string]*Entry `json:"entries"`
+	Jobs            []*Job            `json:"jobs"`
+	NextJob         int64             `json:"next_job"`
+	UI              *UISettings       `json:"ui,omitempty"`
+	ActiveGcodePath string            `json:"active_gcode_path,omitempty"`
 }
 
 // Snapshot is an exportable copy of the durable state.json model.
 type Snapshot struct {
-	Entries map[string]Entry `json:"entries"`
-	Jobs    []Job            `json:"jobs"`
-	NextJob int64            `json:"next_job"`
-	UI      UISettings       `json:"ui"`
+	Entries         map[string]Entry `json:"entries"`
+	Jobs            []Job            `json:"jobs"`
+	NextJob         int64            `json:"next_job"`
+	UI              UISettings       `json:"ui"`
+	ActiveGcodePath string           `json:"active_gcode_path,omitempty"`
 }
 
 // Open loads a store from path, creating an empty one if the file is absent.
@@ -80,6 +84,7 @@ func Open(path string) (*Store, error) {
 	if p.UI != nil {
 		s.ui = normalizeUISettings(*p.UI, s.now())
 	}
+	s.active = strings.TrimSpace(p.ActiveGcodePath)
 	return s, nil
 }
 
@@ -88,10 +93,11 @@ func (s *Store) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := Snapshot{
-		Entries: make(map[string]Entry, len(s.entries)),
-		Jobs:    make([]Job, 0, len(s.jobs)),
-		NextJob: s.nextJob,
-		UI:      copyUISettings(s.ui),
+		Entries:         make(map[string]Entry, len(s.entries)),
+		Jobs:            make([]Job, 0, len(s.jobs)),
+		NextJob:         s.nextJob,
+		UI:              copyUISettings(s.ui),
+		ActiveGcodePath: s.active,
 	}
 	for k, e := range s.entries {
 		out.Entries[k] = *e
@@ -130,6 +136,7 @@ func (s *Store) Restore(in Snapshot) error {
 	s.jobs = jobs
 	s.nextJob = nextJob
 	s.ui = normalizeUISettings(in.UI, s.now())
+	s.active = strings.TrimSpace(in.ActiveGcodePath)
 	if err := s.flushLocked(); err != nil {
 		return err
 	}
@@ -146,7 +153,7 @@ func (s *Store) flushLocked() error {
 	if s.path == "" {
 		return nil // in-memory only (tests)
 	}
-	p := persisted{Entries: s.entries, Jobs: s.jobs, NextJob: s.nextJob, UI: &s.ui}
+	p := persisted{Entries: s.entries, Jobs: s.jobs, NextJob: s.nextJob, UI: &s.ui, ActiveGcodePath: s.active}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
@@ -641,6 +648,29 @@ func (s *Store) SetUISettings(ui UISettings) (UISettings, error) {
 		return UISettings{}, err
 	}
 	return copyUISettings(s.ui), nil
+}
+
+// ActiveGcodePath returns the durable proxy-side selected gcode path.
+func (s *Store) ActiveGcodePath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.active
+}
+
+// SetActiveGcodePath persists the proxy-side selected gcode path.
+func (s *Store) SetActiveGcodePath(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path = strings.TrimSpace(path)
+	if s.active == path {
+		return nil
+	}
+	s.active = path
+	if err := s.flushLocked(); err != nil {
+		return err
+	}
+	s.publishLocked(Event{Kind: "active_gcode", ActiveGcodePath: path})
+	return nil
 }
 
 // CacheDir returns the directory where cached file contents should live,

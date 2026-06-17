@@ -16,16 +16,26 @@
   html { color-scheme: dark; }
   body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
   button, input, select, textarea { font: inherit; }
-  header { position: sticky; top: 0; z-index: 60; display: grid; gap: var(--gap-sm); padding: 10px 20px; background: rgba(24,29,31,.96); border-bottom: 1px solid var(--border); backdrop-filter: blur(10px); box-shadow: 0 10px 24px rgba(0,0,0,.18); }
+  header { position: sticky; top: 0; z-index: 60; display: grid; gap: var(--gap-xs); padding: 8px 20px; background: rgba(24,29,31,.96); border-bottom: 1px solid var(--border); backdrop-filter: blur(10px); box-shadow: 0 10px 24px rgba(0,0,0,.18); }
   #header-main { display: flex; align-items: center; gap: 18px; min-width: 0; }
   header h1 { font-size: 16px; margin: 0; font-weight: 650; }
-  #machine { margin-left: auto; display: grid; grid-auto-flow: column; gap: 16px; align-items: center; color: var(--muted); font-size: 13px; }
+  #machine { margin-left: auto; display: grid; grid-auto-flow: column; gap: 14px; align-items: center; color: var(--muted); font-size: 13px; }
   #machine span:not(.badge) { min-width: 0; white-space: nowrap; }
   .badge { padding: 2px 10px; border-radius: 999px; font-weight: 650; font-size: 12px; }
   .state-Idle { background: rgba(68,194,123,.15); color: var(--ok); }
   .state-Run, .state-Hold, .state-Home, .state-Sleep { background: rgba(217,154,58,.16); color: var(--warn); }
   .state-Alarm { background: rgba(232,106,95,.16); color: var(--err); }
   .state-Unknown, .state- { background: rgba(145,160,174,.15); color: var(--muted); }
+  #machine-status-toolbar { display: grid; grid-template-columns: minmax(330px, 1.6fr) minmax(130px, .55fr) minmax(150px, .65fr) minmax(110px, .45fr); gap: 4px; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  #machine-status-toolbar::-webkit-scrollbar { display: none; }
+  .machine-status-item { min-width: 0; min-height: 32px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; padding: 4px 8px; background: rgba(32,38,41,.78); border-radius: 4px; }
+  .machine-status-item .label { color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+  .machine-status-item .value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); }
+  .machine-status-position { align-items: stretch; }
+  .position-lines { display: grid; gap: 1px; min-width: 0; align-self: center; }
+  .position-line { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 6px; align-items: center; min-width: 0; }
+  .position-line span { color: var(--muted); font: 650 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .position-line b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #command-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--gap-md); align-items: center; min-width: 0; }
   #command-menu { display: flex; gap: var(--gap-sm); align-items: center; min-width: 0; overflow-x: auto; overflow-y: visible; scrollbar-width: none; }
   #command-menu::-webkit-scrollbar { display: none; }
@@ -66,11 +76,6 @@
   details { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin: 0; overflow: hidden; }
   summary { cursor: pointer; color: var(--muted); padding: 8px 10px; font-weight: 650; }
   .detail-body { border-top: 1px solid var(--border); padding: 10px; display: grid; gap: 10px; }
-  #status-raw { margin: 0; padding: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  #status-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; }
-  .field { display: flex; justify-content: space-between; gap: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; min-width: 0; }
-  .field .key { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .field .val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #alarm-panel { margin: 0; background: rgba(232,106,95,.10); border: 1px solid rgba(232,106,95,.45); border-radius: var(--radius); padding: 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
   #alarm-title { color: var(--err); font-weight: 700; }
   #alarm-detail { color: var(--muted); margin-top: 2px; }
@@ -139,14 +144,11 @@
   .run-title { font-weight: 650; overflow-wrap: anywhere; }
   .backup-panel { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
   #backup-status { color: var(--muted); min-height: 18px; }
-  .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
   .metric { min-width: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: grid; gap: 3px; align-content: start; }
   .metric .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .metric .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
   .metric--wide { grid-column: span 2; }
   .metric--compact { min-width: 130px; }
-  #status-panel { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
-  #status-panel .metric--wide { min-width: min(100%, 260px); }
   .action-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; margin: 0; min-width: 0; }
   .action-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
   .action-row label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -168,13 +170,16 @@
   .tool-custom-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; padding: 8px; background: #202629; }
   .tool-custom-row label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
   .tool-custom-row input[type="number"] { width: 100%; }
-  .active-gcode-grid { display: grid; grid-template-columns: minmax(240px, .52fr) minmax(420px, 1.48fr); gap: 10px; align-items: stretch; }
-  .active-gcode-info { min-width: 0; display: grid; gap: 10px; align-content: start; }
+  .active-gcode-body { min-width: 0; display: grid; gap: 8px; }
+  .active-gcode-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+  .active-gcode-summary { min-width: 0; }
   #active-gcode-title { font-weight: 650; overflow-wrap: anywhere; }
   #active-gcode-meta { color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+  #active-gcode-run { white-space: nowrap; }
   #gcode-preview-wrap { display: grid; grid-template-rows: minmax(0, 1fr) auto; position: relative; height: clamp(320px, 42vh, 560px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #gcode-preview { grid-area: 1 / 1; display: block; width: 100%; height: 100%; min-height: 0; touch-action: none; cursor: grab; }
   #gcode-preview:active { cursor: grabbing; }
+  #gcode-preview.pan-mode { cursor: move; }
   #gcode-preview-empty { grid-area: 1 / 1; z-index: 1; display: grid; place-items: center; color: var(--muted); background: var(--panel-2); pointer-events: none; }
   #gcode-timeline-row { grid-area: 2 / 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: rgba(25,31,37,.92); }
   #gcode-timeline-label { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
@@ -265,10 +270,11 @@
   .file-col-status { width: 13%; }
   .file-col-actions { width: 28%; }
   @media (min-width: 881px) {
-    #folder-sidebar { position: sticky; top: 116px; }
+    #folder-sidebar { position: sticky; top: 142px; }
   }
   @media (max-width: 1040px) {
-    .active-gcode-grid { grid-template-columns: 1fr; }
+    .active-gcode-head { grid-template-columns: 1fr; }
+    #active-gcode-run { width: 100%; justify-content: center; }
     .file-col-modified, th:nth-child(4), td:nth-child(4) { display: none; }
     .file-col-actions { width: 32%; }
     .file-col-status { width: 15%; }
@@ -283,6 +289,7 @@
     #header-main { display: grid; gap: var(--gap-sm); }
     header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .jog-body { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #machine-status-toolbar { grid-template-columns: minmax(300px, 1.5fr) repeat(3, minmax(110px, .55fr)); }
     #command-toolbar { gap: var(--gap-sm); }
     #command-menu { gap: var(--gap-xs); }
     .command-panel { padding: 10px; }
@@ -294,7 +301,7 @@
     .job, .run-row { grid-template-columns: 1fr; gap: 3px; }
     #alarm-panel { grid-template-columns: 1fr; }
     #alarm-actions { justify-content: stretch; }
-    .metric-grid, #status-panel, #jog .jog-grid, .active-gcode-grid { grid-template-columns: 1fr; }
+    #jog .jog-grid { grid-template-columns: 1fr; }
     #jog .metric--primary, .metric--wide { grid-column: auto; }
     .jog-plot-cell, #jog-plot { min-height: 170px; }
     #gcode-preview-wrap { height: clamp(260px, 48vh, 420px); min-height: 260px; }
@@ -341,8 +348,30 @@
     <div id="machine">
       <span>mode: <b id="mode">-</b></span>
       <span>age: <b id="age">-</b></span>
+      <span>conn: <b id="status-connection">-</b></span>
       <span>pending: <b id="pending">0</b></span>
       <span id="state" class="badge state-Unknown">Unknown</span>
+    </div>
+  </div>
+  <div id="machine-status-toolbar" aria-label="Machine status">
+    <div class="machine-status-item machine-status-position">
+      <span class="label">Position</span>
+      <div class="position-lines">
+        <div class="position-line"><span>M</span><b id="status-mpos">-</b></div>
+        <div class="position-line"><span>W</span><b id="status-wpos">-</b></div>
+      </div>
+    </div>
+    <div class="machine-status-item">
+      <span class="label">Feed</span>
+      <b id="status-feed" class="value">-</b>
+    </div>
+    <div class="machine-status-item">
+      <span class="label">Spindle</span>
+      <b id="status-spindle" class="value">-</b>
+    </div>
+    <div class="machine-status-item">
+      <span class="label">Tool</span>
+      <b id="status-tool" class="value">-</b>
     </div>
   </div>
   <div id="command-toolbar" aria-label="Command toolbar">
@@ -482,16 +511,6 @@
 
   <section id="control-view" class="view">
     <section class="page-section">
-      <h2>Machine Status</h2>
-      <div class="metric-grid" id="status-panel">
-        <div class="metric metric--wide"><div class="label">MPos</div><div id="status-mpos" class="value">-</div></div>
-        <div class="metric metric--wide"><div class="label">WPos</div><div id="status-wpos" class="value">-</div></div>
-        <div class="metric"><div class="label">Feed</div><div id="status-feed" class="value">-</div></div>
-        <div class="metric"><div class="label">Spindle</div><div id="status-spindle" class="value">-</div></div>
-        <div class="metric"><div class="label">Tool</div><div id="status-tool" class="value">-</div></div>
-        <div class="metric metric--compact"><div class="label">Status Age</div><div id="status-age" class="value">-</div></div>
-        <div class="metric metric--compact"><div class="label">Connection</div><div id="status-connection" class="value">-</div></div>
-      </div>
       <div id="alarm-panel" hidden>
         <div>
           <div id="alarm-title">Alarm</div>
@@ -502,31 +521,22 @@
           <button type="button" id="alarm-recover" data-control-action="recover">Recover</button>
         </div>
       </div>
-      <details id="status-detail">
-        <summary>Status Details</summary>
-        <div class="detail-body">
-          <pre id="status-raw">-</pre>
-          <div id="status-fields"></div>
-        </div>
-      </details>
     </section>
 
     <section class="page-section">
       <h2>Active Gcode</h2>
       <div id="active-gcode-panel" class="action-panel">
-        <div class="active-gcode-grid">
-          <div class="active-gcode-info">
-            <div>
+        <div class="active-gcode-body">
+          <div class="active-gcode-head">
+            <div class="active-gcode-summary">
               <div id="active-gcode-title">No active gcode selected.</div>
               <div id="active-gcode-meta">-</div>
             </div>
-            <div class="action-row">
-              <button type="button" id="active-gcode-run" class="primary">Run Active Gcode</button>
-            </div>
-            <div id="active-gcode-feedback" class="action-feedback" aria-live="polite"></div>
+            <button type="button" id="active-gcode-run" class="primary">Run Active Gcode</button>
           </div>
+          <div id="active-gcode-feedback" class="action-feedback" aria-live="polite"></div>
           <div id="gcode-preview-wrap">
-            <canvas id="gcode-preview" role="img" aria-label="Active gcode preview"></canvas>
+            <canvas id="gcode-preview" role="img" aria-label="Active gcode preview" tabindex="0" title="Drag to rotate; hold Shift or Space and drag to pan"></canvas>
             <div id="gcode-preview-empty">No plotted moves</div>
             <div id="gcode-timeline-row">
               <input id="gcode-timeline" type="range" min="0" max="0" step="1" value="0" disabled>

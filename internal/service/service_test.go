@@ -586,6 +586,48 @@ func TestSelectActiveGcodeParsesPreview(t *testing.T) {
 	}
 }
 
+func TestActiveGcodeSelectionPersistsAcrossServiceRestart(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arb := session.New(session.Config{
+		Dial: func() (*client.Conn, error) { return nil, io.EOF },
+	})
+	svc, err := New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("G90\nG0 X0 Y0 Z2\nG1 X3 Y4 Z-1\n")
+	putCachedEntry(t, svc, "restart.nc", content, store.Synced)
+
+	selected, err := svc.SelectActiveGcode("restart.nc")
+	if err != nil {
+		t.Fatalf("SelectActiveGcode: %v", err)
+	}
+	if got := st.ActiveGcodePath(); got != selected.Path {
+		t.Fatalf("stored active gcode path = %q, want %q", got, selected.Path)
+	}
+
+	reopened, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(reopened, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := restarted.ActiveGcode()
+	if active.Path != selected.Path || !active.Runnable {
+		t.Fatalf("restored active = %+v, want runnable %s", active, selected.Path)
+	}
+	if active.Preview == nil || active.Preview.MoveCount != 2 {
+		t.Fatalf("restored preview = %+v", active.Preview)
+	}
+}
+
 func TestParseGcodePreviewCoversCarveraMotionModes(t *testing.T) {
 	gcode := strings.Join([]string{
 		"G21 G90 G17",
