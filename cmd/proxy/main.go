@@ -209,16 +209,19 @@ func main() {
 	go arb.Poll(ctx, 5*time.Second)
 
 	eng := synceng.New(synceng.Config{Store: st, Arbiter: arb})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		log.Fatalf("cannot create service: %v", err)
+	}
+	if err := eng.PrepareStartupCacheValidation(); err != nil {
+		log.Fatalf("cannot prepare startup cache validation: %v", err)
+	}
+	go eng.RunStartupCacheValidation(ctx, 5*time.Second, 8)
 	go eng.Run(ctx, 2*time.Second)
 	// Periodically fold in files added/removed on the machine out-of-band.
 	go eng.RunReconcile(ctx, 30*time.Second, 8)
 	// Less frequently, use md5sum to catch same-size out-of-band changes.
 	go eng.RunDeepReconcile(ctx, 5*time.Minute, 8)
-
-	svc, err := service.New(st, arb)
-	if err != nil {
-		log.Fatalf("cannot create service: %v", err)
-	}
 	go svc.RunMaintenance(ctx, 10*time.Minute, 24*time.Hour, 24*time.Hour)
 	jogMgr := jog.New(arb, jog.Config{
 		Enabled:         *jogEnabled,

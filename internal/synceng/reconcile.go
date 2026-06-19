@@ -44,6 +44,143 @@ func (e *Engine) DeepReconcile(maxDepth int) error {
 	return e.reconcile(maxDepth, true)
 }
 
+// PrepareStartupCacheValidation blocks persisted synced cache entries until the
+// machine confirms they still match. It only touches local catalog/cache state.
+func (e *Engine) PrepareStartupCacheValidation() error {
+	for _, existing := range e.store.ListEntries() {
+		if existing.IsDir {
+			if existing.CacheState != store.CacheNone || !existing.CacheCheckedAt.IsZero() {
+				existing.CacheState = store.CacheNone
+				existing.CacheCheckedAt = time.Time{}
+				if err := e.store.PutEntry(existing); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if existing.Sync == store.RemoteOnly {
+			changed := false
+			if existing.CachePath != "" {
+				_ = os.Remove(existing.CachePath)
+				existing.CachePath = ""
+				changed = true
+			}
+			if existing.CacheState != store.CacheNone || !existing.CacheCheckedAt.IsZero() {
+				existing.CacheState = store.CacheNone
+				existing.CacheCheckedAt = time.Time{}
+				changed = true
+			}
+			if changed {
+				if err := e.store.PutEntry(existing); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if existing.CachePath == "" {
+			changed := false
+			if existing.Sync == store.Synced {
+				existing.Sync = store.RemoteOnly
+				existing.Error = ""
+				changed = true
+			}
+			if existing.CacheState != store.CacheNone || !existing.CacheCheckedAt.IsZero() {
+				existing.CacheState = store.CacheNone
+				existing.CacheCheckedAt = time.Time{}
+				changed = true
+			}
+			if changed {
+				if err := e.store.PutEntry(existing); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if existing.Sync == store.Synced {
+			if _, err := os.Stat(existing.CachePath); os.IsNotExist(err) {
+				existing.CachePath = ""
+				existing.CacheState = store.CacheNone
+				existing.CacheCheckedAt = time.Time{}
+				existing.Sync = store.RemoteOnly
+				existing.Error = ""
+				if err := e.store.PutEntry(existing); err != nil {
+					return err
+				}
+				continue
+			}
+			if existing.CacheState != store.CacheValidating || !existing.CacheCheckedAt.IsZero() {
+				existing.CacheState = store.CacheValidating
+				existing.CacheCheckedAt = time.Time{}
+				existing.Error = ""
+				if err := e.store.PutEntry(existing); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if existing.CacheState != store.CacheReady || !existing.CacheCheckedAt.IsZero() {
+			existing.CacheState = store.CacheReady
+			existing.CacheCheckedAt = time.Time{}
+			if err := e.store.PutEntry(existing); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateStartupCache checks validation-pending cache entries against the
+// machine. Matching entries become cache-ready; changed or missing entries lose
+// their cache reference. Transient md5sum failures leave that entry validating.
+func (e *Engine) ValidateStartupCache(maxDepth int) error {
+	candidates := e.startupCacheValidationCandidates()
+	if len(candidates) == 0 {
+		return nil
+	}
+	var remote map[string]protocol.DirEntry
+	results := map[string]cacheValidationResult{}
+	err := e.arb.WithMachine(true, func(c *client.Conn) error {
+		var lerr error
+		remote, lerr = listTree(c, service.GcodeRoot, maxDepth, e.opTimeout)
+		if lerr != nil {
+			return lerr
+		}
+		results = e.checkCachedEntries(c, remote, candidates)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	e.applyCacheValidationResults(candidates, results)
+	return nil
+}
+
+func (e *Engine) RunStartupCacheValidation(ctx context.Context, interval time.Duration, maxDepth int) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	for {
+		if !e.hasStartupCacheValidationPending() {
+			return
+		}
+		if err := e.ValidateStartupCache(maxDepth); err != nil {
+			if !isBlocked(err) {
+				log.Printf("synceng: startup cache validation error: %v", err)
+			}
+		}
+		if !e.hasStartupCacheValidationPending() {
+			return
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
 func (e *Engine) reconcile(maxDepth int, deep bool) error {
 	var remote map[string]protocol.DirEntry
 	err := e.arb.WithMachine(true, func(c *client.Conn) error {
@@ -109,7 +246,7 @@ func remoteOnlyMTimeChanged(existing store.Entry, de protocol.DirEntry) bool {
 
 func (e *Engine) deepCheck(c *client.Conn, remote map[string]protocol.DirEntry) {
 	for _, existing := range e.store.ListEntries() {
-		if existing.Sync != store.Synced || existing.IsDir || existing.MD5 == "" || existing.CachePath == "" {
+		if existing.Sync != store.Synced || existing.IsDir || existing.CachePath == "" || existing.CacheState == store.CacheNone {
 			continue
 		}
 		de, ok := remote[existing.Path]
@@ -121,9 +258,11 @@ func (e *Engine) deepCheck(c *client.Conn, remote map[string]protocol.DirEntry) 
 			log.Printf("synceng: deep reconcile md5 skipped for %s: %v", existing.Path, err)
 			continue
 		}
-		if remoteMD5 != existing.MD5 {
+		if existing.MD5 != "" && remoteMD5 != existing.MD5 {
 			e.markRemoteOnly(existing, de, remoteMD5)
+			continue
 		}
+		e.markCacheReady(existing, de, remoteMD5)
 	}
 }
 
@@ -135,9 +274,97 @@ func (e *Engine) markRemoteOnly(existing store.Entry, de protocol.DirEntry, remo
 	existing.MTime = de.MTime
 	existing.Sync = store.RemoteOnly
 	existing.CachePath = ""
+	existing.CacheState = store.CacheNone
+	existing.CacheCheckedAt = time.Time{}
 	existing.MD5 = remoteMD5
 	existing.Error = ""
 	_ = e.store.PutEntry(existing)
+}
+
+type cacheValidationResult struct {
+	remote protocol.DirEntry
+	exists bool
+	md5    string
+	md5Err error
+}
+
+func (e *Engine) startupCacheValidationCandidates() []store.Entry {
+	var out []store.Entry
+	for _, existing := range e.store.ListEntries() {
+		if existing.Sync != store.Synced || existing.IsDir || existing.CachePath == "" {
+			continue
+		}
+		if existing.CacheState == store.CacheValidating || existing.CacheState == "" {
+			out = append(out, existing)
+		}
+	}
+	return out
+}
+
+func (e *Engine) hasStartupCacheValidationPending() bool {
+	return len(e.startupCacheValidationCandidates()) > 0
+}
+
+func (e *Engine) checkCachedEntries(c *client.Conn, remote map[string]protocol.DirEntry, candidates []store.Entry) map[string]cacheValidationResult {
+	results := make(map[string]cacheValidationResult, len(candidates))
+	for _, existing := range candidates {
+		de, ok := remote[existing.Path]
+		res := cacheValidationResult{remote: de, exists: ok}
+		if !ok || de.IsDir || existing.Size != de.Size {
+			results[existing.Path] = res
+			continue
+		}
+		res.md5, res.md5Err = c.Md5(existing.Path, e.opTimeout)
+		results[existing.Path] = res
+	}
+	return results
+}
+
+func (e *Engine) applyCacheValidationResults(candidates []store.Entry, results map[string]cacheValidationResult) {
+	for _, candidate := range candidates {
+		latest, ok := e.store.GetEntry(candidate.Path)
+		if !ok || latest.Sync != store.Synced || latest.CachePath != candidate.CachePath ||
+			(latest.CacheState != store.CacheValidating && latest.CacheState != "") {
+			continue
+		}
+		res := results[candidate.Path]
+		if !res.exists || res.remote.IsDir {
+			if latest.CachePath != "" {
+				_ = os.Remove(latest.CachePath)
+			}
+			_ = e.store.DeleteEntry(latest.Path)
+			continue
+		}
+		if latest.Size != res.remote.Size {
+			e.markRemoteOnly(latest, res.remote, "")
+			continue
+		}
+		if res.md5Err != nil {
+			log.Printf("synceng: startup cache validation md5 skipped for %s: %v", latest.Path, res.md5Err)
+			continue
+		}
+		if latest.MD5 != "" && res.md5 != latest.MD5 {
+			e.markRemoteOnly(latest, res.remote, res.md5)
+			continue
+		}
+		e.markCacheReady(latest, res.remote, res.md5)
+	}
+}
+
+func (e *Engine) markCacheReady(existing store.Entry, de protocol.DirEntry, remoteMD5 string) {
+	latest, ok := e.store.GetEntry(existing.Path)
+	if !ok || latest.Sync != store.Synced || latest.CachePath != existing.CachePath {
+		return
+	}
+	latest.Size = de.Size
+	latest.MTime = de.MTime
+	if remoteMD5 != "" {
+		latest.MD5 = remoteMD5
+	}
+	latest.CacheState = store.CacheReady
+	latest.CacheCheckedAt = e.now()
+	latest.Error = ""
+	_ = e.store.PutEntry(latest)
 }
 
 func syncStateFor(de protocol.DirEntry) store.SyncState {

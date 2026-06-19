@@ -1143,6 +1143,60 @@ func TestRemoteOnlyReadDoesNotDownloadFromMount(t *testing.T) {
 	}
 }
 
+func TestValidationPendingReadReturns503WithoutDownload(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	dialed := false
+	arb := session.New(session.Config{
+		Dial: func() (*client.Conn, error) {
+			dialed = true
+			return nil, errors.New("webdav validation-pending read attempted a machine download")
+		},
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("G0 X0\n")
+	cachePath := filepath.Join(st.CacheDir(), "validating-cache")
+	if err := os.WriteFile(cachePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutEntry(store.Entry{
+		Path:       "/sd/gcodes/validating.nc",
+		Size:       int64(len(content)),
+		MD5:        "not-used-here",
+		CachePath:  cachePath,
+		CacheState: store.CacheValidating,
+		Sync:       store.Synced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(svc).Handler(""))
+	defer srv.Close()
+
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		req, err := http.NewRequest(method, srv.URL+"/validating.nc", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("%s status = %d, want 503", method, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Retry-After"); got != "5" {
+			t.Fatalf("%s Retry-After = %q, want 5", method, got)
+		}
+	}
+	if dialed {
+		t.Fatal("validation-pending WebDAV read dialed the machine")
+	}
+}
+
 func TestPropfindRemoteOnlyDoesNotDownloadFromMount(t *testing.T) {
 	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	tr := machine.NewTracker()

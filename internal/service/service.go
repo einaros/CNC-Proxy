@@ -236,11 +236,12 @@ func (s *Service) PutRemoteOnly(remotePath string, size int64, mtime time.Time, 
 		return err
 	}
 	return s.store.PutEntry(store.Entry{
-		Path:  remote,
-		Size:  size,
-		MTime: mtime,
-		MD5:   md5hex,
-		Sync:  store.RemoteOnly,
+		Path:       remote,
+		Size:       size,
+		MTime:      mtime,
+		MD5:        md5hex,
+		CacheState: store.CacheNone,
+		Sync:       store.RemoteOnly,
 	})
 }
 
@@ -604,12 +605,13 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 	}
 
 	entry := store.Entry{
-		Path:      remote,
-		Size:      size,
-		MTime:     time.Now(),
-		MD5:       md5hex,
-		CachePath: cachePath,
-		Sync:      store.PendingUpload,
+		Path:       remote,
+		Size:       size,
+		MTime:      time.Now(),
+		MD5:        md5hex,
+		CachePath:  cachePath,
+		CacheState: store.CacheReady,
+		Sync:       store.PendingUpload,
 	}
 	if err := s.store.PutEntry(entry); err != nil {
 		return store.Entry{}, err
@@ -749,11 +751,12 @@ func (s *Service) mergeUploadRange(remote, cachePath, partPath string, start, en
 	cleanup = false
 
 	entry := store.Entry{
-		Path:      remote,
-		Size:      stagedSize,
-		MTime:     time.Now(),
-		CachePath: cachePath,
-		Sync:      store.LocalOnly,
+		Path:       remote,
+		Size:       stagedSize,
+		MTime:      time.Now(),
+		CachePath:  cachePath,
+		CacheState: store.CacheReady,
+		Sync:       store.LocalOnly,
 	}
 	if complete {
 		md5hex, err := fileMD5(cachePath, total)
@@ -1191,12 +1194,13 @@ func (s *Service) restoreEntryStateForRetry(job store.Job) error {
 	case store.JobUpload:
 		if _, ok := s.store.GetEntry(job.Path); !ok {
 			return s.store.PutEntry(store.Entry{
-				Path:      job.Path,
-				Size:      job.Size,
-				MD5:       job.MD5,
-				CachePath: job.CachePath,
-				MTime:     time.Now(),
-				Sync:      store.PendingUpload,
+				Path:       job.Path,
+				Size:       job.Size,
+				MD5:        job.MD5,
+				CachePath:  job.CachePath,
+				CacheState: store.CacheReady,
+				MTime:      time.Now(),
+				Sync:       store.PendingUpload,
 			})
 		}
 		return s.store.SetEntrySync(job.Path, store.PendingUpload, "")
@@ -1363,6 +1367,8 @@ func (s *Service) renameLocalUpload(from, to string, entry store.Entry) error {
 
 	entry.Path = to
 	entry.CachePath = cachePath
+	entry.CacheState = store.CacheReady
+	entry.CacheCheckedAt = time.Time{}
 	entry.Sync = store.PendingUpload
 	entry.Error = ""
 	entry.MTime = time.Now()
@@ -1408,8 +1414,11 @@ func (s *Service) ReadCache(remotePath string) (io.ReadCloser, store.Entry, erro
 	if !ok {
 		return nil, store.Entry{}, ErrNotFound
 	}
-	if entry.CachePath == "" {
+	if entry.CachePath == "" || entry.CacheState == store.CacheNone {
 		return nil, entry, ErrNotCached
+	}
+	if entry.CacheState == store.CacheValidating || (entry.CacheState == "" && entry.Sync == store.Synced) {
+		return nil, entry, ErrCacheValidationPending
 	}
 	f, err := os.Open(entry.CachePath)
 	if err != nil {
@@ -1429,7 +1438,7 @@ func (s *Service) Open(remotePath string) (io.ReadCloser, store.Entry, error) {
 	if err == nil {
 		return rc, entry, nil
 	}
-	if err != ErrNotCached {
+	if !errors.Is(err, ErrNotCached) {
 		return nil, entry, err
 	}
 	// Cache miss for a known file: fetch it, then serve from cache.
@@ -1520,6 +1529,8 @@ func (s *Service) FetchToCache(remotePath string) error {
 	entry.CachePath = cachePath
 	entry.Size = int64(len(content))
 	entry.MD5 = md5hex(content)
+	entry.CacheState = store.CacheReady
+	entry.CacheCheckedAt = time.Now()
 	entry.Sync = store.Synced
 	return s.store.PutEntry(entry)
 }
@@ -1534,6 +1545,7 @@ func md5hex(b []byte) string {
 var (
 	ErrNotFound               = errors.New("service: not found")
 	ErrNotCached              = errors.New("service: content not cached locally")
+	ErrCacheValidationPending = errors.New("service: cache validation pending")
 	ErrMachineStatusStale     = errors.New("service: machine status is stale")
 	ErrRecoveryUnavailable    = errors.New("service: recovery unavailable")
 	ErrRetryUnavailable       = errors.New("service: retry unavailable")

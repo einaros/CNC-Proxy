@@ -32,18 +32,33 @@ const (
 	Error SyncState = "error"
 )
 
+// CacheState describes whether a catalog entry's CachePath may be served.
+type CacheState string
+
+const (
+	// CacheNone means no local file content is available.
+	CacheNone CacheState = "none"
+	// CacheReady means local bytes may be served without machine I/O.
+	CacheReady CacheState = "ready"
+	// CacheValidating means local bytes exist but are blocked until the machine
+	// confirms they still match.
+	CacheValidating CacheState = "validating"
+)
+
 // Entry is one file (or directory) in the catalog. Path is the machine-absolute
 // path (e.g. "/sd/gcodes/part.nc"). For directories, Size is 0 and MD5 empty.
 type Entry struct {
-	Path      string    `json:"path"`
-	IsDir     bool      `json:"is_dir"`
-	Size      int64     `json:"size"`
-	MTime     time.Time `json:"mtime"`
-	MD5       string    `json:"md5,omitempty"`        // content MD5 (uncompressed)
-	CachePath string    `json:"cache_path,omitempty"` // local cache file, if held
-	Sync      SyncState `json:"sync"`
-	Error     string    `json:"error,omitempty"` // detail when Sync == Error
-	UpdatedAt time.Time `json:"updated_at"`
+	Path           string     `json:"path"`
+	IsDir          bool       `json:"is_dir"`
+	Size           int64      `json:"size"`
+	MTime          time.Time  `json:"mtime"`
+	MD5            string     `json:"md5,omitempty"`        // content MD5 (uncompressed)
+	CachePath      string     `json:"cache_path,omitempty"` // local cache file, if held
+	CacheState     CacheState `json:"cache_state"`
+	CacheCheckedAt time.Time  `json:"cache_checked_at,omitempty"`
+	Sync           SyncState  `json:"sync"`
+	Error          string     `json:"error,omitempty"` // detail when Sync == Error
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // JobKind is the type of a queued operation.

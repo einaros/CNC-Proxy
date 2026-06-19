@@ -239,6 +239,139 @@ func TestDeepReconcileMd5FailureIsNonFatal(t *testing.T) {
 	}
 }
 
+func TestPrepareStartupCacheValidationMarksSyncedOnly(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	eng := New(Config{Store: st})
+
+	syncedContent := []byte("G0 X0\n")
+	syncedCache := writeCacheContent(t, syncedContent)
+	if err := st.PutEntry(store.Entry{
+		Path:       "/sd/gcodes/synced.nc",
+		Size:       int64(len(syncedContent)),
+		MD5:        md5HexBytes(syncedContent),
+		CachePath:  syncedCache,
+		CacheState: store.CacheReady,
+		Sync:       store.Synced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingContent := []byte("G0 X1\n")
+	pendingCache := writeCacheContent(t, pendingContent)
+	if err := st.PutEntry(store.Entry{
+		Path:       "/sd/gcodes/pending.nc",
+		Size:       int64(len(pendingContent)),
+		MD5:        md5HexBytes(pendingContent),
+		CachePath:  pendingCache,
+		CacheState: store.CacheReady,
+		Sync:       store.PendingUpload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	missingCache := filepath.Join(t.TempDir(), "missing-cache")
+	if err := st.PutEntry(store.Entry{
+		Path:       "/sd/gcodes/missing.nc",
+		Size:       12,
+		MD5:        md5HexBytes([]byte("missing")),
+		CachePath:  missingCache,
+		CacheState: store.CacheReady,
+		Sync:       store.Synced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.PrepareStartupCacheValidation(); err != nil {
+		t.Fatal(err)
+	}
+
+	synced, _ := st.GetEntry("/sd/gcodes/synced.nc")
+	if synced.CacheState != store.CacheValidating || synced.CachePath != syncedCache || !synced.CacheCheckedAt.IsZero() {
+		t.Fatalf("synced entry after prepare = %+v, want validating with cache", synced)
+	}
+	pending, _ := st.GetEntry("/sd/gcodes/pending.nc")
+	if pending.CacheState != store.CacheReady || pending.Sync != store.PendingUpload || pending.CachePath != pendingCache {
+		t.Fatalf("pending entry after prepare = %+v, want ready pending upload", pending)
+	}
+	missing, _ := st.GetEntry("/sd/gcodes/missing.nc")
+	if missing.Sync != store.RemoteOnly || missing.CacheState != store.CacheNone || missing.CachePath != "" {
+		t.Fatalf("missing cache entry after prepare = %+v, want remote_only without cache", missing)
+	}
+}
+
+func TestValidateStartupCacheOutcomes(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	tr.Observe(machine.Idle)
+
+	matchContent := []byte("AAAA")
+	changedLocal := []byte("BBBB")
+	changedRemote := []byte("CCCC")
+	missingContent := []byte("DDDD")
+	failContent := []byte("EEEE")
+
+	seedMachineFile(t, m.Addr(), "/sd/gcodes/match.nc", matchContent)
+	seedMachineFile(t, m.Addr(), "/sd/gcodes/changed.nc", changedRemote)
+	seedMachineFile(t, m.Addr(), "/sd/gcodes/fail-md5.nc", failContent)
+	m.FailCommand("md5sum /sd/gcodes/fail-md5.nc")
+
+	matchCache := writeCacheContent(t, matchContent)
+	changedCache := writeCacheContent(t, changedLocal)
+	missingCache := writeCacheContent(t, missingContent)
+	failCache := writeCacheContent(t, failContent)
+
+	for _, tc := range []struct {
+		path    string
+		content []byte
+		cache   string
+	}{
+		{"/sd/gcodes/match.nc", matchContent, matchCache},
+		{"/sd/gcodes/changed.nc", changedLocal, changedCache},
+		{"/sd/gcodes/missing.nc", missingContent, missingCache},
+		{"/sd/gcodes/fail-md5.nc", failContent, failCache},
+	} {
+		if err := st.PutEntry(store.Entry{
+			Path:       tc.path,
+			Size:       int64(len(tc.content)),
+			MD5:        md5HexBytes(tc.content),
+			CachePath:  tc.cache,
+			CacheState: store.CacheValidating,
+			Sync:       store.Synced,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := eng.ValidateStartupCache(4); err != nil {
+		t.Fatal(err)
+	}
+
+	match, _ := st.GetEntry("/sd/gcodes/match.nc")
+	if match.CacheState != store.CacheReady || match.CachePath != matchCache || match.CacheCheckedAt.IsZero() {
+		t.Fatalf("matching entry after validation = %+v, want ready cache", match)
+	}
+	changed, _ := st.GetEntry("/sd/gcodes/changed.nc")
+	if changed.Sync != store.RemoteOnly || changed.CacheState != store.CacheNone || changed.CachePath != "" || changed.MD5 == md5HexBytes(changedLocal) {
+		t.Fatalf("changed entry after validation = %+v, want remote_only with remote md5", changed)
+	}
+	if _, err := os.Stat(changedCache); !os.IsNotExist(err) {
+		t.Fatalf("changed cache stat = %v, want removed", err)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/missing.nc"); ok {
+		t.Fatal("missing remote entry should be removed from catalog")
+	}
+	if _, err := os.Stat(missingCache); !os.IsNotExist(err) {
+		t.Fatalf("missing cache stat = %v, want removed", err)
+	}
+	failed, _ := st.GetEntry("/sd/gcodes/fail-md5.nc")
+	if failed.CacheState != store.CacheValidating || failed.CachePath != failCache {
+		t.Fatalf("md5 failure entry after validation = %+v, want still validating", failed)
+	}
+	if _, err := os.Stat(failCache); err != nil {
+		t.Fatalf("md5 failure cache should remain: %v", err)
+	}
+}
+
 func TestReconcileLeavesErrorStateAlone(t *testing.T) {
 	_, st, arb, tr := setup(t)
 	eng := newEngine(st, arb)
@@ -259,6 +392,20 @@ func TestReconcileLeavesErrorStateAlone(t *testing.T) {
 	if !ok || got.Sync != store.Error || got.Error != "previous failure" {
 		t.Fatalf("error entry = %+v ok=%v, want untouched", got, ok)
 	}
+}
+
+func writeCacheContent(t *testing.T, content []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "cache.bin")
+	if err := os.WriteFile(p, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func md5HexBytes(content []byte) string {
+	sum := md5.Sum(content)
+	return hex.EncodeToString(sum[:])
 }
 
 func TestReconcileBlockedWhenNotIdle(t *testing.T) {

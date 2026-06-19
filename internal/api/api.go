@@ -285,6 +285,8 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrNotCached):
 		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrCacheValidationPending):
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, service.ErrRecoveryUnavailable):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrRetryUnavailable):

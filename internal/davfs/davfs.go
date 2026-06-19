@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log"
 	"mime"
 	"net/http"
@@ -62,6 +63,9 @@ func (fs *FS) Handler(prefix string) http.Handler {
 			fs.serveOptions(w, r, prefix)
 			return
 		}
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && fs.cacheValidationPending(w, r, prefix) {
+			return
+		}
 		ctx := context.WithValue(r.Context(), requestMethodKey{}, r.Method)
 		if r.Method == http.MethodPut {
 			cr, ok, err := parseContentRange(r.Header.Get("Content-Range"))
@@ -75,6 +79,20 @@ func (fs *FS) Handler(prefix string) http.Handler {
 		}
 		h.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (fs *FS) cacheValidationPending(w http.ResponseWriter, r *http.Request, prefix string) bool {
+	reqPath, ok := stripHandlerPrefix(prefix, r.URL.Path)
+	if !ok || isRoot(reqPath) || isJunk(reqPath) {
+		return false
+	}
+	entry, ok := fs.svc.Lookup(svcPath(reqPath))
+	if !ok || entry.IsDir || !entryNeedsCacheValidation(entry) {
+		return false
+	}
+	w.Header().Set("Retry-After", "5")
+	http.Error(w, service.ErrCacheValidationPending.Error(), http.StatusServiceUnavailable)
+	return true
 }
 
 type webDAVLogResponseWriter struct {
@@ -310,18 +328,27 @@ func (fs *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileM
 	rc, e, err := fs.svc.ReadCache(svcPath(name))
 	if err != nil {
 		switch {
-		case err == service.ErrNotCached:
+		case errors.Is(err, service.ErrNotCached):
 			if requestMethod(ctx) == "PROPFIND" {
 				return newMetadataFile(e), nil
 			}
 			// On the machine but not cached locally. Keep it visible in listings,
 			// but fail content reads quickly instead of downloading implicitly.
 			return nil, &notCachedError{name: name}
+		case errors.Is(err, service.ErrCacheValidationPending):
+			if requestMethod(ctx) == "PROPFIND" {
+				return newMetadataFile(e), nil
+			}
+			return nil, err
 		default:
 			return nil, os.ErrNotExist
 		}
 	}
 	return newReadFile(rc, e), nil
+}
+
+func entryNeedsCacheValidation(e store.Entry) bool {
+	return e.CachePath != "" && (e.CacheState == store.CacheValidating || (e.CacheState == "" && e.Sync == store.Synced))
 }
 
 func (fs *FS) openDir(name string) (webdav.File, error) {

@@ -3,12 +3,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,6 +44,23 @@ func get(t *testing.T, url string) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest("GET", url, nil)
 	return do(t, req)
+}
+
+func md5Hex(content []byte) string {
+	sum := md5.Sum(content)
+	return hex.EncodeToString(sum[:])
+}
+
+func apiSeedMachineFile(t *testing.T, addr, remote string, content []byte) {
+	t.Helper()
+	conn, err := client.Dial(addr, 2*time.Second, client.WithUploadStartDelay(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.Upload(remote, bytes.NewReader(content), int64(len(content)), md5Hex(content), 2*time.Second, nil); err != nil {
+		t.Fatalf("seed machine file %s: %v", remote, err)
+	}
 }
 
 func newTestServer(t *testing.T) (*httptest.Server, *service.Service) {
@@ -248,6 +268,101 @@ func TestGetFilesAndContent(t *testing.T) {
 	resp2.Body.Close()
 	if string(body) != "hello" {
 		t.Errorf("content = %q", body)
+	}
+}
+
+func TestGetValidationPendingContentReturns503(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	dialed := false
+	arb := session.New(session.Config{Dial: func() (*client.Conn, error) {
+		dialed = true
+		return nil, io.EOF
+	}})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("G0 X0\n")
+	cachePath := filepath.Join(st.CacheDir(), "validating-cache")
+	if err := os.WriteFile(cachePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutEntry(store.Entry{
+		Path:       "/sd/gcodes/validating.nc",
+		Size:       int64(len(content)),
+		MD5:        md5Hex(content),
+		CachePath:  cachePath,
+		CacheState: store.CacheValidating,
+		Sync:       store.Synced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(svc).Handler())
+	t.Cleanup(srv.Close)
+
+	resp := get(t, srv.URL+"/api/files/validating.nc")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if dialed {
+		t.Fatal("validation-pending API read dialed the machine")
+	}
+}
+
+func TestAPIGetRemoteOnlyFetchesOnceThenServesCache(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+
+	content := []byte("G0 X10\nM30\n")
+	apiSeedMachineFile(t, m.Addr(), "/sd/gcodes/remote.nc", content)
+
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tr := machine.NewTracker()
+	tr.Observe(machine.Idle)
+	dials := 0
+	arb := session.New(session.Config{
+		Tracker: tr,
+		Dial: func() (*client.Conn, error) {
+			dials++
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.PutRemoteOnly("remote.nc", int64(len(content)), time.Unix(0, 0), ""); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(svc).Handler())
+	t.Cleanup(srv.Close)
+
+	resp := get(t, srv.URL+"/api/files/remote.nc")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, content) {
+		t.Fatalf("first GET status=%d body=%q, want cached remote content", resp.StatusCode, string(body))
+	}
+	if dials != 1 {
+		t.Fatalf("machine dials after first GET = %d, want 1", dials)
+	}
+
+	resp = get(t, srv.URL+"/api/files/remote.nc")
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, content) {
+		t.Fatalf("second GET status=%d body=%q, want cached content", resp.StatusCode, string(body))
+	}
+	if dials != 1 {
+		t.Fatalf("machine dials after second GET = %d, want still 1", dials)
+	}
+	entry, _ := svc.Lookup("remote.nc")
+	if entry.CacheState != store.CacheReady || entry.CachePath == "" {
+		t.Fatalf("entry after API fetch = %+v, want ready cache", entry)
 	}
 }
 

@@ -77,6 +77,9 @@ func Open(path string) (*Store, error) {
 	if p.Entries != nil {
 		s.entries = p.Entries
 	}
+	for _, e := range s.entries {
+		normalizeLoadedEntry(e)
+	}
 	s.jobs = p.Jobs
 	if p.NextJob > 0 {
 		s.nextJob = p.NextJob
@@ -117,6 +120,7 @@ func (s *Store) Restore(in Snapshot) error {
 	entries := make(map[string]*Entry, len(in.Entries))
 	for k, e := range in.Entries {
 		cp := e
+		normalizeLoadedEntry(&cp)
 		entries[k] = &cp
 	}
 	jobs := make([]*Job, 0, len(in.Jobs))
@@ -142,6 +146,33 @@ func (s *Store) Restore(in Snapshot) error {
 	}
 	s.publishLocked(Event{Kind: "reset"})
 	return nil
+}
+
+func normalizeLoadedEntry(e *Entry) {
+	if e == nil {
+		return
+	}
+	if e.IsDir || e.CachePath == "" {
+		e.CacheState = CacheNone
+		e.CacheCheckedAt = time.Time{}
+	}
+}
+
+func normalizeNewEntry(e *Entry) {
+	if e == nil {
+		return
+	}
+	if e.IsDir || e.CachePath == "" {
+		e.CacheState = CacheNone
+		e.CacheCheckedAt = time.Time{}
+		return
+	}
+	if e.CacheState == "" {
+		e.CacheState = CacheReady
+	}
+	if e.CacheState == CacheNone {
+		e.CacheCheckedAt = time.Time{}
+	}
 }
 
 // flushLocked writes the whole model atomically and durably. Caller holds s.mu.
@@ -223,6 +254,7 @@ func (s *Store) Subscribe() (<-chan Event, func()) {
 func (s *Store) PutEntry(e Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	normalizeNewEntry(&e)
 	e.UpdatedAt = s.now()
 	cp := e
 	s.entries[e.Path] = &cp

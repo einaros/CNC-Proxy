@@ -445,6 +445,32 @@ func TestDownloadCompressedSidecar(t *testing.T) {
 	}
 }
 
+func TestReadCacheBlocksValidationPending(t *testing.T) {
+	svc, st := newService(t)
+	content := []byte("G0 X0\n")
+	cachePath := filepath.Join(st.CacheDir(), "validating-cache")
+	if err := os.WriteFile(cachePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutEntry(store.Entry{
+		Path:       "/sd/gcodes/validating.nc",
+		Size:       int64(len(content)),
+		MD5:        md5hex(content),
+		CachePath:  cachePath,
+		CacheState: store.CacheValidating,
+		Sync:       store.Synced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := svc.ReadCache("validating.nc"); !errors.Is(err, ErrCacheValidationPending) {
+		t.Fatalf("ReadCache validating = %v, want ErrCacheValidationPending", err)
+	}
+	if _, _, err := svc.Open("validating.nc"); !errors.Is(err, ErrCacheValidationPending) {
+		t.Fatalf("Open validating = %v, want ErrCacheValidationPending", err)
+	}
+}
+
 // TestConcurrentUploadsSamePath ensures simultaneous uploads of the same path
 // don't corrupt each other's cache file (they used to share one ".tmp"). Each
 // upload must end with a coherent cache file matching its own content's MD5.
