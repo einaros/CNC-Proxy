@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/uwin/cnc-proxy/internal/jog"
+	"github.com/uwin/cnc-proxy/internal/machine"
 )
 
 func (s *Server) getJogCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +34,8 @@ type jogClientMessage struct {
 	Action   string             `json:"action"`
 	Axis     string             `json:"axis"`
 	Distance float64            `json:"distance"`
+	Target   map[string]float64 `json:"target"`
+	Feed     float64            `json:"feed_mm_min"`
 }
 
 func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
@@ -98,8 +102,15 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 			sess.SetInput(jog.Input{Seq: msg.Seq, Axes: axes, Deadman: msg.Deadman, Slow: msg.Slow})
 		case "step":
 			sess.Step(msg.Seq, msg.Axis, msg.Distance)
+		case "target":
+			target, err := parseJogTarget(msg.Target)
+			if err != nil {
+				sess.ReportError(msg.Seq, jog.CodeBadInput, err.Error())
+				continue
+			}
+			sess.Target(msg.Seq, target, msg.Feed)
 		default:
-			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, step, control, disarm")
+			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, target, step, control, disarm")
 		}
 	}
 }
@@ -132,4 +143,21 @@ func parseJogAxes(in map[string]float64) (jog.Axes, error) {
 		}
 	}
 	return out, nil
+}
+
+func parseJogTarget(in map[string]float64) (machine.AxisValues, error) {
+	x, okX := in["x"]
+	y, okY := in["y"]
+	if !okX || !okY {
+		return nil, fmt.Errorf("target requires x and y")
+	}
+	for k, v := range in {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("target %q must be finite", k)
+		}
+		if k != "x" && k != "y" {
+			return nil, fmt.Errorf("unsupported target axis %q", k)
+		}
+	}
+	return machine.AxisValues{"x": x, "y": y}, nil
 }

@@ -631,8 +631,8 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="tab-active-job"`) || !strings.Contains(string(body), `id="tab-gcode-console"`) || !strings.Contains(string(body), `id="tab-files"`) || !strings.Contains(string(body), `id="control-view"`) {
 		t.Errorf("index missing lazy tab markup")
 	}
-	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
-		t.Errorf("index missing jog visualization or connection status")
+	if !strings.Contains(string(body), `id="workarea-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
+		t.Errorf("index missing work area visualization or connection status")
 	}
 	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `<h2>Active job</h2>`, `id="gcode-console-view"`, `<h2>Gcode console</h2>`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-drop"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
 		if !strings.Contains(string(body), want) {
@@ -652,17 +652,17 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`<h2>Control</h2>`, `id="jog-step-distance"`, `data-jog-step-axis="x"`, `data-jog-step-axis="y"`, `data-jog-step-axis="z"`, `id="jog-step-feedback"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`, `id="jog-buttons"`, `id="jog-target-pos"`} {
+	for _, want := range []string{`<h2>Control</h2>`, `id="tap-feed-mm-min"`, `id="tap-move-feedback"`, `id="workarea-boundary"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="machine-settings"`, `id="machine-x-min"`, `<h2>Gamepad</h2>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="jog-body"`, `class="metric metric--primary"`, `class="table-scroll"`} {
+	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="workarea-frame"`, `class="table-scroll"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing layout marker %s", want)
 		}
 	}
-	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `id="run-history-panel" open`} {
+	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `id="run-history-panel" open`, `id="jog-step-distance"`, `data-jog-step-axis=`, `id="jog-step-feedback"`, `id="jog-plot"`, `id="jog-axes"`, `id="jog-mpos"`, `id="jog-wpos"`, `id="jog-target-pos"`} {
 		if strings.Contains(string(body), gone) {
 			t.Errorf("index still contains removed status details marker %s", gone)
 		}
@@ -686,8 +686,8 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), "refreshJobs") || !strings.Contains(string(jsBody), "/api/jobs") {
 		t.Errorf("app.js missing active job diagnostic refresh")
 	}
-	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "stepJog") || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
-		t.Errorf("app.js missing jog plot, jog status messaging, or cache-only status polling")
+	if !strings.Contains(string(jsBody), "renderWorkArea") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "sendTapMove") || !strings.Contains(string(jsBody), `type: "target"`) || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
+		t.Errorf("app.js missing work area, tap move, jog status messaging, or cache-only status polling")
 	}
 	if got := js.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("app.js Cache-Control = %q, want no-store", got)
@@ -725,7 +725,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing %s", want)
 		}
 	}
-	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "pressedButtonList", "gamepadLabel", "Xbox-compatible gamepad", "standard gamepad"} {
+	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "gamepadLabel", "Xbox-compatible gamepad", "standard gamepad", "defaultMachineSettings", "renderMachineSettings", "handleWorkAreaClick"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -753,11 +753,15 @@ func TestUISettingsAPI(t *testing.T) {
 	if initial.Gamepad.Axes.Y.Axis != 1 || !initial.Gamepad.Axes.Y.Invert || initial.Gamepad.Axes.Z.Axis != 3 {
 		t.Fatalf("initial gamepad defaults = %+v", initial.Gamepad)
 	}
+	if initial.Machine.WorkArea.XMin != -300 || initial.Machine.WorkArea.YMin != -200 || initial.Machine.TapFeedMMMin != 600 {
+		t.Fatalf("initial machine defaults = %+v", initial.Machine)
+	}
 
 	body := `{
 		"macros":[{"id":"m1","name":"Probe","lines":["G38.2 Z-5 F50","G10 L20 P1 Z0"],"color":"#44c27b"}],
 		"macro_buttons":[{"id":"b1","macro_id":"m1","region":"toolbar","order":2}],
 		"log":{"filter":"jog","autoscroll":false},
+		"machine":{"work_area":{"x_min":-300,"x_max":5,"y_min":-210,"y_max":10},"origin":{"x":1,"y":2},"tap_feed_mm_min":700},
 		"gamepad":{
 			"axes":{
 				"x":{"axis":2,"invert":false,"scale":0.5},
@@ -784,6 +788,9 @@ func TestUISettingsAPI(t *testing.T) {
 	if saved.Gamepad.Axes.X.Axis != 2 || saved.Gamepad.Axes.X.Scale != 0.5 || saved.Gamepad.DeadmanButton != 7 {
 		t.Fatalf("saved gamepad settings = %+v", saved.Gamepad)
 	}
+	if saved.Machine.WorkArea.XMin != -300 || saved.Machine.WorkArea.YMax != 10 || saved.Machine.Origin.X != 1 || saved.Machine.TapFeedMMMin != 700 {
+		t.Fatalf("saved machine settings = %+v", saved.Machine)
+	}
 	if len(saved.Gamepad.MacroButtons) != 1 || saved.Gamepad.MacroButtons[0].Button != 1 {
 		t.Fatalf("saved gamepad macro buttons = %+v", saved.Gamepad.MacroButtons)
 	}
@@ -797,6 +804,9 @@ func TestUISettingsAPI(t *testing.T) {
 	}
 	if got.Gamepad.Axes.Z.Scale != 0.25 || len(got.Gamepad.SlowButtons) != 1 || got.Gamepad.SlowButtons[0] != 6 {
 		t.Fatalf("round trip gamepad settings = %+v", got.Gamepad)
+	}
+	if got.Machine.WorkArea.XMax != 5 || got.Machine.Origin.Y != 2 || got.Machine.TapFeedMMMin != 700 {
+		t.Fatalf("round trip machine settings = %+v", got.Machine)
 	}
 }
 
@@ -817,6 +827,18 @@ func TestUISettingsAPIRejectsInvalidGamepad(t *testing.T) {
 		"macros":[{"id":"m1","name":"Position","lines":["M114"]}],
 		"gamepad":{"axes":{"x":{"axis":99,"scale":1}}}
 	}`
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestUISettingsAPIRejectsInvalidMachine(t *testing.T) {
+	srv, _ := newTestServer(t)
+	body := `{"machine":{"work_area":{"x_min":10,"x_max":0,"y_min":-200,"y_max":0},"tap_feed_mm_min":600}}`
 	req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp := do(t, req)
@@ -999,6 +1021,27 @@ func TestJogWebSocketStep(t *testing.T) {
 		}
 	}
 	t.Fatalf("no step jog command observed: %v", m.Gcodes())
+}
+
+func TestJogWebSocketTarget(t *testing.T) {
+	srv, m, _ := serverWithJog(t, false)
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+
+	writeWS(t, c, map[string]any{"type": "target", "seq": 2, "target": map[string]float64{"x": 10, "y": -5}, "feed_mm_min": 600})
+	ack := readWSEvent(t, c, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	for _, line := range m.Gcodes() {
+		if strings.Contains(line, "X10.0000") && strings.Contains(line, "Y-5.0000") {
+			return
+		}
+	}
+	t.Fatalf("no target jog command observed: %v", m.Gcodes())
 }
 
 func TestJogWebSocketStatusTimeoutDoesNotCloseSession(t *testing.T) {

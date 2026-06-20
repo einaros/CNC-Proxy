@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -930,6 +931,7 @@ func normalizeUISettings(in UISettings, now time.Time) UISettings {
 	if out.Log.Filter == "" {
 		out.Log.Filter = "all"
 	}
+	out.Machine = normalizeMachineUI(in.Machine)
 	seenMacros := map[string]bool{}
 	for i, m := range in.Macros {
 		if m.ID == "" {
@@ -986,7 +988,60 @@ func defaultUISettings() UISettings {
 		MacroButtons: []MacroSlot{},
 		Log:          LogSettings{Filter: "all", Autoscroll: true},
 		Gamepad:      defaultGamepadSettings(),
+		Machine:      defaultMachineUI(),
 	}
+}
+
+func defaultMachineUI() MachineUI {
+	return MachineUI{
+		WorkArea: WorkArea{
+			XMin: -300,
+			XMax: 0,
+			YMin: -200,
+			YMax: 0,
+		},
+		Origin:       XYPoint{X: 0, Y: 0},
+		TapFeedMMMin: 600,
+	}
+}
+
+func normalizeMachineUI(in MachineUI) MachineUI {
+	d := defaultMachineUI()
+	if in.WorkArea.XMin == -302 && in.WorkArea.XMax == 0 && in.WorkArea.YMin == -212 && in.WorkArea.YMax == 0 && in.Origin.X == 0 && in.Origin.Y == 0 {
+		in.WorkArea = d.WorkArea
+	}
+	out := MachineUI{
+		WorkArea: WorkArea{
+			XMin: normalizeFinite(in.WorkArea.XMin, d.WorkArea.XMin),
+			XMax: normalizeFinite(in.WorkArea.XMax, d.WorkArea.XMax),
+			YMin: normalizeFinite(in.WorkArea.YMin, d.WorkArea.YMin),
+			YMax: normalizeFinite(in.WorkArea.YMax, d.WorkArea.YMax),
+		},
+		Origin: XYPoint{
+			X: normalizeFinite(in.Origin.X, d.Origin.X),
+			Y: normalizeFinite(in.Origin.Y, d.Origin.Y),
+		},
+		TapFeedMMMin: normalizeFinite(in.TapFeedMMMin, d.TapFeedMMMin),
+	}
+	if out.WorkArea.XMin >= out.WorkArea.XMax {
+		out.WorkArea.XMin = d.WorkArea.XMin
+		out.WorkArea.XMax = d.WorkArea.XMax
+	}
+	if out.WorkArea.YMin >= out.WorkArea.YMax {
+		out.WorkArea.YMin = d.WorkArea.YMin
+		out.WorkArea.YMax = d.WorkArea.YMax
+	}
+	if out.TapFeedMMMin <= 0 {
+		out.TapFeedMMMin = d.TapFeedMMMin
+	}
+	return out
+}
+
+func normalizeFinite(v, fallback float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return fallback
+	}
+	return v
 }
 
 func defaultGamepadSettings() Gamepad {

@@ -112,6 +112,7 @@ type UISettings struct {
 	MacroButtons []MacroSlot `json:"macro_buttons"`
 	Log          LogSettings `json:"log"`
 	Gamepad      Gamepad     `json:"gamepad"`
+	Machine      MachineUI   `json:"machine"`
 }
 
 // Macro is a named sequence of gcode/console lines that can be assigned to a
@@ -138,6 +139,29 @@ type MacroSlot struct {
 type LogSettings struct {
 	Filter     string `json:"filter,omitempty"`
 	Autoscroll bool   `json:"autoscroll"`
+}
+
+// MachineUI stores local machine geometry preferences used by the web control
+// surface. These values are UI state only; changing them never touches the
+// machine.
+type MachineUI struct {
+	WorkArea     WorkArea `json:"work_area"`
+	Origin       XYPoint  `json:"origin"`
+	TapFeedMMMin float64  `json:"tap_feed_mm_min"`
+}
+
+// WorkArea is the top-down machine-coordinate XY rectangle shown in Control.
+type WorkArea struct {
+	XMin float64 `json:"x_min"`
+	XMax float64 `json:"x_max"`
+	YMin float64 `json:"y_min"`
+	YMax float64 `json:"y_max"`
+}
+
+// XYPoint is a machine-coordinate point.
+type XYPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
 }
 
 // Gamepad stores browser gamepad mapping and speed preferences for the jog UI.

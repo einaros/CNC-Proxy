@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -51,6 +52,8 @@ const (
 	maxGamepadAxis   = 31
 	maxGamepadButton = 63
 	maxGamepadMacros = 32
+	maxMachineSpanMM = 5000
+	maxTapFeedMMMin  = 10000
 )
 
 // Service wires the store, arbiter (for machine state), and local cache.
@@ -513,12 +516,55 @@ func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
 	if err := validateGamepadSettings(ui.Gamepad); err != nil {
 		return store.UISettings{}, err
 	}
+	if err := validateMachineUI(ui.Machine); err != nil {
+		return store.UISettings{}, err
+	}
 	if ui.Log.Filter == "" {
 		ui.Log.Filter = "all"
 		current := s.store.UISettings()
 		ui.Log.Autoscroll = current.Log.Autoscroll
 	}
 	return s.store.SetUISettings(ui)
+}
+
+func validateMachineUI(m store.MachineUI) error {
+	values := map[string]float64{
+		"work_area.x_min": m.WorkArea.XMin,
+		"work_area.x_max": m.WorkArea.XMax,
+		"work_area.y_min": m.WorkArea.YMin,
+		"work_area.y_max": m.WorkArea.YMax,
+		"origin.x":        m.Origin.X,
+		"origin.y":        m.Origin.Y,
+		"tap_feed_mm_min": m.TapFeedMMMin,
+	}
+	allZero := true
+	for _, v := range values {
+		if v != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return nil
+	}
+	for name, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("service: machine %s must be finite", name)
+		}
+	}
+	workAreaMissing := m.WorkArea.XMin == 0 && m.WorkArea.XMax == 0 && m.WorkArea.YMin == 0 && m.WorkArea.YMax == 0
+	if !workAreaMissing {
+		if m.WorkArea.XMin >= m.WorkArea.XMax || m.WorkArea.YMin >= m.WorkArea.YMax {
+			return fmt.Errorf("service: machine work area min values must be less than max values")
+		}
+		if m.WorkArea.XMax-m.WorkArea.XMin > maxMachineSpanMM || m.WorkArea.YMax-m.WorkArea.YMin > maxMachineSpanMM {
+			return fmt.Errorf("service: machine work area span must be at most %.0f mm", float64(maxMachineSpanMM))
+		}
+	}
+	if m.TapFeedMMMin != 0 && (m.TapFeedMMMin < 1 || m.TapFeedMMMin > maxTapFeedMMMin) {
+		return fmt.Errorf("service: tap move feed must be between 1 and %.0f mm/min", float64(maxTapFeedMMMin))
+	}
+	return nil
 }
 
 func validateGamepadSettings(g store.Gamepad) error {

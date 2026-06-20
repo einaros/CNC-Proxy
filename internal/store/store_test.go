@@ -141,6 +141,11 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 		}},
 		MacroButtons: []MacroSlot{{ID: "slot1", MacroID: "probe", Region: "toolbar", Order: 4}},
 		Log:          LogSettings{Filter: "jog", Autoscroll: false},
+		Machine: MachineUI{
+			WorkArea:     WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
+			Origin:       XYPoint{X: 1, Y: 2},
+			TapFeedMMMin: 700,
+		},
 		Gamepad: Gamepad{
 			Axes: GamepadAxes{
 				X: GamepadAxis{Axis: 2, Scale: 0.5},
@@ -172,6 +177,9 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	}
 	if got.Log.Filter != "jog" || got.Log.Autoscroll {
 		t.Fatalf("reopened log settings = %+v", got.Log)
+	}
+	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.TapFeedMMMin != 700 {
+		t.Fatalf("reopened machine settings = %+v", got.Machine)
 	}
 	if got.Gamepad.Axes.X.Axis != 2 || got.Gamepad.Axes.X.Scale != 0.5 || got.Gamepad.DeadmanButton != 7 {
 		t.Fatalf("reopened gamepad = %+v", got.Gamepad)
@@ -232,6 +240,17 @@ func TestUISettingsGamepadDefaults(t *testing.T) {
 	}
 	if got.Gamepad.DeadmanButton != 0 || len(got.Gamepad.SlowButtons) != 2 {
 		t.Fatalf("default gamepad buttons = %+v", got.Gamepad)
+	}
+}
+
+func TestUISettingsMachineDefaults(t *testing.T) {
+	s, _ := Open("")
+	got := s.UISettings()
+	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.XMax != 0 || got.Machine.WorkArea.YMin != -200 || got.Machine.WorkArea.YMax != 0 {
+		t.Fatalf("default machine work area = %+v", got.Machine.WorkArea)
+	}
+	if got.Machine.Origin.X != 0 || got.Machine.Origin.Y != 0 || got.Machine.TapFeedMMMin != 600 {
+		t.Fatalf("default machine settings = %+v", got.Machine)
 	}
 }
 

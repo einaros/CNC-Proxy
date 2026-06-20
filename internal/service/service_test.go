@@ -1428,6 +1428,7 @@ func TestBackupExportImportRoundTrip(t *testing.T) {
 		MacroButtons: []store.MacroSlot{{ID: "s1", MacroID: "m1", Region: "toolbar"}},
 		Log:          store.LogSettings{Filter: "all", Autoscroll: true},
 		Gamepad:      store.Gamepad{DeadmanButton: 2},
+		Machine:      store.MachineUI{WorkArea: store.WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10}, TapFeedMMMin: 700},
 	})
 	if err != nil || len(ui.Macros) != 1 {
 		t.Fatalf("settings = %+v err=%v", ui, err)
@@ -1443,7 +1444,7 @@ func TestBackupExportImportRoundTrip(t *testing.T) {
 	if _, ok := restored.Lookup("part.nc"); !ok {
 		t.Fatal("restored backup missing catalog entry")
 	}
-	if got := restored.UISettings(); len(got.Macros) != 1 || got.Macros[0].Name != "Position" || got.Gamepad.DeadmanButton != 2 {
+	if got := restored.UISettings(); len(got.Macros) != 1 || got.Macros[0].Name != "Position" || got.Gamepad.DeadmanButton != 2 || got.Machine.TapFeedMMMin != 700 {
 		t.Fatalf("restored UI = %+v", got)
 	}
 	if lines := restored.GcodeLog().Recent(); len(lines) != 1 || lines[0].Text != "M114" {

@@ -18,7 +18,7 @@ const state = {
   logSearch: "",
   logPaused: false,
   selectedMacroId: "",
-  ui: { macros: [], macro_buttons: [], log: { filter: "all", autoscroll: true }, gamepad: defaultGamepadSettings() },
+  ui: { macros: [], macro_buttons: [], log: { filter: "all", autoscroll: true }, gamepad: defaultGamepadSettings(), machine: defaultMachineSettings() },
   settingsSaveTimer: null,
   macroRunning: false,
   activeTab: "active-job",
@@ -53,10 +53,12 @@ const state = {
     lead: { x: 0, y: 0, z: 0 },
     path: [],
     buttons: [],
-    stepPending: 0,
-    stepLabel: "",
-    stepFeedback: "",
-    stepFeedbackKind: "",
+    armPending: 0,
+    armPendingAction: "",
+    targetPending: 0,
+    targetLabel: "",
+    tapFeedback: "",
+    tapFeedbackKind: "",
     error: "",
     errorCode: "",
     sent: new Map(),
@@ -336,6 +338,57 @@ function defaultGamepadSettings() {
   };
 }
 
+function defaultMachineSettings() {
+  return {
+    work_area: { x_min: -300, x_max: 0, y_min: -200, y_max: 0 },
+    origin: { x: 0, y: 0 },
+    tap_feed_mm_min: 600,
+  };
+}
+
+function finiteOr(value, fallback) {
+  if (value === "" || value === null || typeof value === "undefined") return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeMachineSettings(machine) {
+  const d = defaultMachineSettings();
+  machine = machine || {};
+  const work = machine.work_area || {};
+  const oldGeneratedDefault = Number(work.x_min) === -302 && Number(work.x_max) === 0 &&
+    Number(work.y_min) === -212 && Number(work.y_max) === 0 &&
+    Number(machine.origin?.x || 0) === 0 && Number(machine.origin?.y || 0) === 0;
+  if (oldGeneratedDefault) {
+    machine = { ...machine, work_area: d.work_area };
+  }
+  const normalizedWork = machine.work_area || {};
+  const out = {
+    work_area: {
+      x_min: finiteOr(normalizedWork.x_min, d.work_area.x_min),
+      x_max: finiteOr(normalizedWork.x_max, d.work_area.x_max),
+      y_min: finiteOr(normalizedWork.y_min, d.work_area.y_min),
+      y_max: finiteOr(normalizedWork.y_max, d.work_area.y_max),
+    },
+    origin: {
+      x: finiteOr(machine.origin?.x, d.origin.x),
+      y: finiteOr(machine.origin?.y, d.origin.y),
+    },
+    tap_feed_mm_min: finiteOr(machine.tap_feed_mm_min, d.tap_feed_mm_min),
+  };
+  if (out.work_area.x_min >= out.work_area.x_max) {
+    out.work_area.x_min = d.work_area.x_min;
+    out.work_area.x_max = d.work_area.x_max;
+  }
+  if (out.work_area.y_min >= out.work_area.y_max) {
+    out.work_area.y_min = d.work_area.y_min;
+    out.work_area.y_max = d.work_area.y_max;
+  }
+  const maxFeed = Number(state.jog.caps?.max_xy_mm_min) || 1200;
+  out.tap_feed_mm_min = Math.max(1, Math.min(maxFeed, out.tap_feed_mm_min || d.tap_feed_mm_min));
+  return out;
+}
+
 function normalizeAxisSetting(axis, fallback) {
   axis = axis || {};
   const idx = Number.isInteger(axis.axis) ? axis.axis : fallback.axis;
@@ -464,6 +517,7 @@ function normalizeUISettings(ui) {
       autoscroll: ui.log?.autoscroll !== false,
     },
     gamepad: normalizeGamepadSettings(ui.gamepad, macroIDs),
+    machine: normalizeMachineSettings(ui.machine),
   };
 }
 
@@ -487,7 +541,9 @@ function applyUISettings(ui) {
   renderMacroButtons();
   renderMacroEditor();
   renderGamepadSettings();
+  renderMachineSettings();
   renderGcodeLog();
+  renderWorkArea();
 }
 
 function queueSaveUISettings() {
@@ -802,32 +858,28 @@ function renderJog() {
   const dead = document.getElementById("jog-deadman");
   dead.textContent = j.deadman ? "on" : "off";
   dead.className = j.deadman ? "on" : "";
-  document.getElementById("jog-axes").textContent =
-    `X ${j.axes.x.toFixed(2)} Y ${j.axes.y.toFixed(2)} Z ${j.axes.z.toFixed(2)}`;
-  document.getElementById("jog-buttons").textContent = pressedButtonList(j.buttons);
-  document.getElementById("jog-mpos").textContent = fmtPos(j.mpos, j.estimated);
-  document.getElementById("jog-wpos").textContent = fmtPos(j.wpos, j.estimated);
-  document.getElementById("jog-target-pos").textContent = fmtPos(j.target);
   const msg = jogPanelMessage();
   const msgEl = document.getElementById("jog-error");
   msgEl.textContent = msg.text;
   msgEl.className = msg.kind || "";
   const arm = document.getElementById("jog-arm");
-  arm.textContent = j.armed ? "Disarm Jog" : "Arm Jog";
+  arm.textContent = j.armPending ? (j.armPendingAction === "arm" ? "Arming..." : "Disarming...") : (j.armed ? "Disarm Tap Move" : "Arm Tap Move");
   arm.classList.toggle("armed", j.armed);
-  arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online";
-  const stepDistance = document.getElementById("jog-step-distance");
-  if (stepDistance) stepDistance.disabled = !j.caps || !j.caps.enabled || j.link !== "online" || !!j.stepPending;
-  const stepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.stepPending;
-  for (const btn of document.querySelectorAll("[data-jog-step-axis]")) {
-    btn.disabled = !stepReady;
+  arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online" || !!j.armPending;
+  const feed = document.getElementById("tap-feed-mm-min");
+  if (feed) {
+    const maxFeed = Number(j.caps?.max_xy_mm_min) || 1200;
+    feed.max = String(Math.round(maxFeed));
+    feed.disabled = !!j.targetPending;
   }
-  const stepFeedback = document.getElementById("jog-step-feedback");
-  if (stepFeedback) {
-    stepFeedback.textContent = j.stepFeedback || "";
-    stepFeedback.className = j.stepFeedbackKind || "";
+  const feedback = document.getElementById("tap-move-feedback");
+  if (feedback) {
+    feedback.textContent = j.tapFeedback || "";
+    feedback.className = "action-feedback " + (j.tapFeedbackKind || "");
   }
-  renderJogPlot();
+  const plot = document.getElementById("workarea-plot");
+  if (plot) plot.classList.toggle("not-armed", !j.armed);
+  renderWorkArea();
 }
 
 function jogPanelMessage() {
@@ -836,21 +888,21 @@ function jogPanelMessage() {
   if (j.link !== "online") {
     return { text: "Connecting to jog service...", kind: "" };
   }
-  if (!j.pad) {
-    return { text: "Arm jog to use step buttons. Connect a gamepad for continuous jog.", kind: "" };
-  }
   const deadmanButton = state.ui.gamepad.deadman_button;
   if (!j.armed && j.availability && !j.availability.available) {
     return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
   }
+  if (!j.pad) {
+    return { text: "Gamepad disconnected.", kind: "" };
+  }
   if (!j.armed) {
-    return { text: `Ready. Arm jog for step buttons, or hold button ${deadmanButton} and move an axis.`, kind: "ok" };
+    return { text: "Gamepad idle.", kind: "ok" };
   }
   if (!j.deadman) {
-    return { text: `Armed. Use step buttons, or hold deadman button ${deadmanButton} for gamepad motion.`, kind: "" };
+    return { text: `Armed. Deadman ${deadmanButton} released.`, kind: "" };
   }
   if (Math.abs(j.axes.x) < 0.12 && Math.abs(j.axes.y) < 0.12 && Math.abs(j.axes.z) < 0.12) {
-    return { text: "Armed. Move an axis while holding deadman.", kind: "ok" };
+    return { text: "Armed.", kind: "ok" };
   }
   return { text: "Jog input active.", kind: "ok" };
 }
@@ -878,55 +930,162 @@ function jogErrorText(err) {
   }
 }
 
-function pressedButtonList(buttons) {
-  const pressed = [];
-  for (let i = 0; i < buttons.length; i++) {
-    if (buttons[i]) pressed.push(i);
-  }
-  return pressed.length ? pressed.join(", ") : "-";
+const WORKAREA_PAD = 6;
+const WORKAREA_VIEW_SIZE = 100;
+
+function renderMachineSettings() {
+  const m = state.ui.machine || defaultMachineSettings();
+  setInputValue("machine-x-min", m.work_area.x_min);
+  setInputValue("machine-x-max", m.work_area.x_max);
+  setInputValue("machine-y-min", m.work_area.y_min);
+  setInputValue("machine-y-max", m.work_area.y_max);
+  setInputValue("machine-origin-x", m.origin.x);
+  setInputValue("machine-origin-y", m.origin.y);
+  setInputValue("tap-feed-mm-min", m.tap_feed_mm_min);
 }
 
-function renderJogPlot() {
-  const pts = state.jog.path;
-  const observed = state.jog.observed || state.jog.mpos;
-  const target = state.jog.target || observed;
-  const all = pts.concat([observed, target].filter(Boolean));
-  const pathEl = document.getElementById("jog-path");
-  if (!all.length) {
-    pathEl.setAttribute("points", "");
-    setPlotPoint("jog-observed", 50, 50);
-    setPlotPoint("jog-target", 50, 50);
+function setInputValue(id, value) {
+  const el = document.getElementById(id);
+  if (!el || el === document.activeElement) return;
+  el.value = Number.isFinite(value) ? String(value) : "";
+}
+
+function updateMachineSettings() {
+  const current = state.ui.machine || defaultMachineSettings();
+  const read = (id, fallback) => finiteOr(document.getElementById(id)?.value, fallback);
+  state.ui.machine = normalizeMachineSettings({
+    work_area: {
+      x_min: read("machine-x-min", current.work_area.x_min),
+      x_max: read("machine-x-max", current.work_area.x_max),
+      y_min: read("machine-y-min", current.work_area.y_min),
+      y_max: read("machine-y-max", current.work_area.y_max),
+    },
+    origin: {
+      x: read("machine-origin-x", current.origin.x),
+      y: read("machine-origin-y", current.origin.y),
+    },
+    tap_feed_mm_min: read("tap-feed-mm-min", current.tap_feed_mm_min),
+  });
+  queueSaveUISettings();
+  renderMachineSettings();
+  renderWorkArea();
+}
+
+function workAreaBounds() {
+  const m = normalizeMachineSettings(state.ui.machine);
+  return m.work_area;
+}
+
+function workAreaRect() {
+  const b = workAreaBounds();
+  const spanX = Math.max(1, b.x_max - b.x_min);
+  const spanY = Math.max(1, b.y_max - b.y_min);
+  const usable = WORKAREA_VIEW_SIZE - WORKAREA_PAD * 2;
+  if (spanX >= spanY) {
+    const height = usable * (spanY / spanX);
+    return { x: WORKAREA_PAD, y: WORKAREA_PAD + (usable - height) / 2, width: usable, height };
+  }
+  const width = usable * (spanX / spanY);
+  return { x: WORKAREA_PAD + (usable - width) / 2, y: WORKAREA_PAD, width, height: usable };
+}
+
+function machineToWorkAreaPoint(p) {
+  if (!p || !Number.isFinite(Number(p.x)) || !Number.isFinite(Number(p.y))) return null;
+  const b = workAreaBounds();
+  const r = workAreaRect();
+  const x = r.x + ((Number(p.x) - b.x_min) / (b.x_max - b.x_min)) * r.width;
+  const y = r.y + ((b.y_max - Number(p.y)) / (b.y_max - b.y_min)) * r.height;
+  return { x, y };
+}
+
+function workAreaToMachinePoint(p) {
+  const b = workAreaBounds();
+  const r = workAreaRect();
+  if (p.x < r.x || p.x > r.x + r.width || p.y < r.y || p.y > r.y + r.height) {
+    return null;
+  }
+  return {
+    x: b.x_min + ((p.x - r.x) / r.width) * (b.x_max - b.x_min),
+    y: b.y_max - ((p.y - r.y) / r.height) * (b.y_max - b.y_min),
+  };
+}
+
+function renderWorkArea() {
+  renderWorkAreaBoundary();
+  renderWorkAreaGrid();
+  renderWorkAreaOrigin();
+  const spindle = state.jog.observed || state.jog.mpos || state.machine.mpos;
+  const target = state.jog.target;
+  setWorkAreaMarker("workarea-spindle", spindle);
+  setWorkAreaMarker("workarea-target", target);
+}
+
+function renderWorkAreaBoundary() {
+  const boundary = document.getElementById("workarea-boundary");
+  if (!boundary) return;
+  const r = workAreaRect();
+  boundary.setAttribute("x", r.x.toFixed(2));
+  boundary.setAttribute("y", r.y.toFixed(2));
+  boundary.setAttribute("width", r.width.toFixed(2));
+  boundary.setAttribute("height", r.height.toFixed(2));
+}
+
+function renderWorkAreaGrid() {
+  const grid = document.getElementById("workarea-grid");
+  if (!grid) return;
+  const r = workAreaRect();
+  const lines = [];
+  for (let i = 1; i < 4; i++) {
+    const x = r.x + (r.width * i) / 4;
+    const y = r.y + (r.height * i) / 4;
+    lines.push(`<line x1="${x.toFixed(2)}" y1="${r.y.toFixed(2)}" x2="${x.toFixed(2)}" y2="${(r.y + r.height).toFixed(2)}"></line>`);
+    lines.push(`<line x1="${r.x.toFixed(2)}" y1="${y.toFixed(2)}" x2="${(r.x + r.width).toFixed(2)}" y2="${y.toFixed(2)}"></line>`);
+  }
+  grid.innerHTML = lines.join("");
+}
+
+function renderWorkAreaOrigin() {
+  const origin = state.ui.machine?.origin || defaultMachineSettings().origin;
+  const b = workAreaBounds();
+  const r = workAreaRect();
+  const vertical = document.getElementById("workarea-origin-y");
+  const horizontal = document.getElementById("workarea-origin-x");
+  if (vertical) {
+    if (origin.x >= b.x_min && origin.x <= b.x_max) {
+      const p = machineToWorkAreaPoint({ x: origin.x, y: b.y_min });
+      vertical.setAttribute("x1", p.x.toFixed(2));
+      vertical.setAttribute("x2", p.x.toFixed(2));
+      vertical.setAttribute("y1", r.y.toFixed(2));
+      vertical.setAttribute("y2", (r.y + r.height).toFixed(2));
+      vertical.removeAttribute("display");
+    } else {
+      vertical.setAttribute("display", "none");
+    }
+  }
+  if (horizontal) {
+    if (origin.y >= b.y_min && origin.y <= b.y_max) {
+      const p = machineToWorkAreaPoint({ x: b.x_min, y: origin.y });
+      horizontal.setAttribute("x1", r.x.toFixed(2));
+      horizontal.setAttribute("x2", (r.x + r.width).toFixed(2));
+      horizontal.setAttribute("y1", p.y.toFixed(2));
+      horizontal.setAttribute("y2", p.y.toFixed(2));
+      horizontal.removeAttribute("display");
+    } else {
+      horizontal.setAttribute("display", "none");
+    }
+  }
+}
+
+function setWorkAreaMarker(id, machinePoint) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const p = machineToWorkAreaPoint(machinePoint);
+  if (!p) {
+    el.setAttribute("display", "none");
     return;
   }
-  let minX = all[0].x, maxX = all[0].x, minY = all[0].y, maxY = all[0].y;
-  for (const p of all) {
-    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-  }
-  const span = Math.max(maxX - minX, maxY - minY, 1);
-  const map = (p) => ({
-    x: 10 + ((p.x - minX) / span) * 80,
-    y: 90 - ((p.y - minY) / span) * 80,
-  });
-  pathEl.setAttribute("points", pts.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y)).map((p) => {
-    const q = map(p);
-    return q.x.toFixed(2) + "," + q.y.toFixed(2);
-  }).join(" "));
-  if (observed) {
-    const p = map(observed);
-    setPlotPoint("jog-observed", p.x, p.y);
-  }
-  if (target) {
-    const p = map(target);
-    setPlotPoint("jog-target", p.x, p.y);
-  }
-}
-
-function setPlotPoint(id, x, y) {
-  const el = document.getElementById(id);
-  el.setAttribute("cx", x.toFixed(2));
-  el.setAttribute("cy", y.toFixed(2));
+  el.setAttribute("transform", `translate(${p.x.toFixed(2)} ${p.y.toFixed(2)})`);
+  el.removeAttribute("display");
 }
 
 function renderGamepadSettings() {
@@ -2744,10 +2903,12 @@ async function loadJogCapabilities() {
     const r = await request("/api/jog/capabilities");
     state.jog.caps = await r.json();
     state.jog.availability = state.jog.caps.availability || null;
+    state.ui.machine = normalizeMachineSettings(state.ui.machine);
   } catch (e) {
     state.jog.error = e.message;
     state.jog.errorCode = "";
   }
+  renderMachineSettings();
   renderJog();
 }
 
@@ -2784,10 +2945,16 @@ function connectJog() {
     state.jog.link = "offline";
     state.jog.armed = false;
     state.jog.sent.clear();
-    if (state.jog.stepPending) {
-      state.jog.stepPending = 0;
-      state.jog.stepFeedback = "Step failed: jog service disconnected.";
-      state.jog.stepFeedbackKind = "error";
+    if (state.jog.armPending) {
+      state.jog.armPending = 0;
+      state.jog.armPendingAction = "";
+      state.jog.tapFeedback = "Arm failed: jog service disconnected.";
+      state.jog.tapFeedbackKind = "error";
+    }
+    if (state.jog.targetPending) {
+      state.jog.targetPending = 0;
+      state.jog.tapFeedback = "Move failed: jog service disconnected.";
+      state.jog.tapFeedbackKind = "error";
     }
     renderJog();
     scheduleJogReconnect();
@@ -2846,44 +3013,80 @@ function sendJog(msg) {
   return msg.seq;
 }
 
-function jogStepDistance() {
-  const v = Number(document.getElementById("jog-step-distance")?.value);
-  return Number.isFinite(v) && v > 0 ? v : 1;
-}
-
-function jogStepLabel(axis, distance) {
-  const sign = distance > 0 ? "+" : "-";
-  return axis.toUpperCase() + sign + " " + Math.abs(distance).toFixed(Math.abs(distance) < 1 ? 1 : 0) + " mm";
-}
-
-function setJogStepFeedback(text, kind = "") {
-  state.jog.stepFeedback = text;
-  state.jog.stepFeedbackKind = kind;
+function setTapFeedback(text, kind = "") {
+  state.jog.tapFeedback = text;
+  state.jog.tapFeedbackKind = kind;
   renderJog();
 }
 
-function stepJog(axis, dir) {
+function toggleTapMoveArm() {
   if (state.jog.link !== "online") {
-    setJogStepFeedback("Jog service is not connected.", "error");
+    setTapFeedback("Jog service is not connected.", "error");
+    connectJog();
+    return;
+  }
+  if (state.jog.armPending) return;
+  const action = state.jog.armed ? "disarm" : "arm";
+  const seq = sendJog({ type: action });
+  if (!seq) {
+    setTapFeedback("Jog service is not connected.", "error");
+    return;
+  }
+  state.jog.armPending = seq;
+  state.jog.armPendingAction = action;
+  state.jog.tapFeedback = action === "arm" ? "Arming tap move..." : "Disarming tap move...";
+  state.jog.tapFeedbackKind = "";
+  renderJog();
+}
+
+function currentTapFeed() {
+  const maxFeed = Number(state.jog.caps?.max_xy_mm_min) || 1200;
+  const fallback = state.ui.machine?.tap_feed_mm_min || defaultMachineSettings().tap_feed_mm_min;
+  return Math.max(1, Math.min(maxFeed, finiteOr(document.getElementById("tap-feed-mm-min")?.value, fallback)));
+}
+
+function tapTargetLabel(target) {
+  return `X ${target.x.toFixed(1)} Y ${target.y.toFixed(1)}`;
+}
+
+function sendTapMove(target) {
+  if (state.jog.link !== "online") {
+    setTapFeedback("Jog service is not connected.", "error");
     connectJog();
     return;
   }
   if (!state.jog.armed) {
-    setJogStepFeedback("Arm jog before using step buttons.", "error");
+    setTapFeedback("Arm tap move before selecting a target.", "error");
     return;
   }
-  const distance = jogStepDistance() * dir;
-  const label = jogStepLabel(axis, distance);
-  const seq = sendJog({ type: "step", axis, distance });
+  const feed = currentTapFeed();
+  const label = tapTargetLabel(target);
+  const seq = sendJog({ type: "target", target: { x: target.x, y: target.y }, feed_mm_min: feed });
   if (!seq) {
-    setJogStepFeedback("Jog service is not connected.", "error");
+    setTapFeedback("Jog service is not connected.", "error");
     return;
   }
-  state.jog.stepPending = seq;
-  state.jog.stepLabel = label;
-  state.jog.stepFeedback = "Sending " + label + "...";
-  state.jog.stepFeedbackKind = "";
+  const base = state.jog.target || state.jog.observed || state.jog.mpos || state.machine.mpos || {};
+  state.jog.target = { ...base, x: target.x, y: target.y };
+  state.jog.targetPending = seq;
+  state.jog.targetLabel = label;
+  state.jog.tapFeedback = "Sending target " + label + "...";
+  state.jog.tapFeedbackKind = "";
   renderJog();
+}
+
+function handleWorkAreaClick(e) {
+  const svg = document.getElementById("workarea-plot");
+  if (!svg) return;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return;
+  const pt = svg.createSVGPoint();
+  pt.x = e.clientX;
+  pt.y = e.clientY;
+  const local = pt.matrixTransform(ctm.inverse());
+  const target = workAreaToMachinePoint(local);
+  if (!target) return;
+  sendTapMove(target);
 }
 
 function applyJogEvent(ev) {
@@ -2959,18 +3162,42 @@ function applyJogEvent(ev) {
       document.getElementById("jog-latency").textContent = Math.round(performance.now() - sent) + "ms";
       state.jog.sent.delete(ev.seq);
     }
-    if (ev.seq && ev.seq === state.jog.stepPending) {
-      state.jog.stepPending = 0;
-      state.jog.stepFeedback = "Step command sent: " + state.jog.stepLabel;
-      state.jog.stepFeedbackKind = "";
+    if (ev.seq && ev.seq === state.jog.armPending) {
+      const action = state.jog.armPendingAction;
+      state.jog.armPending = 0;
+      state.jog.armPendingAction = "";
+      state.jog.tapFeedback = action === "arm" ? "Tap move armed." : "Tap move disarmed.";
+      state.jog.tapFeedbackKind = "ok";
+    }
+    if (ev.seq && ev.seq === state.jog.targetPending) {
+      state.jog.targetPending = 0;
+      state.jog.tapFeedback = "Move command sent: " + state.jog.targetLabel;
+      state.jog.tapFeedbackKind = "";
     }
     state.jog.error = "";
     state.jog.errorCode = "";
   } else if (ev.type === "error") {
-    if (ev.seq && ev.seq === state.jog.stepPending) {
-      state.jog.stepPending = 0;
-      state.jog.stepFeedback = "Step failed: " + jogErrorText(ev.code || ev.message);
-      state.jog.stepFeedbackKind = "error";
+    if (ev.seq && ev.seq === state.jog.armPending) {
+      state.jog.armPending = 0;
+      state.jog.armPendingAction = "";
+      state.jog.tapFeedback = "Arm failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
+    if (ev.seq && ev.seq === state.jog.targetPending) {
+      state.jog.targetPending = 0;
+      state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
+    if (!ev.seq && state.jog.targetPending) {
+      state.jog.targetPending = 0;
+      state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
+    if (!ev.seq && state.jog.armPending) {
+      state.jog.armPending = 0;
+      state.jog.armPendingAction = "";
+      state.jog.tapFeedback = "Arm failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
     }
     state.jog.errorCode = ev.code || "";
     state.jog.error = ev.message || ev.code || "jog error";
@@ -3295,9 +3522,10 @@ function init() {
   document.getElementById("gamepad-slow-button-0").onchange = updateGamepadButtons;
   document.getElementById("gamepad-slow-button-1").onchange = updateGamepadButtons;
   document.getElementById("gamepad-add-macro").onclick = addGamepadMacroBinding;
-  for (const btn of document.querySelectorAll("[data-jog-step-axis]")) {
-    btn.onclick = () => stepJog(btn.dataset.jogStepAxis, Number(btn.dataset.jogStepDir) || 1);
+  for (const id of ["machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max", "machine-origin-x", "machine-origin-y", "tap-feed-mm-min"]) {
+    document.getElementById(id).onchange = updateMachineSettings;
   }
+  document.getElementById("workarea-plot").onclick = handleWorkAreaClick;
 
   document.getElementById("ctl-hold").onclick = () => sendControl("hold");
   document.getElementById("ctl-resume").onclick = () => sendControl("resume");
@@ -3315,7 +3543,7 @@ function init() {
   };
   bindDataControlButtons();
   initCommandPopouts();
-  document.getElementById("jog-arm").onclick = () => sendJog({ type: state.jog.armed ? "disarm" : "arm" });
+  document.getElementById("jog-arm").onclick = toggleTapMoveArm;
 
   loadUISettings();
   loadActiveGcode();

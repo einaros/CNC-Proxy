@@ -213,6 +213,8 @@ type command struct {
 	action   string
 	axis     string
 	distance float64
+	target   machine.AxisValues
+	feed     float64
 }
 
 type statusResult struct {
@@ -407,6 +409,11 @@ func (s *Session) Step(seq int64, axis string, distance float64) {
 	s.enqueue(command{typ: "step", seq: seq, axis: axis, distance: distance})
 }
 
+// Target requests one explicit XY move from an armed session.
+func (s *Session) Target(seq int64, target machine.AxisValues, feedMMMin float64) {
+	s.enqueue(command{typ: "target", seq: seq, target: copyAxes(target), feed: feedMMMin})
+}
+
 // ReportError emits a client-facing validation error.
 func (s *Session) ReportError(seq int64, code, msg string) {
 	s.emit(Event{Type: "error", Seq: seq, Code: code, Message: msg})
@@ -497,6 +504,8 @@ func (s *Session) handleCommand(cmd command) {
 		s.emitState(cmd.seq)
 	case "step":
 		s.handleStep(cmd.seq, cmd.axis, cmd.distance)
+	case "target":
+		s.handleTarget(cmd.seq, cmd.target, cmd.feed)
 	}
 }
 
@@ -520,10 +529,6 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 		s.emitState(seq)
 		return
 	}
-	if statusInFlight {
-		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before step jog."})
-		return
-	}
 	if !canContinueJog(st.State) {
 		if st.State == machine.Alarm {
 			s.logAlarmStatus(st)
@@ -535,6 +540,10 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	}
 	queuedLead := queueLead(now, queuedUntil)
 	if (len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(s.mgr.cfg)) && queuedLead == 0 {
+		if statusInFlight {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before step jog."})
+			return
+		}
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before step jog."})
 		s.requestStatus()
 		return
@@ -553,6 +562,101 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	target["z"] += delta.Z
 	dur := stepJogDuration(delta, s.mgr.cfg)
 	cmd := jogCommandForDuration(target, delta, s.mgr.cfg, dur)
+	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
+		s.failLease(CodeMachineError, err)
+		return
+	}
+	segStart := queuedUntil
+	if segStart.Before(now) {
+		segStart = now
+	}
+	segEnd := segStart.Add(dur)
+	queuedUntil = segEnd
+	queuedLead = queueLead(now, queuedUntil)
+	s.mu.Lock()
+	s.planned = target
+	s.queuedUntil = queuedUntil
+	s.segments = appendPlannedSegment(s.segments, plannedSegment{
+		start: segStart,
+		end:   segEnd,
+		from:  copyAxes(planned),
+		to:    copyAxes(target),
+	}, now)
+	s.lastMotionCmd = cmd
+	s.mu.Unlock()
+	s.logMotion(now, cmd)
+	s.emitMotionEstimate(now, st, target, delta, cmd, queuedLead)
+	s.emit(Event{Type: "ack", Seq: seq})
+}
+
+func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float64) {
+	x, okX := xy["x"]
+	y, okY := xy["y"]
+	if !okX || !okY || math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target requires finite x and y"})
+		return
+	}
+	cfg := s.mgr.cfg.normalize()
+	if math.IsNaN(feedMMMin) || math.IsInf(feedMMMin, 0) || feedMMMin <= 0 || feedMMMin > cfg.MaxXYMMMin {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: fmt.Sprintf("feed must be between 1 and %.0f mm/min", cfg.MaxXYMMMin)})
+		return
+	}
+	now := s.mgr.now()
+	s.mu.Lock()
+	lease := s.lease
+	st := s.lastStatus
+	lastStatusAt := s.lastStatusAt
+	planned := copyAxes(s.planned)
+	queuedUntil := s.queuedUntil
+	statusInFlight := s.statusInFlight
+	s.mu.Unlock()
+	if lease == nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm tap move before selecting a target"})
+		s.emitState(seq)
+		return
+	}
+	if !canContinueJog(st.State) {
+		if st.State == machine.Alarm {
+			s.logAlarmStatus(st)
+		}
+		s.release(nil)
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeNotIdle, Message: "machine left joggable state: " + stateLabel(st.State)})
+		s.emitState(seq)
+		return
+	}
+	queuedLead := queueLead(now, queuedUntil)
+	if queuedLead > jogLookahead(cfg) {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "tap move is already queued"})
+		return
+	}
+	if (len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(cfg)) && queuedLead == 0 {
+		if statusInFlight {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before tap move."})
+			return
+		}
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before tap move."})
+		s.requestStatus()
+		return
+	}
+	if planned == nil || queuedLead == 0 {
+		planned = copyAxes(st.MPos)
+	}
+	if planned == nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine position is unavailable"})
+		return
+	}
+
+	target := copyAxes(planned)
+	target["x"] = x
+	target["y"] = y
+	delta := Axes{X: target["x"] - planned["x"], Y: target["y"] - planned["y"]}
+	if delta.X == 0 && delta.Y == 0 {
+		s.emitMotionEstimate(now, st, target, delta, "", queuedLead)
+		s.emit(Event{Type: "ack", Seq: seq})
+		return
+	}
+	dur := targetJogDuration(delta, feedMMMin)
+	cmd := jogCommandForDuration(target, delta, cfg, dur)
 	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
 		s.failLease(CodeMachineError, err)
 		return
@@ -921,6 +1025,18 @@ func stepJogDuration(delta Axes, cfg Config) time.Duration {
 		}
 	}
 	d := time.Duration(mins * float64(time.Minute))
+	if d < minJogSegment {
+		return minJogSegment
+	}
+	return d
+}
+
+func targetJogDuration(delta Axes, feedMMMin float64) time.Duration {
+	xyDist := math.Hypot(delta.X, delta.Y)
+	if xyDist == 0 || feedMMMin <= 0 {
+		return minJogSegment
+	}
+	d := time.Duration((xyDist / feedMMMin) * float64(time.Minute))
 	if d < minJogSegment {
 		return minJogSegment
 	}

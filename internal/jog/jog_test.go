@@ -273,6 +273,39 @@ func TestJogEmitsMotionEventAndLog(t *testing.T) {
 	t.Fatalf("jog motion was not logged: %+v", log.Recent())
 }
 
+func TestJogTargetUsesFreshStatusWhileStatusPollInFlight(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.mu.Lock()
+	s.statusInFlight = true
+	s.mu.Unlock()
+	s.Target(2, machine.AxisValues{"x": 10, "y": -5}, 600)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range fm.Gcodes() {
+			if strings.Contains(line, "X10.0000") && strings.Contains(line, "Y-5.0000") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no target jog command observed: %v", fm.Gcodes())
+}
+
 func TestJogFastTickDoesNotFloodMotionEvents(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()

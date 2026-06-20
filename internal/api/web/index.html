@@ -218,32 +218,33 @@
   #gcode-log .src { color: var(--muted); }
   #gcode-form { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); background: var(--panel); }
   #gcode-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  #jog { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; align-items: start; }
-  .jog-summary { display: grid; grid-template-columns: auto repeat(4, minmax(110px, auto)); gap: 8px 14px; align-items: center; color: var(--muted); }
+  #jog, #gamepad-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; align-items: start; }
+  .tap-move-toolbar { display: grid; grid-template-columns: auto minmax(150px, 220px) minmax(180px, 1fr); gap: 8px; align-items: end; }
+  .tap-move-toolbar label, .machine-settings-grid label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+  .tap-move-toolbar label span, .machine-settings-grid label span { text-transform: uppercase; letter-spacing: .04em; }
+  #tap-feed-mm-min { width: 100%; }
+  #tap-move-feedback { align-self: center; }
+  .workarea-frame { width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  #workarea-plot { display: block; width: 100%; height: 100%; touch-action: manipulation; cursor: crosshair; background: #12171c; }
+  #workarea-plot.not-armed { cursor: default; }
+  #workarea-boundary { fill: rgba(87,166,214,.08); stroke: rgba(145,160,174,.65); stroke-width: .45; }
+  #workarea-grid line { stroke: rgba(145,160,174,.18); stroke-width: .25; }
+  #workarea-origin-x, #workarea-origin-y { stroke: rgba(217,154,58,.75); stroke-width: .45; stroke-dasharray: 2 1.2; }
+  #workarea-spindle-marker { fill: var(--ok); stroke: #12171c; stroke-width: .6; }
+  #workarea-spindle-cross { stroke: #12171c; stroke-width: .45; }
+  #workarea-target-marker { fill: none; stroke: var(--warn); stroke-width: .7; }
+  #workarea-target-cross { stroke: var(--warn); stroke-width: .45; }
+  #workarea-label { fill: var(--muted); font: 4px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #machine-settings .detail-body, #gamepad-settings .detail-body { gap: 12px; }
+  .machine-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+  .jog-summary { display: grid; grid-template-columns: repeat(4, minmax(110px, auto)); gap: 8px 14px; align-items: center; color: var(--muted); }
   .jog-summary span { min-width: 0; }
   .jog-summary b { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
-  .jog-step-controls { display: grid; grid-template-columns: minmax(150px, 190px) minmax(0, 1fr); gap: 8px; align-items: end; }
-  .jog-step-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
-  .jog-step-controls label span { text-transform: uppercase; letter-spacing: .04em; }
-  .jog-step-buttons { display: grid; grid-template-columns: repeat(6, minmax(56px, 1fr)); gap: 6px; }
-  .jog-step-buttons button { justify-content: center; }
-  #jog-step-feedback { grid-column: 1 / -1; min-height: 18px; color: var(--muted); }
-  #jog-step-feedback.error { color: var(--err); }
-  .jog-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 260px); gap: 10px; align-items: stretch; }
-  #jog .jog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; align-content: start; }
-  #jog .metric--primary { grid-column: span 2; }
-  .jog-plot-cell { padding: 0; overflow: hidden; min-height: 156px; }
-  #jog-plot { display: block; width: 100%; height: 100%; min-height: 156px; background: var(--panel-2); }
-  #jog-plot text { fill: var(--muted); font: 5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  #jog-path { fill: none; stroke: var(--accent); stroke-width: 1.3; }
-  #jog-observed { fill: var(--ok); }
-  #jog-target { fill: none; stroke: var(--warn); stroke-width: 1.5; }
   #jog-arm.armed { border-color: rgba(68,194,123,.55); color: var(--ok); }
   #jog-deadman.on { color: var(--ok); }
   #jog-error { color: var(--muted); min-height: 18px; }
   #jog-error.error { color: var(--err); }
   #jog-error.ok { color: var(--ok); }
-  #gamepad-settings .detail-body { gap: 12px; }
   .gamepad-axis-config, .gamepad-button-config { display: grid; gap: 10px; }
   .gamepad-axis-row { display: grid; grid-template-columns: 34px minmax(110px, 140px) minmax(96px, 120px) minmax(220px, 1fr); gap: 8px; align-items: end; }
   .gamepad-axis-row > span { color: var(--accent); font-weight: 650; }
@@ -299,7 +300,7 @@
   }
   @media (max-width: 760px) {
     #header-main { display: grid; gap: var(--gap-sm); }
-    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .jog-body { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #machine-status-toolbar { grid-template-columns: minmax(300px, 1.5fr) repeat(3, minmax(110px, .55fr)); }
     #command-toolbar { gap: var(--gap-sm); }
@@ -313,11 +314,8 @@
     .job, .run-row { grid-template-columns: 1fr; gap: 3px; }
     #alarm-panel { grid-template-columns: 1fr; }
     #alarm-actions { justify-content: stretch; }
-    .jog-step-controls { grid-template-columns: 1fr; }
-    .jog-step-buttons { grid-template-columns: repeat(3, minmax(64px, 1fr)); }
-    #jog .jog-grid { grid-template-columns: 1fr; }
-    #jog .metric--primary, .metric--wide { grid-column: auto; }
-    .jog-plot-cell, #jog-plot { min-height: 170px; }
+    .metric--wide { grid-column: auto; }
+    .workarea-frame { height: clamp(280px, 48vh, 460px); min-height: 280px; }
     #gcode-preview-wrap { height: clamp(260px, 48vh, 420px); min-height: 260px; }
     #file-browser { grid-template-columns: 1fr; }
     #folder-bar { align-items: stretch; display: grid; }
@@ -598,51 +596,52 @@
     <section class="page-section">
       <h2>Control</h2>
       <div id="jog">
+        <div class="tap-move-toolbar">
+          <button type="button" id="jog-arm">Arm Tap Move</button>
+          <label><span>Feed</span><input id="tap-feed-mm-min" type="number" min="1" step="10" inputmode="decimal"></label>
+          <div id="tap-move-feedback" class="action-feedback" aria-live="polite"></div>
+        </div>
+        <div class="workarea-frame">
+          <svg id="workarea-plot" class="not-armed" viewBox="0 0 100 100" role="img" aria-label="Machine work area">
+            <rect id="workarea-boundary" x="6" y="6" width="88" height="88"></rect>
+            <g id="workarea-grid"></g>
+            <line id="workarea-origin-x" x1="6" y1="94" x2="94" y2="94"></line>
+            <line id="workarea-origin-y" x1="94" y1="6" x2="94" y2="94"></line>
+            <g id="workarea-target" display="none">
+              <circle id="workarea-target-marker" cx="0" cy="0" r="2.5"></circle>
+              <path id="workarea-target-cross" d="M -4 0 L 4 0 M 0 -4 L 0 4"></path>
+            </g>
+            <g id="workarea-spindle" display="none">
+              <circle id="workarea-spindle-marker" cx="0" cy="0" r="2.2"></circle>
+              <path id="workarea-spindle-cross" d="M -3 0 L 3 0 M 0 -3 L 0 3"></path>
+            </g>
+            <text id="workarea-label" x="8" y="12">XY</text>
+          </svg>
+        </div>
+        <details id="machine-settings">
+          <summary>Machine Settings</summary>
+          <div class="detail-body">
+            <div class="machine-settings-grid">
+              <label><span>X Min</span><input id="machine-x-min" type="number" step="1" inputmode="decimal"></label>
+              <label><span>X Max</span><input id="machine-x-max" type="number" step="1" inputmode="decimal"></label>
+              <label><span>Y Min</span><input id="machine-y-min" type="number" step="1" inputmode="decimal"></label>
+              <label><span>Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
+              <label><span>Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
+              <label><span>Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="page-section">
+      <h2>Gamepad</h2>
+      <div id="gamepad-panel">
         <div class="jog-summary">
-          <button type="button" id="jog-arm">Arm Jog</button>
           <span>link: <b id="jog-link">-</b></span>
           <span>pad: <b id="jog-pad">-</b></span>
           <span>deadman: <b id="jog-deadman">off</b></span>
           <span>latency: <b id="jog-latency">-</b></span>
-        </div>
-        <div class="jog-step-controls">
-          <label><span>Step</span>
-            <select id="jog-step-distance">
-              <option value="0.1">0.1 mm</option>
-              <option value="0.5">0.5 mm</option>
-              <option value="1" selected>1 mm</option>
-              <option value="5">5 mm</option>
-              <option value="10">10 mm</option>
-            </select>
-          </label>
-          <div class="jog-step-buttons" aria-label="Step jog">
-            <button type="button" data-jog-step-axis="x" data-jog-step-dir="-1">X-</button>
-            <button type="button" data-jog-step-axis="x" data-jog-step-dir="1">X+</button>
-            <button type="button" data-jog-step-axis="y" data-jog-step-dir="-1">Y-</button>
-            <button type="button" data-jog-step-axis="y" data-jog-step-dir="1">Y+</button>
-            <button type="button" data-jog-step-axis="z" data-jog-step-dir="-1">Z-</button>
-            <button type="button" data-jog-step-axis="z" data-jog-step-dir="1">Z+</button>
-          </div>
-          <div id="jog-step-feedback" aria-live="polite"></div>
-        </div>
-        <div class="jog-body">
-          <div class="jog-grid">
-            <div class="metric metric--primary"><div class="label">Axes</div><div id="jog-axes" class="value">X 0.00 Y 0.00 Z 0.00</div></div>
-            <div class="metric metric--compact"><div class="label">Buttons</div><div id="jog-buttons" class="value">-</div></div>
-            <div class="metric metric--primary"><div class="label">MPos</div><div id="jog-mpos" class="value">-</div></div>
-            <div class="metric metric--primary"><div class="label">WPos</div><div id="jog-wpos" class="value">-</div></div>
-            <div class="metric metric--primary"><div class="label">Target</div><div id="jog-target-pos" class="value">-</div></div>
-          </div>
-          <div class="metric jog-plot-cell">
-            <svg id="jog-plot" viewBox="0 0 100 100" role="img" aria-label="Jog XY movement">
-              <line x1="50" y1="0" x2="50" y2="100" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
-              <line x1="0" y1="50" x2="100" y2="50" stroke="rgba(145,160,174,.25)" stroke-width=".5"></line>
-              <polyline id="jog-path" points=""></polyline>
-              <circle id="jog-observed" cx="50" cy="50" r="2"></circle>
-              <circle id="jog-target" cx="50" cy="50" r="3"></circle>
-              <text x="3" y="8">XY</text>
-            </svg>
-          </div>
         </div>
         <details id="gamepad-settings">
           <summary>Gamepad Settings</summary>
