@@ -3157,6 +3157,7 @@ function showTab(name) {
   const tabs = ["active-job", "gcode-console", "control", "files"];
   if (!tabs.includes(name)) name = "active-job";
   state.activeTab = name;
+  document.body.dataset.activeTab = name;
   for (const tab of tabs) {
     const view = document.getElementById(tab + "-view");
     if (view) view.hidden = tab !== name;
