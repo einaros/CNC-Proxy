@@ -57,6 +57,8 @@ const state = {
     armPendingAction: "",
     targetPending: 0,
     targetLabel: "",
+    zStepPending: 0,
+    zStepLabel: "",
     tapFeedback: "",
     tapFeedbackKind: "",
     error: "",
@@ -870,7 +872,13 @@ function renderJog() {
   if (feed) {
     const maxFeed = Number(j.caps?.max_xy_mm_min) || 1200;
     feed.max = String(Math.round(maxFeed));
-    feed.disabled = !!j.targetPending;
+    feed.disabled = !!j.targetPending || !!j.zStepPending;
+  }
+  const zStepDistance = document.getElementById("z-step-distance");
+  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending;
+  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending;
+  for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
+    btn.disabled = !zStepReady;
   }
   const feedback = document.getElementById("tap-move-feedback");
   if (feedback) {
@@ -2956,6 +2964,11 @@ function connectJog() {
       state.jog.tapFeedback = "Move failed: jog service disconnected.";
       state.jog.tapFeedbackKind = "error";
     }
+    if (state.jog.zStepPending) {
+      state.jog.zStepPending = 0;
+      state.jog.tapFeedback = "Z move failed: jog service disconnected.";
+      state.jog.tapFeedbackKind = "error";
+    }
     renderJog();
     scheduleJogReconnect();
   };
@@ -3075,6 +3088,43 @@ function sendTapMove(target) {
   renderJog();
 }
 
+function currentZStepDistance() {
+  const value = Number(document.getElementById("z-step-distance")?.value);
+  return [10, 1, 0.1, 0.01].includes(value) ? value : 1;
+}
+
+function zStepLabel(distance) {
+  const sign = distance > 0 ? "+" : "-";
+  const abs = Math.abs(distance);
+  const text = abs >= 1 ? abs.toFixed(0) : (abs >= 0.1 ? abs.toFixed(1) : abs.toFixed(2));
+  return "Z" + sign + " " + text + " mm";
+}
+
+function stepZ(dir) {
+  if (state.jog.link !== "online") {
+    setTapFeedback("Jog service is not connected.", "error");
+    connectJog();
+    return;
+  }
+  if (!state.jog.armed) {
+    setTapFeedback("Arm tap move before moving Z.", "error");
+    return;
+  }
+  if (state.jog.targetPending || state.jog.zStepPending) return;
+  const distance = currentZStepDistance() * dir;
+  const label = zStepLabel(distance);
+  const seq = sendJog({ type: "step", axis: "z", distance });
+  if (!seq) {
+    setTapFeedback("Jog service is not connected.", "error");
+    return;
+  }
+  state.jog.zStepPending = seq;
+  state.jog.zStepLabel = label;
+  state.jog.tapFeedback = "Sending " + label + "...";
+  state.jog.tapFeedbackKind = "";
+  renderJog();
+}
+
 function handleWorkAreaClick(e) {
   const svg = document.getElementById("workarea-plot");
   if (!svg) return;
@@ -3174,6 +3224,11 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = "Move command sent: " + state.jog.targetLabel;
       state.jog.tapFeedbackKind = "";
     }
+    if (ev.seq && ev.seq === state.jog.zStepPending) {
+      state.jog.zStepPending = 0;
+      state.jog.tapFeedback = "Z move sent: " + state.jog.zStepLabel;
+      state.jog.tapFeedbackKind = "";
+    }
     state.jog.error = "";
     state.jog.errorCode = "";
   } else if (ev.type === "error") {
@@ -3188,9 +3243,19 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
+    if (ev.seq && ev.seq === state.jog.zStepPending) {
+      state.jog.zStepPending = 0;
+      state.jog.tapFeedback = "Z move failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
     if (!ev.seq && state.jog.targetPending) {
       state.jog.targetPending = 0;
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
+    if (!ev.seq && state.jog.zStepPending) {
+      state.jog.zStepPending = 0;
+      state.jog.tapFeedback = "Z move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
     if (!ev.seq && state.jog.armPending) {
@@ -3524,6 +3589,9 @@ function init() {
   document.getElementById("gamepad-add-macro").onclick = addGamepadMacroBinding;
   for (const id of ["machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max", "machine-origin-x", "machine-origin-y", "tap-feed-mm-min"]) {
     document.getElementById(id).onchange = updateMachineSettings;
+  }
+  for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
+    btn.onclick = () => stepZ(Number(btn.dataset.zStepDir) || 1);
   }
   document.getElementById("workarea-plot").onclick = handleWorkAreaClick;
 

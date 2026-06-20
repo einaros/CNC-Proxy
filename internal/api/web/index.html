@@ -224,9 +224,15 @@
   .tap-move-toolbar label span, .machine-settings-grid label span { text-transform: uppercase; letter-spacing: .04em; }
   #tap-feed-mm-min { width: 100%; }
   #tap-move-feedback { align-self: center; }
+  .tap-move-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(74px, 92px); gap: 10px; align-items: stretch; }
   .workarea-frame { width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #workarea-plot { display: block; width: 100%; height: 100%; touch-action: manipulation; cursor: crosshair; background: #12171c; }
   #workarea-plot.not-armed { cursor: default; }
+  .z-step-controls { display: grid; grid-template-rows: minmax(68px, 1fr) auto minmax(68px, 1fr); gap: 8px; align-items: stretch; }
+  .z-step-controls button { justify-content: center; min-height: 68px; font-size: 16px; font-weight: 650; }
+  .z-step-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+  .z-step-controls label span { text-transform: uppercase; letter-spacing: .04em; text-align: center; }
+  #z-step-distance { width: 100%; }
   #workarea-boundary { fill: rgba(87,166,214,.08); stroke: rgba(145,160,174,.65); stroke-width: .45; }
   #workarea-grid line { stroke: rgba(145,160,174,.18); stroke-width: .25; }
   #workarea-origin-x, #workarea-origin-y { stroke: rgba(217,154,58,.75); stroke-width: .45; stroke-dasharray: 2 1.2; }
@@ -300,7 +306,7 @@
   }
   @media (max-width: 760px) {
     #header-main { display: grid; gap: var(--gap-sm); }
-    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-move-body { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #machine-status-toolbar { grid-template-columns: minmax(300px, 1.5fr) repeat(3, minmax(110px, .55fr)); }
     #command-toolbar { gap: var(--gap-sm); }
@@ -316,6 +322,8 @@
     #alarm-actions { justify-content: stretch; }
     .metric--wide { grid-column: auto; }
     .workarea-frame { height: clamp(280px, 48vh, 460px); min-height: 280px; }
+    .z-step-controls { grid-template-columns: 1fr auto 1fr; grid-template-rows: auto; }
+    .z-step-controls button { min-height: 48px; }
     #gcode-preview-wrap { height: clamp(260px, 48vh, 420px); min-height: 260px; }
     #file-browser { grid-template-columns: 1fr; }
     #folder-bar { align-items: stretch; display: grid; }
@@ -601,22 +609,36 @@
           <label><span>Feed</span><input id="tap-feed-mm-min" type="number" min="1" step="10" inputmode="decimal"></label>
           <div id="tap-move-feedback" class="action-feedback" aria-live="polite"></div>
         </div>
-        <div class="workarea-frame">
-          <svg id="workarea-plot" class="not-armed" viewBox="0 0 100 100" role="img" aria-label="Machine work area">
-            <rect id="workarea-boundary" x="6" y="6" width="88" height="88"></rect>
-            <g id="workarea-grid"></g>
-            <line id="workarea-origin-x" x1="6" y1="94" x2="94" y2="94"></line>
-            <line id="workarea-origin-y" x1="94" y1="6" x2="94" y2="94"></line>
-            <g id="workarea-target" display="none">
-              <circle id="workarea-target-marker" cx="0" cy="0" r="2.5"></circle>
-              <path id="workarea-target-cross" d="M -4 0 L 4 0 M 0 -4 L 0 4"></path>
-            </g>
-            <g id="workarea-spindle" display="none">
-              <circle id="workarea-spindle-marker" cx="0" cy="0" r="2.2"></circle>
-              <path id="workarea-spindle-cross" d="M -3 0 L 3 0 M 0 -3 L 0 3"></path>
-            </g>
-            <text id="workarea-label" x="8" y="12">XY</text>
-          </svg>
+        <div class="tap-move-body">
+          <div class="workarea-frame">
+            <svg id="workarea-plot" class="not-armed" viewBox="0 0 100 100" role="img" aria-label="Machine work area">
+              <rect id="workarea-boundary" x="6" y="6" width="88" height="88"></rect>
+              <g id="workarea-grid"></g>
+              <line id="workarea-origin-x" x1="6" y1="94" x2="94" y2="94"></line>
+              <line id="workarea-origin-y" x1="94" y1="6" x2="94" y2="94"></line>
+              <g id="workarea-target" display="none">
+                <circle id="workarea-target-marker" cx="0" cy="0" r="2.5"></circle>
+                <path id="workarea-target-cross" d="M -4 0 L 4 0 M 0 -4 L 0 4"></path>
+              </g>
+              <g id="workarea-spindle" display="none">
+                <circle id="workarea-spindle-marker" cx="0" cy="0" r="2.2"></circle>
+                <path id="workarea-spindle-cross" d="M -3 0 L 3 0 M 0 -3 L 0 3"></path>
+              </g>
+              <text id="workarea-label" x="8" y="12">XY</text>
+            </svg>
+          </div>
+          <div class="z-step-controls" aria-label="Z movement">
+            <button type="button" data-z-step-dir="1">Z+</button>
+            <label><span>Step</span>
+              <select id="z-step-distance">
+                <option value="10">10</option>
+                <option value="1" selected>1</option>
+                <option value="0.1">0.1</option>
+                <option value="0.01">0.01</option>
+              </select>
+            </label>
+            <button type="button" data-z-step-dir="-1">Z-</button>
+          </div>
         </div>
         <details id="machine-settings">
           <summary>Machine Settings</summary>
