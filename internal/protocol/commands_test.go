@@ -5,7 +5,7 @@ import "testing"
 func TestIsStatusQuery(t *testing.T) {
 	queries := []string{
 		"M114", "m114", "M114.1", "  M115 ", "M119", "M105",
-		"version", "VERSION", "ftype", "model", "diagnose",
+		"version", "VERSION", "ftype", "model", "diagnose", "progress",
 		"$", "$$", "$G", "$g", "$#", "$I", "$N",
 	}
 	for _, q := range queries {
@@ -40,6 +40,7 @@ func TestClassifyGcode(t *testing.T) {
 		{"M119", ReplyExpected, false},
 		{"M105", ReplyExpected, false},
 		{"version", ReplyExpected, false},
+		{"progress", ReplyExpected, false},
 		{"$#", ReplyExpected, false},
 		{"$G", ReplyExpected, false},
 		{"N10 M114", ReplyExpected, false}, // leading line number stripped

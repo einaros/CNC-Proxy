@@ -69,11 +69,16 @@ type Service struct {
 	runHistory *runhistory.History
 
 	// activeGcode is the web/API-selected file and cached preview. This mirrors
-	// the controller's selected_remote_filename concept and is intentionally
-	// proxy-local state; the machine is only touched when RunActiveGcode sends
-	// the controller-compatible play command.
+	// the controller's selected_remote_filename concept, with one firmware-backed
+	// recovery path: while a file is actually running, the firmware's read-only
+	// progress command exposes the current player filename.
 	activeMu    sync.Mutex
 	activeGcode activeGcodeState
+
+	activeProbeMu       sync.Mutex
+	activeProbeInFlight bool
+	activeProbeLast     time.Time
+	activeProbeLoaded   bool
 
 	// commitMu makes a mutation's "publish to cache + update catalog + enqueue
 	// job" sequence atomic across concurrent callers, so the cache file, the
@@ -112,11 +117,13 @@ func (s *Service) ClearRunHistory() { s.runHistory.Clear() }
 func (s *Service) startRunHistoryObservers() {
 	if st, _ := s.arb.Tracker().Current(); !st.ObservedAt.IsZero() {
 		s.runHistory.ObserveStatus(st)
+		s.maybeLoadActiveGcodeFromMachine(st)
 	}
 	statusCh, _ := s.arb.Tracker().Subscribe()
 	go func() {
 		for st := range statusCh {
 			s.runHistory.ObserveStatus(st)
+			s.maybeLoadActiveGcodeFromMachine(st)
 		}
 	}()
 	gcodeCh, _ := s.gcodeLog.Subscribe()

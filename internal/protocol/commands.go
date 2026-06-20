@@ -183,6 +183,7 @@ var replyQueries = map[string]bool{
 	"m503":    true, // display live settings — pure read (M500 saves; not here)
 	"version": true, "model": true, "ftype": true,
 	"time": true, "echo": true, "mem": true, "diagnose": true,
+	"progress": true,
 }
 
 // dollarQueries are the read-only grbl '$' commands. '$H' (home) and '$X'

@@ -839,6 +839,72 @@ func TestActiveGcodeSelectionPersistsAcrossServiceRestart(t *testing.T) {
 	}
 }
 
+func TestParseMachineProgressGcodePath(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want string
+		ok   bool
+	}{
+		{
+			name: "running file",
+			out:  "file: /sd/gcodes/my part.nc, 42 % complete, elapsed time: 00:01:02",
+			want: "/sd/gcodes/my part.nc",
+			ok:   true,
+		},
+		{
+			name: "escaped filename",
+			out:  "file: /sd/gcodes/my\x01part.nc, 1 % complete, elapsed time: 00:00:01",
+			want: "/sd/gcodes/my part.nc",
+			ok:   true,
+		},
+		{
+			name: "not playing",
+			out:  "Not currently playing",
+			ok:   false,
+		},
+		{
+			name: "outside gcode root",
+			out:  "file: /sd/config.txt, 50 % complete, elapsed time: 00:00:10",
+			ok:   false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseMachineProgressGcodePath(c.out)
+			if ok != c.ok || got != c.want {
+				t.Fatalf("parseMachineProgressGcodePath(%q) = %q, %v; want %q, %v", c.out, got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+func TestActiveGcodeLoadsRunningFileFromFirmwareProgress(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	const runningPath = "/sd/gcodes/running part.nc"
+	m.SetGcodeReply("progress", "file: "+runningPath+", 42 % complete, elapsed time: 00:01:02")
+
+	if !tr.ObserveStatusPayload("<Run|MPos:0,0,0|WPos:0,0,0|P:1,42,62>") {
+		t.Fatal("status payload was not accepted")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := svc.store.ActiveGcodePath(); got == runningPath {
+			active := svc.ActiveGcode()
+			if active.Path != runningPath || active.Entry == nil || active.Entry.Sync != store.RemoteOnly || !active.Runnable {
+				t.Fatalf("active = %+v, want remote-only running path", active)
+			}
+			if active.Entry.CachePath != "" || active.Preview != nil {
+				t.Fatalf("active unexpectedly loaded cache/preview: %+v", active)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("active gcode path = %q, want %q", svc.store.ActiveGcodePath(), runningPath)
+}
+
 func TestParseGcodePreviewCoversCarveraMotionModes(t *testing.T) {
 	gcode := strings.Join([]string{
 		"G21 G90 G17",

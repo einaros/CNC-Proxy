@@ -13,6 +13,7 @@ import (
 
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
+	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
@@ -21,6 +22,8 @@ const (
 	maxPreviewSegments = 1000000
 	previewArcSegment  = 0.5
 	previewArcError    = 0.01
+
+	activeGcodeProbeInterval = 5 * time.Second
 )
 
 type activeGcodeState struct {
@@ -184,6 +187,119 @@ func (s *Service) activeGcodeSnapshot(active activeGcodeState, entry store.Entry
 		Message:   message,
 		UpdatedAt: active.SelectedAt,
 	}
+}
+
+func (s *Service) maybeLoadActiveGcodeFromMachine(st machine.Status) {
+	// Ignore synthetic state-only observations used by tests. Real machine status
+	// comes through ParseStatusPayload and keeps Raw populated.
+	if st.Raw == "" {
+		return
+	}
+	if !stateMayReportActiveGcode(st.State) {
+		s.activeProbeMu.Lock()
+		s.activeProbeLoaded = false
+		s.activeProbeLast = time.Time{}
+		s.activeProbeMu.Unlock()
+		return
+	}
+	if len(st.Progress) < 3 {
+		return
+	}
+
+	now := time.Now()
+	s.activeProbeMu.Lock()
+	if s.activeProbeLoaded || s.activeProbeInFlight || (!s.activeProbeLast.IsZero() && now.Sub(s.activeProbeLast) < activeGcodeProbeInterval) {
+		s.activeProbeMu.Unlock()
+		return
+	}
+	s.activeProbeInFlight = true
+	s.activeProbeLast = now
+	s.activeProbeMu.Unlock()
+
+	go s.loadActiveGcodeFromMachineProgress()
+}
+
+func stateMayReportActiveGcode(st machine.State) bool {
+	switch st {
+	case machine.Run, machine.Hold, machine.Pause, machine.Wait, machine.Tool:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) loadActiveGcodeFromMachineProgress() {
+	loaded := false
+	defer func() {
+		s.activeProbeMu.Lock()
+		s.activeProbeInFlight = false
+		if loaded {
+			s.activeProbeLoaded = true
+		}
+		s.activeProbeMu.Unlock()
+	}()
+
+	remote, ok, err := s.queryMachineActiveGcode()
+	if err != nil || !ok {
+		return
+	}
+	if err := s.setMachineReportedActiveGcode(remote); err != nil {
+		return
+	}
+	loaded = true
+}
+
+func (s *Service) queryMachineActiveGcode() (string, bool, error) {
+	var out string
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		o, e := c.SendConsoleCommand("progress\n", client.GcodeOpts{
+			ExpectReply: true,
+			Cap:         gcodeReplyCap,
+		})
+		out = o
+		return e
+	})
+	if err != nil {
+		return "", false, err
+	}
+	remote, ok := parseMachineProgressGcodePath(out)
+	return remote, ok, nil
+}
+
+func parseMachineProgressGcodePath(out string) (string, bool) {
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(protocol.Unescape(scanner.Text()))
+		if len(line) < len("file: ") || !strings.EqualFold(line[:len("file: ")], "file: ") {
+			continue
+		}
+		rest := strings.TrimSpace(line[len("file: "):])
+		name, _, _ := strings.Cut(rest, ",")
+		remote, err := normalizeRemote(strings.TrimSpace(name))
+		if err != nil {
+			return "", false
+		}
+		return remote, true
+	}
+	return "", false
+}
+
+func (s *Service) setMachineReportedActiveGcode(remotePath string) error {
+	remote, err := normalizeRemote(remotePath)
+	if err != nil {
+		return err
+	}
+	return s.store.Batch(func(b *store.Batch) error {
+		if _, ok := b.GetEntry(remote); !ok {
+			b.PutEntry(store.Entry{
+				Path:       remote,
+				Sync:       store.RemoteOnly,
+				CacheState: store.CacheNone,
+			})
+		}
+		b.SetActiveGcodePath(remote)
+		return nil
+	})
 }
 
 func runnableGcode(entry store.Entry) (bool, string) {
