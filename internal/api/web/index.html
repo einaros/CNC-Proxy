@@ -66,9 +66,11 @@
   .status-item.error { border-color: rgba(232,106,95,.5); color: var(--err); }
   .status-item.error .status-dot { background: var(--err); }
   #notice-clear { flex: 0 0 auto; }
-  .tabs { display: flex; gap: 6px; margin: 0; border-bottom: 1px solid var(--border); }
-  .tab { border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; padding: 7px 12px; }
-  .tab.active { color: var(--accent); border-color: var(--accent); background: var(--panel); }
+  .tabs { display: flex; gap: 4px; margin: 0 0 var(--gap-md); padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { flex: 0 0 auto; min-height: 34px; border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
+  .tab:hover { border-color: rgba(87,166,214,.45); color: var(--text); }
+  .tab.active { color: var(--text); border-color: rgba(87,166,214,.55); background: var(--panel-2); }
   .view { display: grid; gap: var(--gap-xl); }
   .view[hidden] { display: none; }
   .page-section { display: grid; gap: var(--gap-sm); min-width: 0; }
@@ -326,7 +328,7 @@
     header { padding-inline: 10px; }
     #command-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
     .command-popout > summary, #command-toolbar > #ctl-halt { padding-inline: 9px; }
-    .tabs { overflow-x: auto; padding-bottom: 1px; }
+    .tabs { margin-bottom: var(--gap-sm); }
     .tab { flex: 1 0 auto; }
     #log-tools, .log-left, .log-right, #gcode-form { display: grid; grid-template-columns: 1fr; align-items: stretch; }
     .log-left label { justify-content: start; }
