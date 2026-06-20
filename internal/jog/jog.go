@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,7 @@ const (
 	motionLogGap       = time.Second
 	motionEventGap     = 33 * time.Millisecond
 	statusWaitGap      = 500 * time.Millisecond
+	maxManualStepMM    = 50.0
 )
 
 // Config controls the jog engine.
@@ -206,9 +208,11 @@ type MotionEvent struct {
 }
 
 type command struct {
-	typ    string
-	seq    int64
-	action string
+	typ      string
+	seq      int64
+	action   string
+	axis     string
+	distance float64
 }
 
 type statusResult struct {
@@ -398,6 +402,11 @@ func (s *Session) Control(seq int64, action string) {
 	s.enqueue(command{typ: "control", seq: seq, action: action})
 }
 
+// Step requests one explicit axis jog from an armed session.
+func (s *Session) Step(seq int64, axis string, distance float64) {
+	s.enqueue(command{typ: "step", seq: seq, axis: axis, distance: distance})
+}
+
 // ReportError emits a client-facing validation error.
 func (s *Session) ReportError(seq int64, code, msg string) {
 	s.emit(Event{Type: "error", Seq: seq, Code: code, Message: msg})
@@ -486,7 +495,89 @@ func (s *Session) handleCommand(cmd command) {
 		}
 		s.emit(Event{Type: "ack", Seq: cmd.seq})
 		s.emitState(cmd.seq)
+	case "step":
+		s.handleStep(cmd.seq, cmd.axis, cmd.distance)
 	}
+}
+
+func (s *Session) handleStep(seq int64, axis string, distance float64) {
+	delta, err := stepDelta(axis, distance)
+	if err != nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: err.Error()})
+		return
+	}
+	now := s.mgr.now()
+	s.mu.Lock()
+	lease := s.lease
+	st := s.lastStatus
+	lastStatusAt := s.lastStatusAt
+	planned := copyAxes(s.planned)
+	queuedUntil := s.queuedUntil
+	statusInFlight := s.statusInFlight
+	s.mu.Unlock()
+	if lease == nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm jog before using step buttons"})
+		s.emitState(seq)
+		return
+	}
+	if statusInFlight {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before step jog."})
+		return
+	}
+	if !canContinueJog(st.State) {
+		if st.State == machine.Alarm {
+			s.logAlarmStatus(st)
+		}
+		s.release(nil)
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeNotIdle, Message: "machine left joggable state: " + stateLabel(st.State)})
+		s.emitState(seq)
+		return
+	}
+	queuedLead := queueLead(now, queuedUntil)
+	if (len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(s.mgr.cfg)) && queuedLead == 0 {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before step jog."})
+		s.requestStatus()
+		return
+	}
+	if planned == nil || queuedLead == 0 {
+		planned = copyAxes(st.MPos)
+	}
+	if planned == nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine position is unavailable"})
+		return
+	}
+
+	target := copyAxes(planned)
+	target["x"] += delta.X
+	target["y"] += delta.Y
+	target["z"] += delta.Z
+	dur := stepJogDuration(delta, s.mgr.cfg)
+	cmd := jogCommandForDuration(target, delta, s.mgr.cfg, dur)
+	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
+		s.failLease(CodeMachineError, err)
+		return
+	}
+	segStart := queuedUntil
+	if segStart.Before(now) {
+		segStart = now
+	}
+	segEnd := segStart.Add(dur)
+	queuedUntil = segEnd
+	queuedLead = queueLead(now, queuedUntil)
+	s.mu.Lock()
+	s.planned = target
+	s.queuedUntil = queuedUntil
+	s.segments = appendPlannedSegment(s.segments, plannedSegment{
+		start: segStart,
+		end:   segEnd,
+		from:  copyAxes(planned),
+		to:    copyAxes(target),
+	}, now)
+	s.lastMotionCmd = cmd
+	s.mu.Unlock()
+	s.logMotion(now, cmd)
+	s.emitMotionEstimate(now, st, target, delta, cmd, queuedLead)
+	s.emit(Event{Type: "ack", Seq: seq})
 }
 
 func (s *Session) handleArm(seq int64) {
@@ -792,6 +883,48 @@ func normalizeForDuration(axes Axes, slow bool, cfg Config, d time.Duration) Axe
 		Y: y * cfg.MaxXYMMMin * dtMin * scale,
 		Z: z * cfg.MaxZMMMin * dtMin * scale,
 	}
+}
+
+func stepDelta(axis string, distance float64) (Axes, error) {
+	axis = strings.ToLower(strings.TrimSpace(axis))
+	if axis != "x" && axis != "y" && axis != "z" {
+		return Axes{}, fmt.Errorf("axis must be one of: x, y, z")
+	}
+	if math.IsNaN(distance) || math.IsInf(distance, 0) || distance == 0 {
+		return Axes{}, fmt.Errorf("distance must be non-zero")
+	}
+	if math.Abs(distance) > maxManualStepMM {
+		return Axes{}, fmt.Errorf("distance must be between %.1f and %.1f mm", -maxManualStepMM, maxManualStepMM)
+	}
+	switch axis {
+	case "x":
+		return Axes{X: distance}, nil
+	case "y":
+		return Axes{Y: distance}, nil
+	default:
+		return Axes{Z: distance}, nil
+	}
+}
+
+func stepJogDuration(delta Axes, cfg Config) time.Duration {
+	cfg = cfg.normalize()
+	xyDist := math.Hypot(delta.X, delta.Y)
+	zDist := math.Abs(delta.Z)
+	mins := 0.0
+	if xyDist > 0 && cfg.MaxXYMMMin > 0 {
+		mins = xyDist / cfg.MaxXYMMMin
+	}
+	if zDist > 0 && cfg.MaxZMMMin > 0 {
+		zMins := zDist / cfg.MaxZMMMin
+		if zMins > mins {
+			mins = zMins
+		}
+	}
+	d := time.Duration(mins * float64(time.Minute))
+	if d < minJogSegment {
+		return minJogSegment
+	}
+	return d
 }
 
 func response(v float64) float64 {

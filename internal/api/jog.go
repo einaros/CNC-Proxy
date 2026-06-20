@@ -24,12 +24,14 @@ func (s *Server) getJogCapabilities(w http.ResponseWriter, r *http.Request) {
 }
 
 type jogClientMessage struct {
-	Type    string             `json:"type"`
-	Seq     int64              `json:"seq"`
-	Deadman bool               `json:"deadman"`
-	Axes    map[string]float64 `json:"axes"`
-	Slow    bool               `json:"slow"`
-	Action  string             `json:"action"`
+	Type     string             `json:"type"`
+	Seq      int64              `json:"seq"`
+	Deadman  bool               `json:"deadman"`
+	Axes     map[string]float64 `json:"axes"`
+	Slow     bool               `json:"slow"`
+	Action   string             `json:"action"`
+	Axis     string             `json:"axis"`
+	Distance float64            `json:"distance"`
 }
 
 func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
@@ -94,8 +96,10 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			sess.SetInput(jog.Input{Seq: msg.Seq, Axes: axes, Deadman: msg.Deadman, Slow: msg.Slow})
+		case "step":
+			sess.Step(msg.Seq, msg.Axis, msg.Distance)
 		default:
-			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, control, disarm")
+			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, step, control, disarm")
 		}
 	}
 }

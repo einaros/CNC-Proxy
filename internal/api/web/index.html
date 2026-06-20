@@ -49,7 +49,6 @@
   .command-popout[open] .command-panel { opacity: 1; transform: translateY(0); }
   .command-panel::before { content: ""; position: absolute; top: -6px; left: var(--command-panel-arrow-left, 24px); width: 10px; height: 10px; background: #1a2022; border-left: 1px solid var(--border); border-top: 1px solid var(--border); transform: rotate(45deg); }
   .command-panel-compact { --command-panel-pref-width: 360px; }
-  .command-panel-gcode { --command-panel-pref-width: 520px; }
   .command-panel-tool { --command-panel-pref-width: 400px; }
   .command-panel-wide { --command-panel-pref-width: 760px; }
   .command-group { display: flex; flex-wrap: wrap; gap: var(--gap-xs); align-items: center; }
@@ -139,6 +138,8 @@
   .job-error { color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
   .job-recovery { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   #run-history { background: var(--panel); border: 1px solid var(--border); }
+  #run-history-panel .detail-body { gap: 8px; }
+  .run-history-actions { display: flex; justify-content: flex-end; }
   .run-row { display: grid; grid-template-columns: minmax(180px, 1fr) 120px 120px minmax(220px, 1.4fr); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
   .run-row:last-child { border-bottom: 0; }
   .run-title { font-weight: 650; overflow-wrap: anywhere; }
@@ -184,14 +185,13 @@
   #gcode-timeline-row { grid-area: 2 / 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: rgba(25,31,37,.92); }
   #gcode-timeline-label { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
   #console { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  #quick-commands, #machine-controls, #macro-toolbar, #log-tools, #gcode-history, #macro-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  #machine-controls, #macro-toolbar, #log-tools, #macro-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   #machine-controls { align-items: stretch; }
-  #machine-controls button, #quick-commands button { flex: 1 1 96px; }
-  #quick-commands, #macro-toolbar, #macro-panel { min-height: 32px; }
+  #machine-controls button { flex: 1 1 96px; }
+  #macro-toolbar, #macro-panel { min-height: 32px; }
   #log-tools { padding: 8px; border-bottom: 1px solid var(--border); }
   #log-tools { justify-content: space-between; }
   #log-tools label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); }
-  #gcode-history { min-height: 32px; }
   .chip { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .macro-button { border-color: rgba(87,166,214,.35); }
   .macro-button.panel { min-width: 120px; justify-content: center; }
@@ -211,12 +211,19 @@
   #gcode-log .recv { color: var(--text); }
   #gcode-log .recv.err-line { color: var(--err); }
   #gcode-log .src { color: var(--muted); }
-  #gcode-form { display: flex; gap: 8px; padding: 0; border: 0; }
+  #gcode-form { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
   #gcode-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #jog { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; align-items: start; }
   .jog-summary { display: grid; grid-template-columns: auto repeat(4, minmax(110px, auto)); gap: 8px 14px; align-items: center; color: var(--muted); }
   .jog-summary span { min-width: 0; }
   .jog-summary b { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .jog-step-controls { display: grid; grid-template-columns: minmax(150px, 190px) minmax(0, 1fr); gap: 8px; align-items: end; }
+  .jog-step-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+  .jog-step-controls label span { text-transform: uppercase; letter-spacing: .04em; }
+  .jog-step-buttons { display: grid; grid-template-columns: repeat(6, minmax(56px, 1fr)); gap: 6px; }
+  .jog-step-buttons button { justify-content: center; }
+  #jog-step-feedback { grid-column: 1 / -1; min-height: 18px; color: var(--muted); }
+  #jog-step-feedback.error { color: var(--err); }
   .jog-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 260px); gap: 10px; align-items: stretch; }
   #jog .jog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; align-content: start; }
   #jog .metric--primary { grid-column: span 2; }
@@ -301,6 +308,8 @@
     .job, .run-row { grid-template-columns: 1fr; gap: 3px; }
     #alarm-panel { grid-template-columns: 1fr; }
     #alarm-actions { justify-content: stretch; }
+    .jog-step-controls { grid-template-columns: 1fr; }
+    .jog-step-buttons { grid-template-columns: repeat(3, minmax(64px, 1fr)); }
     #jog .jog-grid { grid-template-columns: 1fr; }
     #jog .metric--primary, .metric--wide { grid-column: auto; }
     .jog-plot-cell, #jog-plot { min-height: 170px; }
@@ -384,22 +393,6 @@
             <button type="button" id="ctl-hold" title="Feed hold — pause motion">⏸ Hold</button>
             <button type="button" id="ctl-resume" title="Resume from feed hold">▶ Resume</button>
           </div>
-        </div>
-      </details>
-      <details class="command-popout">
-        <summary>Gcode</summary>
-        <div class="command-panel command-panel-gcode">
-          <div id="quick-commands" class="command-group">
-            <button type="button" data-gcode="M114" title="Position">M114</button>
-            <button type="button" data-gcode="$G" title="Modal state">$G</button>
-            <button type="button" data-gcode="M115" title="Firmware info">M115</button>
-            <button type="button" data-gcode="version" title="Version">version</button>
-          </div>
-          <form id="gcode-form">
-            <input id="gcode-input" type="text" placeholder="Send gcode or console command" autocomplete="off" spellcheck="false">
-            <button type="submit" class="primary">Send</button>
-          </form>
-          <div id="gcode-history"></div>
         </div>
       </details>
       <details class="command-popout">
@@ -505,26 +498,28 @@
 </header>
 <main>
   <nav class="tabs" aria-label="Views">
-    <button type="button" id="tab-control" class="tab active">Control</button>
+    <button type="button" id="tab-active-job" class="tab active">Active job</button>
+    <button type="button" id="tab-gcode-console" class="tab">Gcode console</button>
+    <button type="button" id="tab-control" class="tab">Control</button>
     <button type="button" id="tab-files" class="tab">Files</button>
   </nav>
 
-  <section id="control-view" class="view">
-    <section class="page-section">
-      <div id="alarm-panel" hidden>
-        <div>
-          <div id="alarm-title">Alarm</div>
-          <div id="alarm-detail">-</div>
-          <div id="alarm-feedback" aria-live="polite"></div>
-        </div>
-        <div id="alarm-actions">
-          <button type="button" id="alarm-recover" data-control-action="recover">Recover</button>
-        </div>
+  <section class="page-section">
+    <div id="alarm-panel" hidden>
+      <div>
+        <div id="alarm-title">Alarm</div>
+        <div id="alarm-detail">-</div>
+        <div id="alarm-feedback" aria-live="polite"></div>
       </div>
-    </section>
+      <div id="alarm-actions">
+        <button type="button" id="alarm-recover" data-control-action="recover">Recover</button>
+      </div>
+    </div>
+  </section>
 
+  <section id="active-job-view" class="view">
     <section class="page-section">
-      <h2>Active Gcode</h2>
+      <h2>Active job</h2>
       <div id="active-gcode-panel" class="action-panel">
         <div class="active-gcode-body">
           <div class="active-gcode-head">
@@ -548,13 +543,26 @@
     </section>
 
     <section class="page-section">
-      <h2>Run History (<span id="run-count">0</span>)</h2>
-      <div id="run-history"></div>
+      <details id="run-history-panel">
+        <summary>Run History (<span id="run-count">0</span>)</summary>
+        <div class="detail-body">
+          <div class="run-history-actions">
+            <button type="button" id="run-history-clear">Clear</button>
+          </div>
+          <div id="run-history"></div>
+        </div>
+      </details>
     </section>
+  </section>
 
+  <section id="gcode-console-view" class="view" hidden>
     <section class="page-section">
-      <h2>Gcode Console</h2>
+      <h2>Gcode console</h2>
       <div id="console">
+        <form id="gcode-form">
+          <input id="gcode-input" type="text" placeholder="Send gcode or console command" autocomplete="off" spellcheck="false">
+          <button type="submit" class="primary">Send</button>
+        </form>
         <div id="log-tools">
           <div class="log-left">
             <select id="log-filter" aria-label="Log filter">
@@ -579,9 +587,11 @@
         <pre id="gcode-log"></pre>
       </div>
     </section>
+  </section>
 
+  <section id="control-view" class="view" hidden>
     <section class="page-section">
-      <h2>Gamepad Jog</h2>
+      <h2>Control</h2>
       <div id="jog">
         <div class="jog-summary">
           <button type="button" id="jog-arm">Arm Jog</button>
@@ -589,6 +599,26 @@
           <span>pad: <b id="jog-pad">-</b></span>
           <span>deadman: <b id="jog-deadman">off</b></span>
           <span>latency: <b id="jog-latency">-</b></span>
+        </div>
+        <div class="jog-step-controls">
+          <label><span>Step</span>
+            <select id="jog-step-distance">
+              <option value="0.1">0.1 mm</option>
+              <option value="0.5">0.5 mm</option>
+              <option value="1" selected>1 mm</option>
+              <option value="5">5 mm</option>
+              <option value="10">10 mm</option>
+            </select>
+          </label>
+          <div class="jog-step-buttons" aria-label="Step jog">
+            <button type="button" data-jog-step-axis="x" data-jog-step-dir="-1">X-</button>
+            <button type="button" data-jog-step-axis="x" data-jog-step-dir="1">X+</button>
+            <button type="button" data-jog-step-axis="y" data-jog-step-dir="-1">Y-</button>
+            <button type="button" data-jog-step-axis="y" data-jog-step-dir="1">Y+</button>
+            <button type="button" data-jog-step-axis="z" data-jog-step-dir="-1">Z-</button>
+            <button type="button" data-jog-step-axis="z" data-jog-step-dir="1">Z+</button>
+          </div>
+          <div id="jog-step-feedback" aria-live="polite"></div>
         </div>
         <div class="jog-body">
           <div class="jog-grid">

@@ -258,9 +258,10 @@ func main() {
 
 	// --- Relay (with arbiter as observer + injection source) ---
 	relaySrv := &relay.Server{
-		Dial:        dialAddr,
-		MachineDial: machineOpen,
-		Observer:    arb,
+		Dial:          dialAddr,
+		MachineDial:   machineOpen,
+		Observer:      arb,
+		DownloadCache: svc,
 		// Sniff the controller's gcode/console traffic into the shared log the
 		// API streams to web clients (read-only; frames are never altered).
 		GcodeLog: svc.GcodeLog(),

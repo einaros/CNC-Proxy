@@ -111,6 +111,25 @@ func (m *mux) cachedStatusFrame() []byte {
 	return protocol.Encode(protocol.CmdStatusRes, m.lastStatus)
 }
 
+func (m *mux) beginLocalControllerTransfer() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.controllerMidXfer {
+		return false
+	}
+	if m.interactive {
+		m.abortInteractiveLocked()
+	}
+	m.controllerMidXfer = true
+	return true
+}
+
+func (m *mux) finishLocalControllerTransfer() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.controllerMidXfer = false
+}
+
 // writeControl writes a single realtime control character to the machine
 // transport out-of-band, without taking the injection window. Transports must
 // serialize Write calls so a CTRL_SINGLE frame cannot byte-interleave with an

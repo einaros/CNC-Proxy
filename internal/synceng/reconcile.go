@@ -44,9 +44,14 @@ func (e *Engine) DeepReconcile(maxDepth int) error {
 	return e.reconcile(maxDepth, true)
 }
 
-// PrepareStartupCacheValidation blocks persisted synced cache entries until the
-// machine confirms they still match. It only touches local catalog/cache state.
+// PrepareStartupCacheValidation makes persisted startup state conservative:
+// interrupted running jobs become visible failed jobs, and synced cache entries
+// are blocked until the machine confirms they still match. It only touches local
+// catalog/cache state.
 func (e *Engine) PrepareStartupCacheValidation() error {
+	if err := e.recoverInterruptedJobs(); err != nil {
+		return err
+	}
 	for _, existing := range e.store.ListEntries() {
 		if existing.IsDir {
 			if existing.CacheState != store.CacheNone || !existing.CacheCheckedAt.IsZero() {
@@ -129,6 +134,22 @@ func (e *Engine) PrepareStartupCacheValidation() error {
 	return nil
 }
 
+func (e *Engine) recoverInterruptedJobs() error {
+	msg := "proxy restarted while this job was running; inspect the machine state and retry manually"
+	return e.store.Batch(func(b *store.Batch) error {
+		for _, job := range b.ListJobs() {
+			if job.State != store.Running {
+				continue
+			}
+			b.UpdateJob(job.ID, func(j *store.Job) {
+				j.State = store.Failed
+				j.LastError = msg
+			})
+		}
+		return nil
+	})
+}
+
 // ValidateStartupCache checks validation-pending cache entries against the
 // machine. Matching entries become cache-ready; changed or missing entries lose
 // their cache reference. Transient md5sum failures leave that entry validating.
@@ -206,13 +227,15 @@ func (e *Engine) reconcile(maxDepth int, deep bool) error {
 		existing, ok := known[p]
 		if !ok {
 			// Newly discovered on the machine.
-			_ = e.store.PutEntry(store.Entry{
+			if err := e.store.PutEntry(store.Entry{
 				Path:  p,
 				IsDir: de.IsDir,
 				Size:  de.Size,
 				MTime: de.MTime,
 				Sync:  syncStateFor(de),
-			})
+			}); err != nil {
+				log.Printf("synceng: failed to record discovered file %s: %v", p, err)
+			}
 			continue
 		}
 		if de.IsDir || existing.IsDir {
@@ -234,7 +257,9 @@ func (e *Engine) reconcile(maxDepth int, deep bool) error {
 			continue
 		}
 		if isSettled(en.Sync) {
-			_ = e.store.DeleteEntry(p)
+			if err := e.store.DeleteEntry(p); err != nil {
+				log.Printf("synceng: failed to drop missing settled entry %s: %v", p, err)
+			}
 		}
 	}
 	return nil
@@ -278,7 +303,9 @@ func (e *Engine) markRemoteOnly(existing store.Entry, de protocol.DirEntry, remo
 	existing.CacheCheckedAt = time.Time{}
 	existing.MD5 = remoteMD5
 	existing.Error = ""
-	_ = e.store.PutEntry(existing)
+	if err := e.store.PutEntry(existing); err != nil {
+		log.Printf("synceng: failed to mark %s remote_only: %v", existing.Path, err)
+	}
 }
 
 type cacheValidationResult struct {
@@ -332,7 +359,9 @@ func (e *Engine) applyCacheValidationResults(candidates []store.Entry, results m
 			if latest.CachePath != "" {
 				_ = os.Remove(latest.CachePath)
 			}
-			_ = e.store.DeleteEntry(latest.Path)
+			if err := e.store.DeleteEntry(latest.Path); err != nil {
+				log.Printf("synceng: failed to delete invalid startup cache entry %s: %v", latest.Path, err)
+			}
 			continue
 		}
 		if latest.Size != res.remote.Size {
@@ -364,7 +393,9 @@ func (e *Engine) markCacheReady(existing store.Entry, de protocol.DirEntry, remo
 	latest.CacheState = store.CacheReady
 	latest.CacheCheckedAt = e.now()
 	latest.Error = ""
-	_ = e.store.PutEntry(latest)
+	if err := e.store.PutEntry(latest); err != nil {
+		log.Printf("synceng: failed to mark %s cache ready: %v", latest.Path, err)
+	}
 }
 
 func syncStateFor(de protocol.DirEntry) store.SyncState {

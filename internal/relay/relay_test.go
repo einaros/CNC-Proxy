@@ -2,6 +2,9 @@ package relay
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"net"
 	"sync"
@@ -13,6 +16,19 @@ import (
 	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
+
+type testDownloadCache struct {
+	files map[string][]byte
+}
+
+func (c testDownloadCache) OpenDownloadCache(remotePath string) (io.ReaderAt, io.Closer, int64, string, error) {
+	b, ok := c.files[remotePath]
+	if !ok {
+		return nil, nil, 0, "", io.EOF
+	}
+	sum := md5.Sum(b)
+	return bytes.NewReader(b), io.NopCloser(bytes.NewReader(nil)), int64(len(b)), hex.EncodeToString(sum[:]), nil
+}
 
 // frameMachine is a minimal in-test machine that reads whole frames and lets the
 // test script its replies. It records the controller frames it received.
@@ -164,6 +180,90 @@ func TestRelayUsesGenericMachineTransport(t *testing.T) {
 	readControllerFrame(t, controller, protocol.CmdStatusRes)
 	if got := dials.Load(); got != 1 {
 		t.Fatalf("MachineDial calls = %d, want 1", got)
+	}
+}
+
+func TestRelayServesControllerDownloadFromCache(t *testing.T) {
+	m := newFrameMachine(t)
+	srv, addr := startRelay(t, m)
+	content := []byte("G0 X0\nG1 X10 Y5\n")
+	sum := md5.Sum(content)
+	wantMD5 := hex.EncodeToString(sum[:])
+	srv.DownloadCache = testDownloadCache{files: map[string][]byte{
+		"/sd/gcodes/from web.nc": content,
+	}}
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	if _, err := controller.Write(protocol.DownloadCommand("/sd/gcodes/from web.nc")); err != nil {
+		t.Fatal(err)
+	}
+	md5Frame := readControllerFrame(t, controller, protocol.CmdFileMD5)
+	if string(md5Frame.Data) != wantMD5 {
+		t.Fatalf("FILE_MD5 = %q, want %q", md5Frame.Data, wantMD5)
+	}
+	if _, err := controller.Write(protocol.Encode(protocol.CmdFileView, nil)); err != nil {
+		t.Fatal(err)
+	}
+	view := readControllerFrame(t, controller, protocol.CmdFileView)
+	if len(view.Data) != 6 {
+		t.Fatalf("FILE_VIEW len = %d, want 6", len(view.Data))
+	}
+	if got := binary.BigEndian.Uint32(view.Data[:4]); got != 1 {
+		t.Fatalf("FILE_VIEW packets = %d, want 1", got)
+	}
+	req := make([]byte, 4)
+	binary.BigEndian.PutUint32(req, 1)
+	if _, err := controller.Write(protocol.Encode(protocol.CmdFileData, req)); err != nil {
+		t.Fatal(err)
+	}
+	data := readControllerFrame(t, controller, protocol.CmdFileData)
+	if gotSeq := binary.BigEndian.Uint32(data.Data[:4]); gotSeq != 1 {
+		t.Fatalf("FILE_DATA seq = %d, want 1", gotSeq)
+	}
+	if got := data.Data[4:]; !bytes.Equal(got, content) {
+		t.Fatalf("FILE_DATA content = %q, want %q", got, content)
+	}
+	if _, err := controller.Write(protocol.Encode(protocol.CmdFileEnd, nil)); err != nil {
+		t.Fatal(err)
+	}
+	readControllerFrame(t, controller, protocol.CmdFileEnd)
+
+	time.Sleep(50 * time.Millisecond)
+	if frames := m.recvFrames(); len(frames) != 0 {
+		t.Fatalf("cache hit should not reach machine; got %s", frameSummary(frames))
+	}
+}
+
+func TestRelayForwardsControllerDownloadOnCacheMiss(t *testing.T) {
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd == protocol.CmdFileStart {
+			c.Write(protocol.Encode(protocol.CmdFileCancel, []byte("not found")))
+		}
+	}
+	srv, addr := startRelay(t, m)
+	srv.DownloadCache = testDownloadCache{files: map[string][]byte{}}
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	raw := protocol.DownloadCommand("/sd/gcodes/missing.nc")
+	if _, err := controller.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	readControllerFrame(t, controller, protocol.CmdFileCancel)
+	waitForMachineFrame(t, m, protocol.CmdFileStart)
+	frames := m.recvFrames()
+	if len(frames) == 0 || !bytes.Equal(frames[0].Raw, raw) {
+		t.Fatalf("machine did not receive original download frame; got %s", frameSummary(frames))
 	}
 }
 

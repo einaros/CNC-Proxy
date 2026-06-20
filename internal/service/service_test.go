@@ -39,7 +39,14 @@ func seedOnMachine(t *testing.T, addr, remote string, content []byte) {
 
 func newService(t *testing.T) (*Service, *store.Store) {
 	t.Helper()
-	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	svc, st, _ := newServiceWithStatePath(t)
+	return svc, st
+}
+
+func newServiceWithStatePath(t *testing.T) (*Service, *store.Store, string) {
+	t.Helper()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, _ := store.Open(statePath)
 	arb := session.New(session.Config{
 		Dial: func() (*client.Conn, error) { return nil, io.EOF }, // never dialed in these tests
 	})
@@ -47,7 +54,17 @@ func newService(t *testing.T) (*Service, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return svc, st
+	return svc, st, statePath
+}
+
+func forceStoreFlushFailure(t *testing.T, statePath string) {
+	t.Helper()
+	if err := os.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestUploadCreatesEntryAndJob(t *testing.T) {
@@ -84,6 +101,57 @@ func TestUploadCreatesEntryAndJob(t *testing.T) {
 	}
 }
 
+func TestUploadStoreFailureRollsBackCatalogJobAndCache(t *testing.T) {
+	svc, st, statePath := newServiceWithStatePath(t)
+	oldContent := []byte("G0 X0\n")
+	oldEntry := putCachedEntry(t, svc, "part.nc", oldContent, store.Synced)
+	forceStoreFlushFailure(t, statePath)
+
+	if _, err := svc.Upload("part.nc", bytes.NewReader([]byte("G1 X1\n"))); err == nil {
+		t.Fatal("Upload succeeded despite store flush failure")
+	}
+	entry, ok := st.GetEntry(oldEntry.Path)
+	if !ok || entry.Sync != store.Synced || entry.MD5 != oldEntry.MD5 || entry.CachePath != oldEntry.CachePath {
+		t.Fatalf("entry after failed upload = %+v ok=%v, want original %+v", entry, ok, oldEntry)
+	}
+	got, err := os.ReadFile(oldEntry.CachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, oldContent) {
+		t.Fatalf("cache after failed upload = %q, want %q", string(got), string(oldContent))
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("failed upload queued jobs: %+v", jobs)
+	}
+}
+
+func TestUploadRangeStoreFailureRollsBackCache(t *testing.T) {
+	svc, st, statePath := newServiceWithStatePath(t)
+	oldContent := []byte("old\n")
+	oldEntry := putCachedEntry(t, svc, "range.nc", oldContent, store.LocalOnly)
+	forceStoreFlushFailure(t, statePath)
+
+	newContent := []byte("new content\n")
+	if _, _, err := svc.UploadRange("range.nc", 0, int64(len(newContent)-1), int64(len(newContent)), bytes.NewReader(newContent)); err == nil {
+		t.Fatal("UploadRange succeeded despite store flush failure")
+	}
+	entry, ok := st.GetEntry(oldEntry.Path)
+	if !ok || entry.Size != oldEntry.Size || entry.MD5 != oldEntry.MD5 || entry.CachePath != oldEntry.CachePath {
+		t.Fatalf("entry after failed range upload = %+v ok=%v, want original %+v", entry, ok, oldEntry)
+	}
+	got, err := os.ReadFile(oldEntry.CachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, oldContent) {
+		t.Fatalf("cache after failed range upload = %q, want %q", string(got), string(oldContent))
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("failed range upload queued jobs: %+v", jobs)
+	}
+}
+
 func TestPathTraversalRejected(t *testing.T) {
 	svc, _ := newService(t)
 	if _, err := svc.Upload("../../etc/passwd", bytes.NewReader([]byte("x"))); err == nil {
@@ -101,6 +169,58 @@ func TestDeleteAndRenameRequireExisting(t *testing.T) {
 	}
 	if err := svc.Rename("nope.nc", "x.nc"); err != ErrNotFound {
 		t.Errorf("rename missing = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteSyncedStoreFailureLeavesNoPartialJob(t *testing.T) {
+	svc, st, statePath := newServiceWithStatePath(t)
+	entry := putCachedEntry(t, svc, "delete.nc", []byte("G0 X0\n"), store.Synced)
+	forceStoreFlushFailure(t, statePath)
+
+	if err := svc.Delete("delete.nc"); err == nil {
+		t.Fatal("Delete succeeded despite store flush failure")
+	}
+	got, ok := st.GetEntry(entry.Path)
+	if !ok || got.Sync != store.Synced {
+		t.Fatalf("entry after failed delete = %+v ok=%v, want synced", got, ok)
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("failed delete queued jobs: %+v", jobs)
+	}
+}
+
+func TestRemoteRenameStoreFailureLeavesNoPartialJob(t *testing.T) {
+	svc, st, statePath := newServiceWithStatePath(t)
+	entry := putCachedEntry(t, svc, "remote.nc", []byte("G0 X0\n"), store.Synced)
+	forceStoreFlushFailure(t, statePath)
+
+	if err := svc.Rename("remote.nc", "renamed.nc"); err == nil {
+		t.Fatal("Rename succeeded despite store flush failure")
+	}
+	got, ok := st.GetEntry(entry.Path)
+	if !ok || got.Sync != store.Synced {
+		t.Fatalf("entry after failed remote rename = %+v ok=%v, want synced", got, ok)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/renamed.nc"); ok {
+		t.Fatal("destination entry leaked after failed remote rename")
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("failed remote rename queued jobs: %+v", jobs)
+	}
+}
+
+func TestMkdirStoreFailureLeavesNoPartialEntryOrJob(t *testing.T) {
+	svc, st, statePath := newServiceWithStatePath(t)
+	forceStoreFlushFailure(t, statePath)
+
+	if _, err := svc.Mkdir("newdir"); err == nil {
+		t.Fatal("Mkdir succeeded despite store flush failure")
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/newdir"); ok {
+		t.Fatal("mkdir entry leaked after failed store commit")
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("failed mkdir queued jobs: %+v", jobs)
 	}
 }
 
@@ -151,6 +271,40 @@ func TestRenamePendingUploadMovesLocalContentToDestination(t *testing.T) {
 	}
 	if finalUploads != 1 || remoteRenames != 0 {
 		t.Fatalf("jobs = %+v, want one destination upload and no remote rename", st.ListJobs())
+	}
+}
+
+func TestRenamePendingUploadStoreFailureRollsBackCacheMove(t *testing.T) {
+	svc, st, statePath := newServiceWithStatePath(t)
+	content := []byte("G0 X0\nG1 X1\n")
+	entry, err := svc.Upload("upload.tmp", bytes.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	destCache := svc.cacheNameFor("/sd/gcodes/final.nc")
+	forceStoreFlushFailure(t, statePath)
+
+	if err := svc.Rename("upload.tmp", "final.nc"); err == nil {
+		t.Fatal("Rename succeeded despite store flush failure")
+	}
+	gotEntry, ok := st.GetEntry(entry.Path)
+	if !ok || gotEntry.CachePath != entry.CachePath || gotEntry.Sync != store.PendingUpload {
+		t.Fatalf("source entry after failed rename = %+v ok=%v, want original %+v", gotEntry, ok, entry)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/final.nc"); ok {
+		t.Fatal("destination entry leaked after failed rename")
+	}
+	got, err := os.ReadFile(entry.CachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("source cache after failed rename = %q, want %q", string(got), string(content))
+	}
+	if _, err := os.Stat(destCache); err == nil {
+		t.Fatal("destination cache file leaked after failed rename")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
 	}
 }
 
@@ -232,6 +386,37 @@ func TestRetryFailedUploadRestoresPendingState(t *testing.T) {
 	got, ok := st.GetEntry("/sd/gcodes/retry.nc")
 	if !ok || got.Sync != store.PendingUpload || got.Error != "" || got.CachePath != entry.CachePath {
 		t.Fatalf("entry after retry = %+v ok=%v", got, ok)
+	}
+}
+
+func TestRetryStoreFailureLeavesJobAndEntryFailed(t *testing.T) {
+	svc, st, statePath := newServiceWithStatePath(t)
+	entry, err := svc.Upload("retry-fail.nc", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync(entry.Path, store.Error, "upload failed"); err != nil {
+		t.Fatal(err)
+	}
+	forceStoreFlushFailure(t, statePath)
+
+	if _, err := svc.RetryJob(1); err == nil {
+		t.Fatal("RetryJob succeeded despite store flush failure")
+	}
+	job := st.ListJobs()[0]
+	if job.State != store.Failed || job.Attempts != 8 || job.LastError != "upload failed" {
+		t.Fatalf("job after failed retry = %+v, want original failed job", job)
+	}
+	got, ok := st.GetEntry(entry.Path)
+	if !ok || got.Sync != store.Error || got.Error != "upload failed" {
+		t.Fatalf("entry after failed retry = %+v ok=%v, want original error entry", got, ok)
 	}
 }
 
@@ -715,8 +900,15 @@ func TestRunActiveGcodeSendsPlayCommand(t *testing.T) {
 	if res.Command != "play /sd/gcodes/my part.nc" {
 		t.Fatalf("result = %+v", res)
 	}
+	if res.Verified || !strings.Contains(res.Message, "machine confirmation was not available") {
+		t.Fatalf("result = %+v, want unverified neutral message", res)
+	}
 	if g := m.Gcodes(); len(g) != 1 || g[0] != "play /sd/gcodes/my part.nc" {
 		t.Fatalf("machine gcodes = %v, want play command", g)
+	}
+	lines := svc.GcodeLog().Recent()
+	if got := lines[len(lines)-1].Text; got != "sent: no reply observed" {
+		t.Fatalf("last gcode log line = %q, want neutral sent line", got)
 	}
 }
 
@@ -745,6 +937,8 @@ func TestToolActionsSendControllerCommands(t *testing.T) {
 
 	if res, err := svc.SetCurrentToolID(3); err != nil || res.Command != "M493.2T3" {
 		t.Fatalf("SetCurrentToolID result=%+v err=%v", res, err)
+	} else if res.Verified || !strings.Contains(res.Message, "machine confirmation was not available") {
+		t.Fatalf("SetCurrentToolID result=%+v, want unverified neutral message", res)
 	}
 	if res, err := svc.SetCurrentToolID(0); err != nil || res.Command != "M493.2T0" {
 		t.Fatalf("SetCurrentToolID probe result=%+v err=%v", res, err)
@@ -987,6 +1181,63 @@ func TestRecoverAlarmViaRelayInjectionVerifiesStatus(t *testing.T) {
 	}
 	if g := m.Gcodes(); len(g) != 1 || g[0] != "$X" {
 		t.Fatalf("recovery gcodes = %v, want [$X]", g)
+	}
+}
+
+func TestRelayControllerDownloadUsesUploadedCache(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	arb := session.New(session.Config{
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
+	})
+	svc, err := New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("G0 X0\nG1 X12.5 Y4\n")
+	if _, err := svc.Upload("web cached.nc", bytes.NewReader(content)); err != nil {
+		t.Fatal(err)
+	}
+
+	relaySrv := &relay.Server{
+		Dial:          func() (string, error) { return m.Addr(), nil },
+		Observer:      arb,
+		DownloadCache: svc,
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go relaySrv.Serve(ln)
+
+	controller, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { controller.Close() })
+
+	var got bytes.Buffer
+	gotMD5, written, err := client.New(controller).Download("/sd/gcodes/web cached.nc", &got, 2*time.Second, nil)
+	if err != nil {
+		t.Fatalf("controller download: %v", err)
+	}
+	if !bytes.Equal(got.Bytes(), content) || written != int64(len(content)) {
+		t.Fatalf("downloaded content = %q (%d bytes), want %q", got.Bytes(), written, content)
+	}
+	sum := md5.Sum(content)
+	if gotMD5 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("download md5 = %q, want %q", gotMD5, hex.EncodeToString(sum[:]))
+	}
+	if _, ok := m.File("/sd/gcodes/web cached.nc"); ok {
+		t.Fatal("fake machine unexpectedly has the web-uploaded file")
 	}
 }
 

@@ -144,6 +144,19 @@ func (h *History) Recent() []Run {
 	return out
 }
 
+// Clear removes all retained run history and resets the in-memory tracker.
+func (h *History) Clear() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.runs = nil
+	h.nextID = 1
+	h.active = nil
+	h.lastState = machine.Unknown
+	h.lastFeed = nil
+	h.lastSpin = nil
+	h.pending = pendingFile{}
+}
+
 // Snapshot returns recent runs oldest first for backup/export.
 func (h *History) Snapshot() []Run {
 	h.mu.Lock()

@@ -9,6 +9,7 @@ package synceng
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -22,6 +23,17 @@ import (
 )
 
 var errJobNoLongerQueued = errors.New("synceng: job is no longer queued")
+
+type machineCompletedError struct {
+	job store.Job
+	err error
+}
+
+func (e machineCompletedError) Error() string {
+	return fmt.Sprintf("synceng: machine completed %s %s but durable state update failed: %v", e.job.Kind, e.job.Path, e.err)
+}
+
+func (e machineCompletedError) Unwrap() error { return e.err }
 
 const (
 	defaultPostUploadCheckTimeout = 2 * time.Second
@@ -189,13 +201,31 @@ func (e *Engine) runJob(job store.Job) (bool, error) {
 		return true, nil
 	case session.Retryable(err):
 		return false, nil // blocked (relay/idle/busy), not a failure
+	case err != nil && isMachineCompletedError(err):
+		if recErr := e.recordMachineCompletedFailure(job, err); recErr != nil {
+			log.Printf("synceng: failed to record completed-machine persistence failure for job %d: %v", job.ID, recErr)
+		}
+		return true, err
 	case err != nil:
-		e.recordFailure(job, err)
+		if recErr := e.recordFailure(job, err); recErr != nil {
+			log.Printf("synceng: failed to record error state for job %d: %v", job.ID, recErr)
+		}
 		return true, err
 	default:
-		e.recordSuccess(job)
+		if err := e.recordSuccess(job); err != nil {
+			err = machineCompletedError{job: job, err: err}
+			if recErr := e.recordMachineCompletedFailure(job, err); recErr != nil {
+				log.Printf("synceng: failed to record completed-machine persistence failure for job %d: %v", job.ID, recErr)
+			}
+			return true, err
+		}
 		return true, nil
 	}
+}
+
+func isMachineCompletedError(err error) bool {
+	var completed machineCompletedError
+	return errors.As(err, &completed)
 }
 
 // execute performs the actual protocol operation and updates catalog state.
@@ -215,23 +245,31 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 		// only if the entry still represents this delete. A WebDAV replacement
 		// upload may have arrived while the rm was in flight.
 		if entry, ok, err := e.store.DeleteEntryIfSync(job.Path, store.PendingDelete, store.Deleting); err != nil {
-			return err
+			return machineCompletedError{job: job, err: err}
 		} else if ok && entry.CachePath != "" {
 			os.Remove(entry.CachePath)
 		}
 		return nil
 
 	case store.JobRename:
-		e.store.SetEntrySync(job.Path, store.PendingRename, "")
+		if err := e.store.SetEntrySync(job.Path, store.PendingRename, ""); err != nil {
+			return err
+		}
 		if err := c.Rename(job.Path, job.DestPath, e.opTimeout); err != nil {
 			return err
 		}
 		// Move the catalog entry to the new path.
-		if entry, ok := e.store.GetEntry(job.Path); ok {
-			entry.Path = job.DestPath
-			entry.Sync = store.Synced
-			e.store.PutEntry(entry)
-			e.store.DeleteEntry(job.Path)
+		if err := e.store.Batch(func(b *store.Batch) error {
+			if entry, ok := b.GetEntry(job.Path); ok {
+				entry.Path = job.DestPath
+				entry.Sync = store.Synced
+				entry.Error = ""
+				b.PutEntry(entry)
+				b.DeleteEntry(job.Path)
+			}
+			return nil
+		}); err != nil {
+			return machineCompletedError{job: job, err: err}
 		}
 		return nil
 
@@ -256,7 +294,7 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 			}
 		}
 		if ok, err := e.setUploadJobSync(job, store.Synced, ""); err != nil {
-			return err
+			return machineCompletedError{job: job, err: err}
 		} else if !ok {
 			return nil
 		}
@@ -348,8 +386,8 @@ func (e *Engine) lzSupported(c *client.Conn) bool {
 	return strings.Contains(cached, "lz")
 }
 
-func (e *Engine) recordSuccess(job store.Job) {
-	e.store.UpdateJob(job.ID, func(j *store.Job) {
+func (e *Engine) recordSuccess(job store.Job) error {
+	return e.store.UpdateJob(job.ID, func(j *store.Job) {
 		j.State = store.Done
 		j.Attempts++
 		j.LastError = ""
@@ -361,36 +399,62 @@ func (e *Engine) recordRunning(job store.Job) (bool, error) {
 	return ok, err
 }
 
-func (e *Engine) recordFailure(job store.Job, err error) {
+func (e *Engine) recordFailure(job store.Job, err error) error {
 	attempts := job.Attempts + 1
 	terminal := attempts >= e.maxAttempts
-	e.store.UpdateJob(job.ID, func(j *store.Job) {
-		j.Attempts = attempts
-		j.LastError = err.Error()
-		if terminal {
-			j.State = store.Failed
-		} else {
-			j.State = store.Queued
+	return e.store.Batch(func(b *store.Batch) error {
+		if _, ok := b.UpdateJob(job.ID, func(j *store.Job) {
+			j.Attempts = attempts
+			j.LastError = err.Error()
+			if terminal {
+				j.State = store.Failed
+			} else {
+				j.State = store.Queued
+			}
+		}); !ok {
+			return fmt.Errorf("store: job %d not found", job.ID)
 		}
+		state := failedEntrySyncState(job.Kind, terminal)
+		e.setFailedEntrySync(b, job, state, err.Error())
+		return nil
 	})
-	// Reflect failure on the catalog entry too, unless it was a delete that
-	// removed the entry.
-	state := failedEntrySyncState(job.Kind, terminal)
-	var serr error
+}
+
+func (e *Engine) recordMachineCompletedFailure(job store.Job, err error) error {
+	msg := fmt.Sprintf("machine operation completed, but durable state update failed: %v", err)
+	return e.store.Batch(func(b *store.Batch) error {
+		if _, ok := b.UpdateJob(job.ID, func(j *store.Job) {
+			j.Attempts++
+			j.State = store.Failed
+			j.LastError = msg
+		}); !ok {
+			return fmt.Errorf("store: job %d not found", job.ID)
+		}
+		e.setFailedEntrySync(b, job, store.Error, msg)
+		return nil
+	})
+}
+
+func (e *Engine) setFailedEntrySync(b *store.Batch, job store.Job, state store.SyncState, errMsg string) {
 	switch job.Kind {
 	case store.JobUpload:
-		_, serr = e.setUploadJobSync(job, state, err.Error())
+		b.SetEntrySyncIfMatch(job.Path, state, errMsg, func(entry store.Entry) bool {
+			if entry.IsDir {
+				return false
+			}
+			if entry.CachePath != job.CachePath || entry.MD5 != job.MD5 || entry.Size != job.Size {
+				return false
+			}
+			return entry.Sync == store.PendingUpload || entry.Sync == store.Uploading || entry.Sync == state
+		})
 	case store.JobDelete:
-		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingDelete, store.Deleting)
+		b.SetEntrySyncIf(job.Path, state, errMsg, store.PendingDelete, store.Deleting)
 	case store.JobRename:
-		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingRename)
+		b.SetEntrySyncIf(job.Path, state, errMsg, store.PendingRename)
 	case store.JobMkdir:
-		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingUpload)
+		b.SetEntrySyncIf(job.Path, state, errMsg, store.PendingUpload)
 	default:
-		_, _, serr = e.store.SetEntrySyncIf(job.Path, state, err.Error(), store.PendingUpload, store.PendingDelete, store.PendingRename, store.Uploading, store.Deleting)
-	}
-	if serr != nil {
-		log.Printf("synceng: failed to record error state for %s: %v", job.Path, serr)
+		b.SetEntrySyncIf(job.Path, state, errMsg, store.PendingUpload, store.PendingDelete, store.PendingRename, store.Uploading, store.Deleting)
 	}
 }
 

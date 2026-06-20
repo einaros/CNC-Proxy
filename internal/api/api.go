@@ -75,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/dirs", s.postDir)            // body: {path}
 	mux.HandleFunc("GET /api/jobs", s.getJobs)
 	mux.HandleFunc("GET /api/runs", s.getRuns)
+	mux.HandleFunc("DELETE /api/runs", s.clearRuns)
 	mux.HandleFunc("POST /api/gcode", s.postGcode) // body: {line}
 	mux.HandleFunc("GET /api/gcode/active", s.getActiveGcode)
 	mux.HandleFunc("POST /api/gcode/active", s.selectActiveGcode)      // body: {path}
@@ -139,6 +140,11 @@ func (s *Server) getJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.RunHistory())
+}
+
+func (s *Server) clearRuns(w http.ResponseWriter, r *http.Request) {
+	s.svc.ClearRunHistory()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 }
 
 // postFile accepts either a multipart upload (field "file", path from form

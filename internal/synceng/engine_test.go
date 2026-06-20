@@ -5,10 +5,12 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +72,16 @@ func readScriptFrame(c net.Conn, scan *protocol.Scanner) (protocol.Frame, error)
 		if err != nil {
 			return protocol.Frame{}, err
 		}
+	}
+}
+
+func forceSyncStoreFlushFailure(t *testing.T, statePath string) {
+	t.Helper()
+	if err := os.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -352,6 +364,92 @@ func TestDeleteJobDoesNotRemoveReplacementUploadEntry(t *testing.T) {
 	}
 	if queued, ok := st.NextQueued(); !ok || queued.Kind != store.JobUpload || queued.Path != remote {
 		t.Fatalf("next queued job = %+v ok=%v, want replacement upload", queued, ok)
+	}
+}
+
+func TestMachineCompletedStoreFailureDoesNotLookSuccessful(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := New(Config{Store: st, OpTimeout: time.Second})
+	remote := "/sd/gcodes/done-but-unrecorded.nc"
+	if err := st.PutEntry(store.Entry{Path: remote, Sync: store.PendingDelete}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := st.Enqueue(store.Job{Kind: store.JobDelete, Path: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+	conn := client.New(clientSide)
+	done := make(chan error, 1)
+	go func() {
+		defer clientSide.Close()
+		done <- eng.execute(conn, job)
+	}()
+
+	var scan protocol.Scanner
+	frame, err := readScriptFrame(serverSide, &scan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Cmd != protocol.CmdCtrlMulti {
+		t.Fatalf("frame command = 0x%x, want CTRL_MULTI", frame.Cmd)
+	}
+	if got, want := protocol.Unescape(string(frame.Data)), "rm "+remote+" -e\n"; got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+
+	forceSyncStoreFlushFailure(t, statePath)
+	if _, err := serverSide.Write(protocol.Encode(protocol.CmdLoadFinish, []byte("ok\r\n"))); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		var completed machineCompletedError
+		if !errors.As(err, &completed) {
+			t.Fatalf("execute err = %v, want machineCompletedError", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete execute did not finish")
+	}
+	if entry, ok := st.GetEntry(remote); !ok || entry.Sync != store.Deleting {
+		t.Fatalf("entry after failed completion record = %+v ok=%v, want deleting", entry, ok)
+	}
+	if job := st.ListJobs()[0]; job.State == store.Done {
+		t.Fatalf("job after failed completion record = %+v, must not be done", job)
+	}
+}
+
+func TestRecordMachineCompletedFailureMarksJobFailed(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := "/sd/gcodes/unrecorded.nc"
+	if err := st.PutEntry(store.Entry{Path: remote, Sync: store.Deleting}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := st.Enqueue(store.Job{Kind: store.JobDelete, Path: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := New(Config{Store: st})
+	if err := eng.recordMachineCompletedFailure(job, errors.New("flush failed")); err != nil {
+		t.Fatal(err)
+	}
+	got := st.ListJobs()[0]
+	if got.State != store.Failed || !strings.Contains(got.LastError, "machine operation completed") {
+		t.Fatalf("job after completed-machine failure = %+v", got)
+	}
+	entry, _ := st.GetEntry(remote)
+	if entry.Sync != store.Error || !strings.Contains(entry.Error, "machine operation completed") {
+		t.Fatalf("entry after completed-machine failure = %+v", entry)
 	}
 }
 

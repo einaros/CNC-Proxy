@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -43,6 +45,84 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	j2, _ := s2.Enqueue(Job{Kind: JobDelete, Path: "/sd/gcodes/b.nc"})
 	if j2.ID != 2 {
 		t.Errorf("second job id = %d, want 2", j2.ID)
+	}
+}
+
+func TestFlushFailureRollsBackAndPublishesNoEvents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, unsubscribe := s.Subscribe()
+	defer unsubscribe()
+
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = s.PutEntry(Entry{Path: "/sd/gcodes/fail.nc", Sync: PendingUpload})
+	if err == nil {
+		t.Fatal("PutEntry succeeded despite unwritable state path")
+	}
+	if _, ok := s.GetEntry("/sd/gcodes/fail.nc"); ok {
+		t.Fatal("failed PutEntry leaked into in-memory catalog")
+	}
+	if jobs := s.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("failed PutEntry changed jobs: %+v", jobs)
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("event published for rolled-back write: %+v", ev)
+	default:
+	}
+}
+
+func TestBatchCommitPersistsEntryAndJobTogether(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Batch(func(b *Batch) error {
+		b.PutEntry(Entry{Path: "/sd/gcodes/a.nc", Sync: PendingUpload})
+		b.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry, ok := reopened.GetEntry("/sd/gcodes/a.nc"); !ok || entry.Sync != PendingUpload {
+		t.Fatalf("reopened entry = %+v ok=%v", entry, ok)
+	}
+	if jobs := reopened.ListJobs(); len(jobs) != 1 || jobs[0].Kind != JobUpload || jobs[0].Path != "/sd/gcodes/a.nc" {
+		t.Fatalf("reopened jobs = %+v", jobs)
+	}
+}
+
+func TestBatchFunctionErrorRollsBackAllChanges(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("stop batch")
+	err = s.Batch(func(b *Batch) error {
+		b.PutEntry(Entry{Path: "/sd/gcodes/a.nc", Sync: PendingUpload})
+		b.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"})
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Batch err = %v, want %v", err, wantErr)
+	}
+	if _, ok := s.GetEntry("/sd/gcodes/a.nc"); ok {
+		t.Fatal("failed batch leaked entry")
+	}
+	if jobs := s.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("failed batch leaked jobs: %+v", jobs)
 	}
 }
 

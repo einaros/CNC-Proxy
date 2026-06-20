@@ -586,17 +586,37 @@ func TestRunsEndpointDerivesObservedRun(t *testing.T) {
 	var runs []struct {
 		File string `json:"file"`
 	}
+	found := false
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		r := get(t, srv.URL+"/api/runs")
 		json.NewDecoder(r.Body).Decode(&runs)
 		r.Body.Close()
 		if len(runs) == 1 && runs[0].File == "/sd/gcodes/a.nc" {
-			return
+			found = true
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("runs = %+v, want observed file", runs)
+	if !found {
+		t.Fatalf("runs = %+v, want observed file", runs)
+	}
+
+	req, _ := http.NewRequest("DELETE", srv.URL+"/api/runs", nil)
+	clearResp := do(t, req)
+	clearResp.Body.Close()
+	if clearResp.StatusCode != http.StatusOK {
+		t.Fatalf("clear runs status = %d", clearResp.StatusCode)
+	}
+	r := get(t, srv.URL+"/api/runs")
+	defer r.Body.Close()
+	runs = nil
+	if err := json.NewDecoder(r.Body).Decode(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs after clear = %+v, want empty", runs)
+	}
 }
 
 func TestWebUIServed(t *testing.T) {
@@ -608,13 +628,13 @@ func TestWebUIServed(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<!DOCTYPE html>") {
 		t.Errorf("index status=%d body-start=%.30q", resp.StatusCode, body)
 	}
-	if !strings.Contains(string(body), `id="tab-files"`) || !strings.Contains(string(body), `id="control-view"`) {
+	if !strings.Contains(string(body), `id="tab-active-job"`) || !strings.Contains(string(body), `id="tab-gcode-console"`) || !strings.Contains(string(body), `id="tab-files"`) || !strings.Contains(string(body), `id="control-view"`) {
 		t.Errorf("index missing lazy tab markup")
 	}
 	if !strings.Contains(string(body), `id="jog-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing jog visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `data-gcode="M114"`, `id="log-filter"`, `id="gcode-history"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-drop"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `<h2>Active job</h2>`, `id="gcode-console-view"`, `<h2>Gcode console</h2>`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-drop"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -632,7 +652,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`, `id="jog-buttons"`, `id="jog-target-pos"`} {
+	for _, want := range []string{`<h2>Control</h2>`, `id="jog-step-distance"`, `data-jog-step-axis="x"`, `data-jog-step-axis="y"`, `data-jog-step-axis="z"`, `id="jog-step-feedback"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`, `id="jog-buttons"`, `id="jog-target-pos"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -642,7 +662,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing layout marker %s", want)
 		}
 	}
-	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`} {
+	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `id="run-history-panel" open`} {
 		if strings.Contains(string(body), gone) {
 			t.Errorf("index still contains removed status details marker %s", gone)
 		}
@@ -666,7 +686,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), "refreshJobs") || !strings.Contains(string(jsBody), "/api/jobs") {
 		t.Errorf("app.js missing active job diagnostic refresh")
 	}
-	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
+	if !strings.Contains(string(jsBody), "renderJogPlot") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "stepJog") || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing jog plot, jog status messaging, or cache-only status polling")
 	}
 	if got := js.Header.Get("Cache-Control"); got != "no-store" {
@@ -688,6 +708,9 @@ func TestWebUIServed(t *testing.T) {
 	}
 	if strings.Contains(string(jsBody), "renderStatusFields") {
 		t.Errorf("app.js still contains removed status details renderer")
+	}
+	if strings.Contains(string(jsBody), "renderCommandHistory") || strings.Contains(string(jsBody), "[data-gcode]") {
+		t.Errorf("app.js still contains removed command button/list handling")
 	}
 	if strings.Contains(string(jsBody), "Emergency halt the machine?") {
 		t.Errorf("app.js must not confirm emergency halt")
@@ -957,6 +980,27 @@ func TestJogWebSocketArmAndInput(t *testing.T) {
 	t.Fatalf("no jog command observed: %v", m.Gcodes())
 }
 
+func TestJogWebSocketStep(t *testing.T) {
+	srv, m, _ := serverWithJog(t, false)
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+
+	writeWS(t, c, map[string]any{"type": "step", "seq": 2, "axis": "x", "distance": 1})
+	ack := readWSEvent(t, c, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("step ack = %+v, want seq 2", ack)
+	}
+	for _, line := range m.Gcodes() {
+		if strings.HasPrefix(line, "$J X1.0000") {
+			return
+		}
+	}
+	t.Fatalf("no step jog command observed: %v", m.Gcodes())
+}
+
 func TestJogWebSocketStatusTimeoutDoesNotCloseSession(t *testing.T) {
 	srv, m, _ := serverWithJog(t, false)
 	c := dialWS(t, srv.URL)
@@ -1125,6 +1169,13 @@ func TestActiveGcodeEndpoints(t *testing.T) {
 		b, _ := io.ReadAll(runResp.Body)
 		t.Fatalf("run status=%d body=%s", runResp.StatusCode, b)
 	}
+	var runResult service.MachineActionResult
+	if err := json.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatal(err)
+	}
+	if runResult.Verified || !strings.Contains(runResult.Message, "machine confirmation was not available") {
+		t.Fatalf("run result = %+v, want unverified neutral message", runResult)
+	}
 	if g := m.Gcodes(); len(g) != 1 || g[0] != "play /sd/gcodes/my part.nc" {
 		t.Fatalf("machine gcodes = %v, want play command", g)
 	}
@@ -1135,9 +1186,16 @@ func TestToolActionEndpoints(t *testing.T) {
 	tr.Observe(machine.Idle)
 
 	setResp := postJSON(t, srv.URL+"/api/tool/current", map[string]int{"tool_id": 4})
-	setResp.Body.Close()
 	if setResp.StatusCode != http.StatusAccepted {
 		t.Fatalf("set tool status = %d", setResp.StatusCode)
+	}
+	var setResult service.MachineActionResult
+	if err := json.NewDecoder(setResp.Body).Decode(&setResult); err != nil {
+		t.Fatal(err)
+	}
+	setResp.Body.Close()
+	if setResult.Verified || !strings.Contains(setResult.Message, "machine confirmation was not available") {
+		t.Fatalf("set tool result = %+v, want unverified neutral message", setResult)
 	}
 	setLaserResp := postJSON(t, srv.URL+"/api/tool/current", map[string]int{"tool_id": 8888})
 	setLaserResp.Body.Close()

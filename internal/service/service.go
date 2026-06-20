@@ -106,6 +106,9 @@ func (s *Service) GcodeLog() *gcodelog.Log { return s.gcodeLog }
 // RunHistory returns recent observed runs, newest first.
 func (s *Service) RunHistory() []runhistory.Run { return s.runHistory.Recent() }
 
+// ClearRunHistory removes retained local run history. It never touches the machine.
+func (s *Service) ClearRunHistory() { s.runHistory.Clear() }
+
 func (s *Service) startRunHistoryObservers() {
 	if st, _ := s.arb.Tracker().Current(); !st.ObservedAt.IsZero() {
 		s.runHistory.ObserveStatus(st)
@@ -562,6 +565,93 @@ func (s *Service) cacheNameFor(remote string) string {
 	return filepath.Join(s.cacheDir, hex.EncodeToString(sum[:]))
 }
 
+type cacheReplacement struct {
+	target        string
+	backup        string
+	restoreSource string
+	hadBackup     bool
+	committed     bool
+}
+
+func (s *Service) backupCacheTarget(target string) (string, bool, error) {
+	if _, err := os.Stat(target); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	backup, err := os.CreateTemp(s.cacheDir, "cache-backup-*.tmp")
+	if err != nil {
+		return "", false, err
+	}
+	backupPath := backup.Name()
+	if err := backup.Close(); err != nil {
+		os.Remove(backupPath)
+		return "", false, err
+	}
+	os.Remove(backupPath)
+	if err := os.Rename(target, backupPath); err != nil {
+		return "", false, err
+	}
+	return backupPath, true, nil
+}
+
+func (s *Service) replaceCacheFile(staged, target string) (*cacheReplacement, error) {
+	backup, hadBackup, err := s.backupCacheTarget(target)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Rename(staged, target); err != nil {
+		if hadBackup {
+			_ = os.Rename(backup, target)
+		}
+		return nil, err
+	}
+	return &cacheReplacement{target: target, backup: backup, hadBackup: hadBackup}, nil
+}
+
+func (s *Service) moveCacheFile(source, target string) (*cacheReplacement, error) {
+	if source == target {
+		return &cacheReplacement{committed: true}, nil
+	}
+	backup, hadBackup, err := s.backupCacheTarget(target)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Rename(source, target); err != nil {
+		if hadBackup {
+			_ = os.Rename(backup, target)
+		}
+		return nil, err
+	}
+	return &cacheReplacement{target: target, backup: backup, restoreSource: source, hadBackup: hadBackup}, nil
+}
+
+func (r *cacheReplacement) Commit() {
+	if r == nil || r.committed {
+		return
+	}
+	if r.hadBackup {
+		_ = os.Remove(r.backup)
+	}
+	r.committed = true
+}
+
+func (r *cacheReplacement) Rollback() {
+	if r == nil || r.committed {
+		return
+	}
+	if r.restoreSource != "" {
+		_ = os.Rename(r.target, r.restoreSource)
+	} else {
+		_ = os.Remove(r.target)
+	}
+	if r.hadBackup {
+		_ = os.Rename(r.backup, r.target)
+	}
+	r.committed = true
+}
+
 // Upload writes content to the local cache immediately and enqueues an upload
 // job. The returned entry is available at once (Sync = pending_upload) — the
 // Google-Drive behavior. The machine transfer happens later via the engine.
@@ -599,10 +689,12 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
 
-	if err := os.Rename(tmp, cachePath); err != nil {
+	replacement, err := s.replaceCacheFile(tmp, cachePath)
+	if err != nil {
 		os.Remove(tmp)
 		return store.Entry{}, err
 	}
+	defer replacement.Rollback()
 
 	entry := store.Entry{
 		Path:       remote,
@@ -613,24 +705,22 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 		CacheState: store.CacheReady,
 		Sync:       store.PendingUpload,
 	}
-	if err := s.store.PutEntry(entry); err != nil {
-		return store.Entry{}, err
-	}
-	if err := s.discardQueuedDeletesForWrite(remote); err != nil {
-		return store.Entry{}, err
-	}
-	if _, err := s.store.SupersedeQueuedUploads(remote); err != nil {
-		return store.Entry{}, err
-	}
-	if _, err := s.store.Enqueue(store.Job{
-		Kind:      store.JobUpload,
-		Path:      remote,
-		CachePath: cachePath,
-		MD5:       md5hex,
-		Size:      size,
+	if err := s.store.Batch(func(b *store.Batch) error {
+		b.PutEntry(entry)
+		b.DiscardJobs(remote, store.JobDelete)
+		b.SupersedeQueuedUploads(remote)
+		b.Enqueue(store.Job{
+			Kind:      store.JobUpload,
+			Path:      remote,
+			CachePath: cachePath,
+			MD5:       md5hex,
+			Size:      size,
+		})
+		return nil
 	}); err != nil {
 		return store.Entry{}, err
 	}
+	replacement.Commit()
 	return entry, nil
 }
 
@@ -745,10 +835,12 @@ func (s *Service) mergeUploadRange(remote, cachePath, partPath string, start, en
 	if err := merge.Close(); err != nil {
 		return store.Entry{}, false, err
 	}
-	if err := os.Rename(mergePath, cachePath); err != nil {
+	replacement, err := s.replaceCacheFile(mergePath, cachePath)
+	if err != nil {
 		return store.Entry{}, false, err
 	}
 	cleanup = false
+	defer replacement.Rollback()
 
 	entry := store.Entry{
 		Path:       remote,
@@ -766,26 +858,24 @@ func (s *Service) mergeUploadRange(remote, cachePath, partPath string, start, en
 		entry.MD5 = md5hex
 		entry.Sync = store.PendingUpload
 	}
-	if err := s.store.PutEntry(entry); err != nil {
-		return store.Entry{}, false, err
-	}
-	if err := s.discardQueuedDeletesForWrite(remote); err != nil {
-		return store.Entry{}, false, err
-	}
-	if _, err := s.store.SupersedeQueuedUploads(remote); err != nil {
-		return store.Entry{}, false, err
-	}
-	if complete {
-		if _, err := s.store.Enqueue(store.Job{
-			Kind:      store.JobUpload,
-			Path:      remote,
-			CachePath: cachePath,
-			MD5:       entry.MD5,
-			Size:      total,
-		}); err != nil {
-			return store.Entry{}, false, err
+	if err := s.store.Batch(func(b *store.Batch) error {
+		b.PutEntry(entry)
+		b.DiscardJobs(remote, store.JobDelete)
+		b.SupersedeQueuedUploads(remote)
+		if complete {
+			b.Enqueue(store.Job{
+				Kind:      store.JobUpload,
+				Path:      remote,
+				CachePath: cachePath,
+				MD5:       entry.MD5,
+				Size:      total,
+			})
 		}
+		return nil
+	}); err != nil {
+		return store.Entry{}, false, err
 	}
+	replacement.Commit()
 	return entry, complete, nil
 }
 
@@ -1161,9 +1251,13 @@ func (s *Service) Delete(remotePath string) error {
 		}
 		return nil
 	}
-	s.store.SetEntrySync(remote, store.PendingDelete, "")
-	_, err = s.store.Enqueue(store.Job{Kind: store.JobDelete, Path: remote})
-	return err
+	return s.store.Batch(func(b *store.Batch) error {
+		if _, ok := b.SetEntrySync(remote, store.PendingDelete, ""); !ok {
+			return ErrNotFound
+		}
+		b.Enqueue(store.Job{Kind: store.JobDelete, Path: remote})
+		return nil
+	})
 }
 
 // RetryJob requeues a failed sync job and restores the catalog state to the
@@ -1176,24 +1270,42 @@ func (s *Service) RetryJob(id int64) (store.Job, error) {
 	if job.State != store.Failed {
 		return store.Job{}, ErrRetryUnavailable
 	}
-	if err := s.restoreEntryStateForRetry(job); err != nil {
-		return store.Job{}, err
-	}
-	retried, ok, err := s.store.RetryJob(id)
+	var retried store.Job
+	err := s.store.Batch(func(b *store.Batch) error {
+		current, ok := b.GetJob(id)
+		if !ok {
+			return ErrNotFound
+		}
+		if current.State != store.Failed {
+			return ErrRetryUnavailable
+		}
+		if err := s.restoreEntryStateForRetryBatch(b, current); err != nil {
+			return err
+		}
+		var retryOK bool
+		retried, retryOK = b.RetryJob(id)
+		if !retryOK {
+			return ErrRetryUnavailable
+		}
+		return nil
+	})
 	if err != nil {
 		return store.Job{}, err
-	}
-	if !ok {
-		return store.Job{}, ErrRetryUnavailable
 	}
 	return retried, nil
 }
 
 func (s *Service) restoreEntryStateForRetry(job store.Job) error {
+	return s.store.Batch(func(b *store.Batch) error {
+		return s.restoreEntryStateForRetryBatch(b, job)
+	})
+}
+
+func (s *Service) restoreEntryStateForRetryBatch(b *store.Batch, job store.Job) error {
 	switch job.Kind {
 	case store.JobUpload:
-		if _, ok := s.store.GetEntry(job.Path); !ok {
-			return s.store.PutEntry(store.Entry{
+		if _, ok := b.GetEntry(job.Path); !ok {
+			b.PutEntry(store.Entry{
 				Path:       job.Path,
 				Size:       job.Size,
 				MD5:        job.MD5,
@@ -1202,17 +1314,23 @@ func (s *Service) restoreEntryStateForRetry(job store.Job) error {
 				MTime:      time.Now(),
 				Sync:       store.PendingUpload,
 			})
+			return nil
 		}
-		return s.store.SetEntrySync(job.Path, store.PendingUpload, "")
+		b.SetEntrySync(job.Path, store.PendingUpload, "")
+		return nil
 	case store.JobMkdir:
-		if _, ok := s.store.GetEntry(job.Path); !ok {
-			return s.store.PutEntry(store.Entry{Path: job.Path, IsDir: true, MTime: time.Now(), Sync: store.PendingUpload})
+		if _, ok := b.GetEntry(job.Path); !ok {
+			b.PutEntry(store.Entry{Path: job.Path, IsDir: true, MTime: time.Now(), Sync: store.PendingUpload})
+			return nil
 		}
-		return s.store.SetEntrySync(job.Path, store.PendingUpload, "")
+		b.SetEntrySync(job.Path, store.PendingUpload, "")
+		return nil
 	case store.JobDelete:
-		return s.store.SetEntrySync(job.Path, store.PendingDelete, "")
+		b.SetEntrySync(job.Path, store.PendingDelete, "")
+		return nil
 	case store.JobRename:
-		return s.store.SetEntrySync(job.Path, store.PendingRename, "")
+		b.SetEntrySync(job.Path, store.PendingRename, "")
+		return nil
 	default:
 		return ErrRetryUnavailable
 	}
@@ -1325,9 +1443,7 @@ func (s *Service) Rename(fromPath, toPath string) error {
 	if s.canRenameLocalUpload(from, entry) {
 		return s.renameLocalUpload(from, to, entry)
 	}
-	s.store.SetEntrySync(from, store.PendingRename, "")
-	_, err = s.store.Enqueue(store.Job{Kind: store.JobRename, Path: from, DestPath: to})
-	return err
+	return s.enqueueRemoteRename(from, to)
 }
 
 func (s *Service) canRenameLocalUpload(from string, entry store.Entry) bool {
@@ -1345,24 +1461,19 @@ func (s *Service) renameLocalUpload(from, to string, entry store.Entry) error {
 		return ErrNotFound
 	}
 	if !s.canRenameLocalUpload(from, current) {
-		s.store.SetEntrySync(from, store.PendingRename, "")
-		_, err := s.store.Enqueue(store.Job{Kind: store.JobRename, Path: from, DestPath: to})
-		return err
+		return s.enqueueRemoteRename(from, to)
 	}
 	entry = current
 
 	cachePath := s.cacheNameFor(to)
+	var replacement *cacheReplacement
 	if entry.CachePath != cachePath {
-		_ = os.Remove(cachePath)
-		if err := os.Rename(entry.CachePath, cachePath); err != nil {
+		var err error
+		replacement, err = s.moveCacheFile(entry.CachePath, cachePath)
+		if err != nil {
 			return err
 		}
-	}
-	if _, _, err := s.store.DiscardJobs(from, store.JobUpload, store.JobMkdir); err != nil {
-		return err
-	}
-	if err := s.store.DeleteEntry(from); err != nil {
-		return err
+		defer replacement.Rollback()
 	}
 
 	entry.Path = to
@@ -1372,20 +1483,36 @@ func (s *Service) renameLocalUpload(from, to string, entry store.Entry) error {
 	entry.Sync = store.PendingUpload
 	entry.Error = ""
 	entry.MTime = time.Now()
-	if err := s.store.PutEntry(entry); err != nil {
+	if err := s.store.Batch(func(b *store.Batch) error {
+		b.DiscardJobs(from, store.JobUpload, store.JobMkdir)
+		b.DeleteEntry(from)
+		b.PutEntry(entry)
+		b.SupersedeQueuedUploads(to)
+		b.Enqueue(store.Job{
+			Kind:      store.JobUpload,
+			Path:      to,
+			CachePath: cachePath,
+			MD5:       entry.MD5,
+			Size:      entry.Size,
+		})
+		return nil
+	}); err != nil {
 		return err
 	}
-	if _, err := s.store.SupersedeQueuedUploads(to); err != nil {
-		return err
+	if replacement != nil {
+		replacement.Commit()
 	}
-	_, err := s.store.Enqueue(store.Job{
-		Kind:      store.JobUpload,
-		Path:      to,
-		CachePath: cachePath,
-		MD5:       entry.MD5,
-		Size:      entry.Size,
+	return nil
+}
+
+func (s *Service) enqueueRemoteRename(from, to string) error {
+	return s.store.Batch(func(b *store.Batch) error {
+		if _, ok := b.SetEntrySync(from, store.PendingRename, ""); !ok {
+			return ErrNotFound
+		}
+		b.Enqueue(store.Job{Kind: store.JobRename, Path: from, DestPath: to})
+		return nil
 	})
-	return err
 }
 
 // Mkdir enqueues a directory creation and records a directory entry.
@@ -1395,10 +1522,11 @@ func (s *Service) Mkdir(remotePath string) (store.Entry, error) {
 		return store.Entry{}, err
 	}
 	entry := store.Entry{Path: remote, IsDir: true, MTime: time.Now(), Sync: store.PendingUpload}
-	if err := s.store.PutEntry(entry); err != nil {
-		return store.Entry{}, err
-	}
-	if _, err := s.store.Enqueue(store.Job{Kind: store.JobMkdir, Path: remote}); err != nil {
+	if err := s.store.Batch(func(b *store.Batch) error {
+		entry = b.PutEntry(entry)
+		b.Enqueue(store.Job{Kind: store.JobMkdir, Path: remote})
+		return nil
+	}); err != nil {
 		return store.Entry{}, err
 	}
 	return entry, nil
@@ -1425,6 +1553,42 @@ func (s *Service) ReadCache(remotePath string) (io.ReadCloser, store.Entry, erro
 		return nil, entry, ErrNotCached
 	}
 	return f, entry, nil
+}
+
+// OpenDownloadCache exposes complete cache-ready file content for the relay's
+// controller download path. It deliberately refuses incomplete range uploads,
+// validation-pending files, directories, and entries being deleted or renamed.
+func (s *Service) OpenDownloadCache(remotePath string) (io.ReaderAt, io.Closer, int64, string, error) {
+	rc, entry, err := s.ReadCache(remotePath)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = rc.Close()
+		}
+	}()
+	if entry.IsDir || entry.MD5 == "" {
+		return nil, nil, 0, "", ErrNotCached
+	}
+	switch entry.Sync {
+	case store.PendingDelete, store.Deleting, store.PendingRename, store.RemoteOnly:
+		return nil, nil, 0, "", ErrNotCached
+	}
+	f, ok := rc.(*os.File)
+	if !ok {
+		return nil, nil, 0, "", ErrNotCached
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	if info.Size() != entry.Size {
+		return nil, nil, 0, "", ErrNotCached
+	}
+	closeOnError = false
+	return f, f, entry.Size, entry.MD5, nil
 }
 
 // downloadTimeout bounds a single download-on-demand transfer.
@@ -1521,10 +1685,6 @@ func (s *Service) FetchToCache(remotePath string) error {
 		os.Remove(finalTmp)
 		return werr
 	}
-	if err := os.Rename(finalTmp, cachePath); err != nil {
-		os.Remove(finalTmp)
-		return err
-	}
 
 	entry.CachePath = cachePath
 	entry.Size = int64(len(content))
@@ -1532,7 +1692,23 @@ func (s *Service) FetchToCache(remotePath string) error {
 	entry.CacheState = store.CacheReady
 	entry.CacheCheckedAt = time.Now()
 	entry.Sync = store.Synced
-	return s.store.PutEntry(entry)
+
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+	replacement, err := s.replaceCacheFile(finalTmp, cachePath)
+	if err != nil {
+		os.Remove(finalTmp)
+		return err
+	}
+	defer replacement.Rollback()
+	if err := s.store.Batch(func(b *store.Batch) error {
+		b.PutEntry(entry)
+		return nil
+	}); err != nil {
+		return err
+	}
+	replacement.Commit()
+	return nil
 }
 
 // md5hex returns the lowercase hex MD5 of b.

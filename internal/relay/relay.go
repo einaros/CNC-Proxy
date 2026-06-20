@@ -14,8 +14,10 @@ package relay
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +26,13 @@ import (
 	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
+
+// DownloadCache is an optional local source for controller FILE_START download
+// requests. A cache hit lets the relay satisfy a controller preview/select
+// download without requiring the machine to already have those bytes.
+type DownloadCache interface {
+	OpenDownloadCache(remotePath string) (io.ReaderAt, io.Closer, int64, string, error)
+}
 
 // Observer is notified of relay session lifecycle and of machine state observed
 // by sniffing STATUS_RES frames. The session arbiter implements this so the
@@ -56,6 +65,11 @@ type Server struct {
 	// GcodeLog, if set, records the controller's command lines and the machine's
 	// textual output as they pass through the relay (sniffed, never altered).
 	GcodeLog *gcodelog.Log
+
+	// DownloadCache, if set, may satisfy controller `download <path>` file
+	// transfers from the proxy's local cache. Cache misses fall back to normal
+	// transparent forwarding.
+	DownloadCache DownloadCache
 
 	active atomic.Bool
 
@@ -247,12 +261,34 @@ func (s *Server) openMachine() (*machinetransport.Opened, error) {
 func (s *Server) pumpControllerToMachine(client net.Conn, machine machinetransport.Conn, m *mux) {
 	var sc protocol.Scanner
 	buf := make([]byte, 32*1024)
+	var cached *controllerDownload
+	defer func() {
+		if cached != nil {
+			cached.Close()
+			m.finishLocalControllerTransfer()
+		}
+	}()
 	for {
 		n, rerr := client.Read(buf)
 		if n > 0 {
 			for _, f := range sc.Push(buf[:n]) {
 				logFrame("C->M", f)
 				s.logControllerCommand(f)
+				if cached != nil {
+					done, handled := cached.Handle(client, f)
+					if done {
+						cached.Close()
+						cached = nil
+						m.finishLocalControllerTransfer()
+					}
+					if handled || done {
+						continue
+					}
+				}
+				if dl, ok := s.tryStartCachedDownload(client, m, f); ok {
+					cached = dl
+					continue
+				}
 				if m.noteControllerFrame(f, f.Raw) {
 					if _, werr := machine.Write(f.Raw); werr != nil {
 						return
@@ -272,6 +308,44 @@ func (s *Server) pumpControllerToMachine(client net.Conn, machine machinetranspo
 			return
 		}
 	}
+}
+
+func (s *Server) tryStartCachedDownload(client net.Conn, m *mux, f protocol.Frame) (*controllerDownload, bool) {
+	if s.DownloadCache == nil || f.Cmd != protocol.CmdFileStart {
+		return nil, false
+	}
+	remote, ok := downloadPath(f)
+	if !ok {
+		return nil, false
+	}
+	reader, closer, size, md5hex, err := s.DownloadCache.OpenDownloadCache(remote)
+	if err != nil {
+		return nil, false
+	}
+	dl := newControllerDownload(reader, closer, size, md5hex)
+	if !m.beginLocalControllerTransfer() {
+		dl.Close()
+		return nil, false
+	}
+	if err := dl.Start(client); err != nil {
+		dl.Close()
+		m.finishLocalControllerTransfer()
+		return nil, false
+	}
+	return dl, true
+}
+
+func downloadPath(f protocol.Frame) (string, bool) {
+	line := strings.TrimSpace(string(f.Data))
+	verb, arg, ok := strings.Cut(line, " ")
+	if !ok || strings.ToLower(strings.TrimSpace(verb)) != "download" {
+		return "", false
+	}
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return "", false
+	}
+	return protocol.Unescape(arg), true
 }
 
 // pumpMachineToController forwards machine frames to the controller, diverting

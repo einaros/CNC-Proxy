@@ -21,7 +21,7 @@ const state = {
   ui: { macros: [], macro_buttons: [], log: { filter: "all", autoscroll: true }, gamepad: defaultGamepadSettings() },
   settingsSaveTimer: null,
   macroRunning: false,
-  activeTab: "control",
+  activeTab: "active-job",
   filesLoaded: false,
   currentDir: "",
   controlPendingAction: "",
@@ -53,6 +53,10 @@ const state = {
     lead: { x: 0, y: 0, z: 0 },
     path: [],
     buttons: [],
+    stepPending: 0,
+    stepLabel: "",
+    stepFeedback: "",
+    stepFeedbackKind: "",
     error: "",
     errorCode: "",
     sent: new Map(),
@@ -312,7 +316,6 @@ function rememberCommand(line) {
   state.commandHistory = [line, ...state.commandHistory.filter((v) => v !== line)].slice(0, 24);
   state.historyIndex = -1;
   saveCommandHistory();
-  renderCommandHistory();
 }
 
 function newID(prefix) {
@@ -813,6 +816,17 @@ function renderJog() {
   arm.textContent = j.armed ? "Disarm Jog" : "Arm Jog";
   arm.classList.toggle("armed", j.armed);
   arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online";
+  const stepDistance = document.getElementById("jog-step-distance");
+  if (stepDistance) stepDistance.disabled = !j.caps || !j.caps.enabled || j.link !== "online" || !!j.stepPending;
+  const stepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.stepPending;
+  for (const btn of document.querySelectorAll("[data-jog-step-axis]")) {
+    btn.disabled = !stepReady;
+  }
+  const stepFeedback = document.getElementById("jog-step-feedback");
+  if (stepFeedback) {
+    stepFeedback.textContent = j.stepFeedback || "";
+    stepFeedback.className = j.stepFeedbackKind || "";
+  }
   renderJogPlot();
 }
 
@@ -823,17 +837,17 @@ function jogPanelMessage() {
     return { text: "Connecting to jog service...", kind: "" };
   }
   if (!j.pad) {
-    return { text: "Connect a gamepad. Then arm jog, hold the deadman button, and move an axis.", kind: "" };
+    return { text: "Arm jog to use step buttons. Connect a gamepad for continuous jog.", kind: "" };
   }
   const deadmanButton = state.ui.gamepad.deadman_button;
   if (!j.armed && j.availability && !j.availability.available) {
     return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
   }
   if (!j.armed) {
-    return { text: `Ready. Click Arm Jog, then hold button ${deadmanButton} and move an axis.`, kind: "ok" };
+    return { text: `Ready. Arm jog for step buttons, or hold button ${deadmanButton} and move an axis.`, kind: "ok" };
   }
   if (!j.deadman) {
-    return { text: `Armed. Hold deadman button ${deadmanButton} to allow motion.`, kind: "" };
+    return { text: `Armed. Use step buttons, or hold deadman button ${deadmanButton} for gamepad motion.`, kind: "" };
   }
   if (Math.abs(j.axes.x) < 0.12 && Math.abs(j.axes.y) < 0.12 && Math.abs(j.axes.z) < 0.12) {
     return { text: "Armed. Move an axis while holding deadman.", kind: "ok" };
@@ -1418,6 +1432,8 @@ function renderRuns() {
   const div = document.getElementById("run-history");
   const runs = Array.isArray(state.runs) ? state.runs.slice(0, 8) : [];
   document.getElementById("run-count").textContent = String(runs.length);
+  const clear = document.getElementById("run-history-clear");
+  if (clear) clear.disabled = runs.length === 0;
   if (!runs.length) {
     div.innerHTML = `<div class="empty">No observed runs yet.</div>`;
     return;
@@ -1891,7 +1907,7 @@ async function selectActiveGcode(path) {
     state.activeGcode = await r.json();
     setActiveFeedback("Preview loaded for " + relPath(path) + ".", "ok");
     clearNotice("active-gcode");
-    showTab("control");
+    showTab("active-job");
   } catch (e) {
     setActiveFeedback("Preview failed: " + e.message, "error");
     setNotice("Select gcode failed: " + e.message, "error", "active-gcode");
@@ -1912,7 +1928,7 @@ async function runActiveGcode() {
   try {
     const r = await request("/api/gcode/active/run", { method: "POST" });
     const result = await r.json();
-    setActiveFeedback(result.message || "Run command sent.", "ok");
+    setActiveFeedback(result.message || "Run command sent; machine confirmation was not available.", result.verified ? "ok" : "");
     clearNotice("active-gcode-run");
     pollMachine();
     setTimeout(pollMachine, 1200);
@@ -1995,7 +2011,7 @@ async function setCurrentTool(toolID = null) {
       body: JSON.stringify({ tool_id: toolID }),
     });
     const result = await r.json();
-    setToolFeedback(result.message || "Set-tool command sent.", "ok");
+    setToolFeedback(result.message || "Set-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
     clearNotice("tool");
     resetToolSelects();
     pollMachine();
@@ -2028,7 +2044,7 @@ async function changeTool(toolID = null) {
       body: JSON.stringify({ tool_id: toolID }),
     });
     const result = await r.json();
-    setToolFeedback(result.message || "Change-tool command sent.", "ok");
+    setToolFeedback(result.message || "Change-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
     clearNotice("tool");
     resetToolSelects();
     pollMachine();
@@ -2050,7 +2066,7 @@ async function calibrateCurrentTool() {
   try {
     const r = await request("/api/tool/calibrate", { method: "POST" });
     const result = await r.json();
-    setToolFeedback(result.message || "Calibration command sent.", "ok");
+    setToolFeedback(result.message || "Calibration command sent; machine confirmation was not available.", result.verified ? "ok" : "");
     clearNotice("tool");
     pollMachine();
     setTimeout(pollMachine, 1200);
@@ -2071,7 +2087,7 @@ async function dropCurrentTool() {
   try {
     const r = await request("/api/tool/drop", { method: "POST" });
     const result = await r.json();
-    setToolFeedback(result.message || "Drop-tool command sent.", "ok");
+    setToolFeedback(result.message || "Drop-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
     clearNotice("tool");
     resetToolSelects();
     pollMachine();
@@ -2351,25 +2367,6 @@ function submitGcode(line) {
   if (!line) return;
   rememberCommand(line);
   sendGcode(line);
-}
-
-function renderCommandHistory() {
-  const box = document.getElementById("gcode-history");
-  box.innerHTML = "";
-  for (const line of state.commandHistory.slice(0, 8)) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "chip";
-    btn.textContent = line;
-    btn.title = line;
-    btn.onclick = () => {
-      const input = document.getElementById("gcode-input");
-      input.value = line;
-      input.focus();
-      input.select();
-    };
-    box.appendChild(btn);
-  }
 }
 
 function navigateCommandHistory(input, dir) {
@@ -2787,6 +2784,11 @@ function connectJog() {
     state.jog.link = "offline";
     state.jog.armed = false;
     state.jog.sent.clear();
+    if (state.jog.stepPending) {
+      state.jog.stepPending = 0;
+      state.jog.stepFeedback = "Step failed: jog service disconnected.";
+      state.jog.stepFeedbackKind = "error";
+    }
     renderJog();
     scheduleJogReconnect();
   };
@@ -2836,11 +2838,52 @@ function sendJog(msg) {
   const ws = state.jog.ws;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     connectJog();
-    return;
+    return 0;
   }
   if (!msg.seq) msg.seq = state.jog.seq++;
   state.jog.sent.set(msg.seq, performance.now());
   ws.send(JSON.stringify(msg));
+  return msg.seq;
+}
+
+function jogStepDistance() {
+  const v = Number(document.getElementById("jog-step-distance")?.value);
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+function jogStepLabel(axis, distance) {
+  const sign = distance > 0 ? "+" : "-";
+  return axis.toUpperCase() + sign + " " + Math.abs(distance).toFixed(Math.abs(distance) < 1 ? 1 : 0) + " mm";
+}
+
+function setJogStepFeedback(text, kind = "") {
+  state.jog.stepFeedback = text;
+  state.jog.stepFeedbackKind = kind;
+  renderJog();
+}
+
+function stepJog(axis, dir) {
+  if (state.jog.link !== "online") {
+    setJogStepFeedback("Jog service is not connected.", "error");
+    connectJog();
+    return;
+  }
+  if (!state.jog.armed) {
+    setJogStepFeedback("Arm jog before using step buttons.", "error");
+    return;
+  }
+  const distance = jogStepDistance() * dir;
+  const label = jogStepLabel(axis, distance);
+  const seq = sendJog({ type: "step", axis, distance });
+  if (!seq) {
+    setJogStepFeedback("Jog service is not connected.", "error");
+    return;
+  }
+  state.jog.stepPending = seq;
+  state.jog.stepLabel = label;
+  state.jog.stepFeedback = "Sending " + label + "...";
+  state.jog.stepFeedbackKind = "";
+  renderJog();
 }
 
 function applyJogEvent(ev) {
@@ -2916,9 +2959,19 @@ function applyJogEvent(ev) {
       document.getElementById("jog-latency").textContent = Math.round(performance.now() - sent) + "ms";
       state.jog.sent.delete(ev.seq);
     }
+    if (ev.seq && ev.seq === state.jog.stepPending) {
+      state.jog.stepPending = 0;
+      state.jog.stepFeedback = "Step command sent: " + state.jog.stepLabel;
+      state.jog.stepFeedbackKind = "";
+    }
     state.jog.error = "";
     state.jog.errorCode = "";
   } else if (ev.type === "error") {
+    if (ev.seq && ev.seq === state.jog.stepPending) {
+      state.jog.stepPending = 0;
+      state.jog.stepFeedback = "Step failed: " + jogErrorText(ev.code || ev.message);
+      state.jog.stepFeedbackKind = "error";
+    }
     state.jog.errorCode = ev.code || "";
     state.jog.error = ev.message || ev.code || "jog error";
     if (ev.code === "controller_waiting" || ev.code === "not_idle" || ev.code === "stale_status") {
@@ -3101,12 +3154,16 @@ function connectFilesSSE() {
 }
 
 function showTab(name) {
+  const tabs = ["active-job", "gcode-console", "control", "files"];
+  if (!tabs.includes(name)) name = "active-job";
   state.activeTab = name;
-  document.getElementById("control-view").hidden = name !== "control";
-  document.getElementById("files-view").hidden = name !== "files";
-  document.getElementById("tab-control").classList.toggle("active", name === "control");
-  document.getElementById("tab-files").classList.toggle("active", name === "files");
+  for (const tab of tabs) {
+    const view = document.getElementById(tab + "-view");
+    if (view) view.hidden = tab !== name;
+    document.getElementById("tab-" + tab)?.classList.toggle("active", tab === name);
+  }
   if (name === "files") connectFilesSSE();
+  if (name === "active-job") scheduleGcodeRender();
 }
 
 async function pollMachine() {
@@ -3135,10 +3192,26 @@ async function loadRuns() {
   }
 }
 
+async function clearRunHistory() {
+  const btn = document.getElementById("run-history-clear");
+  if (btn) btn.disabled = true;
+  try {
+    await request("/api/runs", { method: "DELETE" });
+    state.runs = [];
+    renderRuns();
+    clearNotice("run-history");
+  } catch (e) {
+    setNotice("Clear run history failed: " + e.message, "error", "run-history");
+    renderRuns();
+  }
+}
+
 function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("notice-clear").onclick = () => clearNotice();
+  document.getElementById("tab-active-job").onclick = () => showTab("active-job");
+  document.getElementById("tab-gcode-console").onclick = () => showTab("gcode-console");
   document.getElementById("tab-control").onclick = () => showTab("control");
   document.getElementById("tab-files").onclick = () => showTab("files");
   drop.onclick = () => input.click();
@@ -3178,9 +3251,6 @@ function init() {
       state.historyIndex = -1;
     }
   };
-  for (const btn of document.querySelectorAll("[data-gcode]")) {
-    btn.onclick = () => submitGcode(btn.dataset.gcode);
-  }
   document.getElementById("log-filter").onchange = (e) => {
     state.logFilter = e.target.value;
     state.ui.log.filter = state.logFilter;
@@ -3202,6 +3272,7 @@ function init() {
   document.getElementById("log-copy").onclick = copyVisibleLog;
   document.getElementById("log-export").onclick = exportVisibleLog;
   document.getElementById("log-clear").onclick = clearGcodeLog;
+  document.getElementById("run-history-clear").onclick = clearRunHistory;
   document.getElementById("backup-export").onclick = exportBackup;
   document.getElementById("backup-import").onclick = () => document.getElementById("backup-file").click();
   document.getElementById("backup-file").onchange = (e) => {
@@ -3223,6 +3294,9 @@ function init() {
   document.getElementById("gamepad-slow-button-0").onchange = updateGamepadButtons;
   document.getElementById("gamepad-slow-button-1").onchange = updateGamepadButtons;
   document.getElementById("gamepad-add-macro").onclick = addGamepadMacroBinding;
+  for (const btn of document.querySelectorAll("[data-jog-step-axis]")) {
+    btn.onclick = () => stepJog(btn.dataset.jogStepAxis, Number(btn.dataset.jogStepDir) || 1);
+  }
 
   document.getElementById("ctl-hold").onclick = () => sendControl("hold");
   document.getElementById("ctl-resume").onclick = () => sendControl("resume");
@@ -3276,7 +3350,6 @@ function init() {
   renderFiles();
   renderJobs();
   renderRuns();
-  renderCommandHistory();
   connectControlSSE();
   pollMachine();
   loadRuns();

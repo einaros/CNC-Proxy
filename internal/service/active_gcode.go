@@ -71,12 +71,13 @@ type GcodeSegment struct {
 
 // MachineActionResult is returned by synchronous machine-action endpoints.
 type MachineActionResult struct {
-	Action  string `json:"action"`
-	Path    string `json:"path,omitempty"`
-	ToolID  int    `json:"tool_id,omitempty"`
-	Command string `json:"command,omitempty"`
-	Output  string `json:"output,omitempty"`
-	Message string `json:"message"`
+	Action   string `json:"action"`
+	Path     string `json:"path,omitempty"`
+	ToolID   int    `json:"tool_id,omitempty"`
+	Command  string `json:"command,omitempty"`
+	Output   string `json:"output,omitempty"`
+	Message  string `json:"message"`
+	Verified bool   `json:"verified"`
 }
 
 // ActiveGcode returns the current proxy-side file selection.
@@ -240,7 +241,7 @@ func (s *Service) RunActiveGcode() (MachineActionResult, error) {
 		Path:    path,
 		Command: display,
 		Output:  out,
-		Message: "Run command sent for " + path + ".",
+		Message: "Run command sent for " + path + "; machine confirmation was not available.",
 	}
 	if err != nil {
 		res.Message = err.Error()
@@ -284,7 +285,7 @@ func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
 		ToolID:  toolID,
 		Command: display,
 		Output:  out,
-		Message: fmt.Sprintf("Set-tool command sent for %s.", toolDisplayName(toolID)),
+		Message: fmt.Sprintf("Set-tool command sent for %s; machine confirmation was not available.", toolDisplayName(toolID)),
 	}
 	if err != nil {
 		res.Message = err.Error()
@@ -307,7 +308,7 @@ func (s *Service) ChangeTool(toolID int) (MachineActionResult, error) {
 		ToolID:  toolID,
 		Command: display,
 		Output:  out,
-		Message: fmt.Sprintf("Change-tool command sent for %s.", toolDisplayName(toolID)),
+		Message: fmt.Sprintf("Change-tool command sent for %s; machine confirmation was not available.", toolDisplayName(toolID)),
 	}
 	if err != nil {
 		res.Message = err.Error()
@@ -325,7 +326,7 @@ func (s *Service) DropCurrentTool() (MachineActionResult, error) {
 		ToolID:  -1,
 		Command: display,
 		Output:  out,
-		Message: "Drop-tool command sent.",
+		Message: "Drop-tool command sent; machine confirmation was not available.",
 	}
 	if err != nil {
 		res.Message = err.Error()
@@ -342,7 +343,7 @@ func (s *Service) CalibrateCurrentTool() (MachineActionResult, error) {
 		Action:  "calibrate_tool",
 		Command: display,
 		Output:  out,
-		Message: "Calibration command sent.",
+		Message: "Calibration command sent; machine confirmation was not available.",
 	}
 	if err != nil {
 		res.Message = err.Error()
@@ -365,7 +366,7 @@ func (s *Service) sendConsoleMachineAction(displayLine, wireLine string) (string
 	if err != nil {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
 	} else if out == "" {
-		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "sent: no reply observed")
 	}
 	return out, err
 }

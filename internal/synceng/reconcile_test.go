@@ -299,6 +299,28 @@ func TestPrepareStartupCacheValidationMarksSyncedOnly(t *testing.T) {
 	}
 }
 
+func TestPrepareStartupCacheValidationMarksRunningJobsFailed(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	eng := New(Config{Store: st})
+	job, err := st.Enqueue(store.Job{Kind: store.JobUpload, Path: "/sd/gcodes/interrupted.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(job.ID, func(j *store.Job) {
+		j.State = store.Running
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.PrepareStartupCacheValidation(); err != nil {
+		t.Fatal(err)
+	}
+	got := st.ListJobs()[0]
+	if got.State != store.Failed || got.LastError == "" {
+		t.Fatalf("running job after startup prepare = %+v, want failed with message", got)
+	}
+}
+
 func TestValidateStartupCacheOutcomes(t *testing.T) {
 	m, st, arb, tr := setup(t)
 	eng := newEngine(st, arb)

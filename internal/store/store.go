@@ -44,6 +44,22 @@ type persisted struct {
 	ActiveGcodePath string            `json:"active_gcode_path,omitempty"`
 }
 
+type modelSnapshot struct {
+	entries map[string]*Entry
+	jobs    []*Job
+	nextJob int64
+	ui      UISettings
+	active  string
+}
+
+// Batch groups catalog and queue mutations into one durable store flush.
+type Batch struct {
+	s      *Store
+	now    time.Time
+	dirty  bool
+	events []Event
+}
+
 // Snapshot is an exportable copy of the durable state.json model.
 type Snapshot struct {
 	Entries         map[string]Entry `json:"entries"`
@@ -115,8 +131,6 @@ func (s *Store) Snapshot() Snapshot {
 
 // Restore replaces the durable model with a backup snapshot.
 func (s *Store) Restore(in Snapshot) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	entries := make(map[string]*Entry, len(in.Entries))
 	for k, e := range in.Entries {
 		cp := e
@@ -136,16 +150,12 @@ func (s *Store) Restore(in Snapshot) error {
 	if nextJob <= 0 {
 		nextJob = 1
 	}
-	s.entries = entries
-	s.jobs = jobs
-	s.nextJob = nextJob
-	s.ui = normalizeUISettings(in.UI, s.now())
-	s.active = strings.TrimSpace(in.ActiveGcodePath)
-	if err := s.flushLocked(); err != nil {
-		return err
-	}
-	s.publishLocked(Event{Kind: "reset"})
-	return nil
+	ui := normalizeUISettings(in.UI, s.now())
+	active := strings.TrimSpace(in.ActiveGcodePath)
+	return s.Batch(func(b *Batch) error {
+		b.replaceModel(entries, jobs, nextJob, ui, active)
+		return nil
+	})
 }
 
 func normalizeLoadedEntry(e *Entry) {
@@ -230,6 +240,375 @@ func (s *Store) publishLocked(ev Event) {
 	}
 }
 
+func (s *Store) snapshotLocked() modelSnapshot {
+	snap := modelSnapshot{
+		entries: make(map[string]*Entry, len(s.entries)),
+		jobs:    make([]*Job, 0, len(s.jobs)),
+		nextJob: s.nextJob,
+		ui:      copyUISettings(s.ui),
+		active:  s.active,
+	}
+	for k, e := range s.entries {
+		cp := *e
+		snap.entries[k] = &cp
+	}
+	for _, j := range s.jobs {
+		cp := *j
+		snap.jobs = append(snap.jobs, &cp)
+	}
+	return snap
+}
+
+func (s *Store) restoreLocked(snap modelSnapshot) {
+	s.entries = snap.entries
+	s.jobs = snap.jobs
+	s.nextJob = snap.nextJob
+	s.ui = snap.ui
+	s.active = snap.active
+}
+
+// Batch runs fn while holding the store lock, flushing the full model once at
+// the end. If fn or the flush fails, all in-memory changes are rolled back and
+// no subscriber events are published.
+func (s *Store) Batch(fn func(*Batch) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.batchLocked(fn)
+}
+
+func (s *Store) batchLocked(fn func(*Batch) error) error {
+	snap := s.snapshotLocked()
+	b := &Batch{s: s, now: s.now()}
+	if err := fn(b); err != nil {
+		s.restoreLocked(snap)
+		return err
+	}
+	if !b.dirty {
+		return nil
+	}
+	if err := s.flushLocked(); err != nil {
+		s.restoreLocked(snap)
+		return err
+	}
+	for _, ev := range b.events {
+		s.publishLocked(ev)
+	}
+	return nil
+}
+
+func (b *Batch) markDirty() {
+	b.dirty = true
+}
+
+func (b *Batch) publishEntry(e Entry) {
+	cp := e
+	b.events = append(b.events, Event{Kind: "entry", Entry: &cp})
+}
+
+func (b *Batch) publishJob(j Job) {
+	cp := j
+	b.events = append(b.events, Event{Kind: "job", Job: &cp})
+}
+
+func (b *Batch) publishReset() {
+	b.events = append(b.events, Event{Kind: "reset"})
+}
+
+func (b *Batch) replaceModel(entries map[string]*Entry, jobs []*Job, nextJob int64, ui UISettings, active string) {
+	b.s.entries = entries
+	b.s.jobs = jobs
+	b.s.nextJob = nextJob
+	b.s.ui = ui
+	b.s.active = active
+	b.markDirty()
+	b.publishReset()
+}
+
+// GetEntry returns a copy of an entry visible inside this batch.
+func (b *Batch) GetEntry(path string) (Entry, bool) {
+	e, ok := b.s.entries[path]
+	if !ok {
+		return Entry{}, false
+	}
+	return *e, true
+}
+
+// GetJob returns a copy of a job visible inside this batch.
+func (b *Batch) GetJob(id int64) (Job, bool) {
+	for _, j := range b.s.jobs {
+		if j.ID == id {
+			return *j, true
+		}
+	}
+	return Job{}, false
+}
+
+// ListJobs returns copies of all jobs visible inside this batch.
+func (b *Batch) ListJobs() []Job {
+	out := make([]Job, 0, len(b.s.jobs))
+	for _, j := range b.s.jobs {
+		out = append(out, *j)
+	}
+	return out
+}
+
+// PutEntry inserts or replaces an entry in this batch.
+func (b *Batch) PutEntry(e Entry) Entry {
+	normalizeNewEntry(&e)
+	e.UpdatedAt = b.now
+	cp := e
+	b.s.entries[e.Path] = &cp
+	b.markDirty()
+	b.publishEntry(cp)
+	return cp
+}
+
+// SetEntrySync updates just the sync state and error of an entry if present.
+func (b *Batch) SetEntrySync(path string, state SyncState, errMsg string) (Entry, bool) {
+	e, ok := b.s.entries[path]
+	if !ok {
+		return Entry{}, false
+	}
+	e.Sync = state
+	e.Error = errMsg
+	e.UpdatedAt = b.now
+	cp := *e
+	b.markDirty()
+	b.publishEntry(cp)
+	return cp, true
+}
+
+// SetEntrySyncIf updates an entry only when its current sync state is allowed.
+func (b *Batch) SetEntrySyncIf(path string, state SyncState, errMsg string, allowed ...SyncState) (Entry, bool) {
+	e, ok := b.s.entries[path]
+	if !ok || !syncStateIn(e.Sync, allowed) {
+		return Entry{}, false
+	}
+	e.Sync = state
+	e.Error = errMsg
+	e.UpdatedAt = b.now
+	cp := *e
+	b.markDirty()
+	b.publishEntry(cp)
+	return cp, true
+}
+
+// SetEntrySyncIfMatch updates an entry only when match accepts the current entry.
+func (b *Batch) SetEntrySyncIfMatch(path string, state SyncState, errMsg string, match func(Entry) bool) (Entry, bool) {
+	e, ok := b.s.entries[path]
+	if !ok {
+		return Entry{}, false
+	}
+	current := *e
+	if !match(current) {
+		return Entry{}, false
+	}
+	e.Sync = state
+	e.Error = errMsg
+	e.UpdatedAt = b.now
+	cp := *e
+	b.markDirty()
+	b.publishEntry(cp)
+	return cp, true
+}
+
+// DeleteEntry removes an entry from the catalog.
+func (b *Batch) DeleteEntry(path string) bool {
+	if _, ok := b.s.entries[path]; !ok {
+		return false
+	}
+	delete(b.s.entries, path)
+	b.markDirty()
+	b.publishEntry(Entry{Path: path, Sync: ""})
+	return true
+}
+
+// DeleteEntryIfSync removes an entry only when its current sync state is allowed.
+func (b *Batch) DeleteEntryIfSync(path string, allowed ...SyncState) (Entry, bool) {
+	e, ok := b.s.entries[path]
+	if !ok || !syncStateIn(e.Sync, allowed) {
+		return Entry{}, false
+	}
+	entry := *e
+	delete(b.s.entries, path)
+	b.markDirty()
+	b.publishEntry(Entry{Path: path, Sync: ""})
+	return entry, true
+}
+
+// DiscardEntry removes a catalog entry and marks matching queued/failed jobs done.
+func (b *Batch) DiscardEntry(path string, kinds ...JobKind) (Entry, bool) {
+	e, ok := b.s.entries[path]
+	if !ok {
+		return Entry{}, false
+	}
+	entry := *e
+	delete(b.s.entries, path)
+	b.markDirty()
+
+	for _, j := range b.matchingQueuedOrFailedJobs(path, kinds...) {
+		j.State = Done
+		j.LastError = ""
+		j.UpdatedAt = b.now
+		b.publishJob(*j)
+	}
+	b.publishEntry(Entry{Path: path, Sync: ""})
+	return entry, true
+}
+
+// DiscardJobs marks matching queued/failed jobs done without requiring an entry.
+func (b *Batch) DiscardJobs(path string, kinds ...JobKind) ([]Job, bool) {
+	var out []Job
+	for _, j := range b.matchingQueuedOrFailedJobs(path, kinds...) {
+		j.State = Done
+		j.LastError = ""
+		j.UpdatedAt = b.now
+		cp := *j
+		out = append(out, cp)
+		b.markDirty()
+		b.publishJob(cp)
+	}
+	return out, len(out) > 0
+}
+
+func (b *Batch) matchingQueuedOrFailedJobs(path string, kinds ...JobKind) []*Job {
+	kindSet := map[JobKind]bool{}
+	for _, kind := range kinds {
+		kindSet[kind] = true
+	}
+	var out []*Job
+	for _, j := range b.s.jobs {
+		if j.Path != path || !kindSet[j.Kind] || (j.State != Queued && j.State != Failed) {
+			continue
+		}
+		out = append(out, j)
+	}
+	return out
+}
+
+// Enqueue appends a job, assigning an ID and timestamps.
+func (b *Batch) Enqueue(j Job) Job {
+	j.ID = b.s.nextJob
+	b.s.nextJob++
+	j.State = Queued
+	j.CreatedAt = b.now
+	j.UpdatedAt = b.now
+	cp := j
+	b.s.jobs = append(b.s.jobs, &cp)
+	b.markDirty()
+	b.publishJob(cp)
+	return cp
+}
+
+// SupersedeQueuedUploads marks still-queued upload jobs for path as done.
+func (b *Batch) SupersedeQueuedUploads(path string) int {
+	n := 0
+	for _, j := range b.s.jobs {
+		if j.Kind == JobUpload && j.Path == path && j.State == Queued {
+			j.State = Done
+			j.UpdatedAt = b.now
+			n++
+			b.markDirty()
+			b.publishJob(*j)
+		}
+	}
+	return n
+}
+
+// UpdateJob applies a mutation to a job by ID.
+func (b *Batch) UpdateJob(id int64, mutate func(*Job)) (Job, bool) {
+	for _, j := range b.s.jobs {
+		if j.ID == id {
+			mutate(j)
+			j.UpdatedAt = b.now
+			cp := *j
+			b.markDirty()
+			b.publishJob(cp)
+			return cp, true
+		}
+	}
+	return Job{}, false
+}
+
+// StartJob moves a queued job to running.
+func (b *Batch) StartJob(id int64) (Job, bool) {
+	for _, j := range b.s.jobs {
+		if j.ID != id {
+			continue
+		}
+		if j.State != Queued {
+			return *j, false
+		}
+		j.State = Running
+		j.UpdatedAt = b.now
+		cp := *j
+		b.markDirty()
+		b.publishJob(cp)
+		return cp, true
+	}
+	return Job{}, false
+}
+
+// RetryJob resets a failed job to queued.
+func (b *Batch) RetryJob(id int64) (Job, bool) {
+	for _, j := range b.s.jobs {
+		if j.ID != id {
+			continue
+		}
+		if j.State != Failed {
+			return *j, false
+		}
+		j.State = Queued
+		j.Attempts = 0
+		j.LastError = ""
+		j.UpdatedAt = b.now
+		cp := *j
+		b.markDirty()
+		b.publishJob(cp)
+		return cp, true
+	}
+	return Job{}, false
+}
+
+// PruneDoneJobs removes completed jobs older than cutoff.
+func (b *Batch) PruneDoneJobs(cutoff time.Time) int {
+	kept := b.s.jobs[:0]
+	removed := 0
+	for _, j := range b.s.jobs {
+		if j.State == Done && j.UpdatedAt.Before(cutoff) {
+			removed++
+			continue
+		}
+		kept = append(kept, j)
+	}
+	if removed == 0 {
+		return 0
+	}
+	b.s.jobs = kept
+	b.markDirty()
+	b.publishReset()
+	return removed
+}
+
+// SetUISettings replaces durable operator UI settings.
+func (b *Batch) SetUISettings(ui UISettings) UISettings {
+	b.s.ui = normalizeUISettings(ui, b.now)
+	b.markDirty()
+	return copyUISettings(b.s.ui)
+}
+
+// SetActiveGcodePath persists the proxy-side selected gcode path.
+func (b *Batch) SetActiveGcodePath(path string) bool {
+	path = strings.TrimSpace(path)
+	if b.s.active == path {
+		return false
+	}
+	b.s.active = path
+	b.markDirty()
+	b.events = append(b.events, Event{Kind: "active_gcode", ActiveGcodePath: path})
+	return true
+}
+
 // Subscribe returns a channel of change events and an unsubscribe func.
 func (s *Store) Subscribe() (<-chan Event, func()) {
 	s.mu.Lock()
@@ -252,81 +631,43 @@ func (s *Store) Subscribe() (<-chan Event, func()) {
 
 // PutEntry inserts or replaces an entry, stamping UpdatedAt and persisting.
 func (s *Store) PutEntry(e Entry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	normalizeNewEntry(&e)
-	e.UpdatedAt = s.now()
-	cp := e
-	s.entries[e.Path] = &cp
-	if err := s.flushLocked(); err != nil {
-		return err
-	}
-	s.publishLocked(Event{Kind: "entry", Entry: &cp})
-	return nil
+	return s.Batch(func(b *Batch) error {
+		b.PutEntry(e)
+		return nil
+	})
 }
 
 // SetEntrySync updates just the sync state (and error) of an entry if present.
 func (s *Store) SetEntrySync(path string, state SyncState, errMsg string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[path]
-	if !ok {
+	return s.Batch(func(b *Batch) error {
+		b.SetEntrySync(path, state, errMsg)
 		return nil
-	}
-	e.Sync = state
-	e.Error = errMsg
-	e.UpdatedAt = s.now()
-	if err := s.flushLocked(); err != nil {
-		return err
-	}
-	cp := *e
-	s.publishLocked(Event{Kind: "entry", Entry: &cp})
-	return nil
+	})
 }
 
 // SetEntrySyncIf updates an entry only when its current sync state is one of
 // allowed. It is used by job completion paths so stale jobs cannot clobber a
 // newer desired state for the same path.
 func (s *Store) SetEntrySyncIf(path string, state SyncState, errMsg string, allowed ...SyncState) (Entry, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[path]
-	if !ok || !syncStateIn(e.Sync, allowed) {
-		return Entry{}, false, nil
-	}
-	e.Sync = state
-	e.Error = errMsg
-	e.UpdatedAt = s.now()
-	if err := s.flushLocked(); err != nil {
-		return Entry{}, false, err
-	}
-	cp := *e
-	s.publishLocked(Event{Kind: "entry", Entry: &cp})
-	return cp, true, nil
+	var entry Entry
+	var ok bool
+	err := s.Batch(func(b *Batch) error {
+		entry, ok = b.SetEntrySyncIf(path, state, errMsg, allowed...)
+		return nil
+	})
+	return entry, ok, err
 }
 
 // SetEntrySyncIfMatch updates an entry only when match accepts the current
 // entry. The predicate runs while the store lock is held and should stay cheap.
 func (s *Store) SetEntrySyncIfMatch(path string, state SyncState, errMsg string, match func(Entry) bool) (Entry, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[path]
-	if !ok {
-		return Entry{}, false, nil
-	}
-	current := *e
-	if !match(current) {
-		return Entry{}, false, nil
-	}
-	e.Sync = state
-	e.Error = errMsg
-	e.UpdatedAt = s.now()
-	if err := s.flushLocked(); err != nil {
-		return Entry{}, false, err
-	}
-	cp := *e
-	s.publishLocked(Event{Kind: "entry", Entry: &cp})
-	return cp, true, nil
+	var entry Entry
+	var ok bool
+	err := s.Batch(func(b *Batch) error {
+		entry, ok = b.SetEntrySyncIfMatch(path, state, errMsg, match)
+		return nil
+	})
+	return entry, ok, err
 }
 
 // GetEntry returns a copy of an entry.
@@ -356,36 +697,23 @@ func (s *Store) GetJob(id int64) (Job, bool) {
 
 // DeleteEntry removes an entry from the catalog.
 func (s *Store) DeleteEntry(path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.entries[path]; !ok {
+	return s.Batch(func(b *Batch) error {
+		b.DeleteEntry(path)
 		return nil
-	}
-	delete(s.entries, path)
-	if err := s.flushLocked(); err != nil {
-		return err
-	}
-	s.publishLocked(Event{Kind: "entry", Entry: &Entry{Path: path, Sync: ""}})
-	return nil
+	})
 }
 
 // DeleteEntryIfSync removes an entry only when its current sync state is one of
 // allowed. This keeps stale delete jobs from removing a replacement upload that
 // arrived while the delete was running.
 func (s *Store) DeleteEntryIfSync(path string, allowed ...SyncState) (Entry, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[path]
-	if !ok || !syncStateIn(e.Sync, allowed) {
-		return Entry{}, false, nil
-	}
-	entry := *e
-	delete(s.entries, path)
-	if err := s.flushLocked(); err != nil {
-		return Entry{}, false, err
-	}
-	s.publishLocked(Event{Kind: "entry", Entry: &Entry{Path: path, Sync: ""}})
-	return entry, true, nil
+	var entry Entry
+	var ok bool
+	err := s.Batch(func(b *Batch) error {
+		entry, ok = b.DeleteEntryIfSync(path, allowed...)
+		return nil
+	})
+	return entry, ok, err
 }
 
 func syncStateIn(state SyncState, allowed []SyncState) bool {
@@ -402,74 +730,26 @@ func syncStateIn(state SyncState, allowed []SyncState) bool {
 // never reached the machine, so deletion is a local discard rather than a
 // machine-side rm.
 func (s *Store) DiscardEntry(path string, kinds ...JobKind) (Entry, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[path]
-	if !ok {
-		return Entry{}, false, nil
-	}
-	entry := *e
-	delete(s.entries, path)
-
-	kindSet := map[JobKind]bool{}
-	for _, kind := range kinds {
-		kindSet[kind] = true
-	}
-	now := s.now()
-	var jobEvents []Job
-	for _, j := range s.jobs {
-		if j.Path != path || !kindSet[j.Kind] || (j.State != Queued && j.State != Failed) {
-			continue
-		}
-		j.State = Done
-		j.LastError = ""
-		j.UpdatedAt = now
-		jobEvents = append(jobEvents, *j)
-	}
-
-	if err := s.flushLocked(); err != nil {
-		return Entry{}, false, err
-	}
-	for i := range jobEvents {
-		cp := jobEvents[i]
-		s.publishLocked(Event{Kind: "job", Job: &cp})
-	}
-	s.publishLocked(Event{Kind: "entry", Entry: &Entry{Path: path, Sync: ""}})
-	return entry, true, nil
+	var entry Entry
+	var ok bool
+	err := s.Batch(func(b *Batch) error {
+		entry, ok = b.DiscardEntry(path, kinds...)
+		return nil
+	})
+	return entry, ok, err
 }
 
 // DiscardJobs marks matching queued/failed jobs done without requiring a
 // catalog entry. It is used to clear orphaned failed jobs from the activity
 // panel after the underlying catalog entry has already disappeared.
 func (s *Store) DiscardJobs(path string, kinds ...JobKind) ([]Job, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	kindSet := map[JobKind]bool{}
-	for _, kind := range kinds {
-		kindSet[kind] = true
-	}
-	now := s.now()
-	var jobEvents []Job
-	for _, j := range s.jobs {
-		if j.Path != path || !kindSet[j.Kind] || (j.State != Queued && j.State != Failed) {
-			continue
-		}
-		j.State = Done
-		j.LastError = ""
-		j.UpdatedAt = now
-		jobEvents = append(jobEvents, *j)
-	}
-	if len(jobEvents) == 0 {
-		return nil, false, nil
-	}
-	if err := s.flushLocked(); err != nil {
-		return nil, false, err
-	}
-	for i := range jobEvents {
-		cp := jobEvents[i]
-		s.publishLocked(Event{Kind: "job", Job: &cp})
-	}
-	return jobEvents, true, nil
+	var jobs []Job
+	var ok bool
+	err := s.Batch(func(b *Batch) error {
+		jobs, ok = b.DiscardJobs(path, kinds...)
+		return nil
+	})
+	return jobs, ok, err
 }
 
 // ListEntries returns all entries sorted by path.
@@ -488,21 +768,12 @@ func (s *Store) ListEntries() []Entry {
 
 // Enqueue appends a job, assigning an ID and stamping timestamps.
 func (s *Store) Enqueue(j Job) (Job, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	j.ID = s.nextJob
-	s.nextJob++
-	j.State = Queued
-	now := s.now()
-	j.CreatedAt = now
-	j.UpdatedAt = now
-	cp := j
-	s.jobs = append(s.jobs, &cp)
-	if err := s.flushLocked(); err != nil {
-		return Job{}, err
-	}
-	s.publishLocked(Event{Kind: "job", Job: &cp})
-	return cp, nil
+	var out Job
+	err := s.Batch(func(b *Batch) error {
+		out = b.Enqueue(j)
+		return nil
+	})
+	return out, err
 }
 
 // SupersedeQueuedUploads marks any still-queued upload job for path as Done
@@ -511,24 +782,12 @@ func (s *Store) Enqueue(j Job) (Job, error) {
 // under a stale MD5). Running jobs are not touched — they hold an open fd to the
 // cache file and complete consistently. Returns the count superseded.
 func (s *Store) SupersedeQueuedUploads(path string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	n := 0
-	for _, j := range s.jobs {
-		if j.Kind == JobUpload && j.Path == path && j.State == Queued {
-			j.State = Done
-			j.UpdatedAt = s.now()
-			n++
-			cp := *j
-			s.publishLocked(Event{Kind: "job", Job: &cp})
-		}
-	}
-	if n > 0 {
-		if err := s.flushLocked(); err != nil {
-			return n, err
-		}
-	}
-	return n, nil
+	err := s.Batch(func(b *Batch) error {
+		n = b.SupersedeQueuedUploads(path)
+		return nil
+	})
+	return n, err
 }
 
 // NextQueued returns a copy of the oldest queued job, or false if none.
@@ -558,71 +817,39 @@ func (s *Store) QueuedJobs() []Job {
 
 // UpdateJob applies a mutation to a job by ID, persisting and publishing.
 func (s *Store) UpdateJob(id int64, mutate func(*Job)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, j := range s.jobs {
-		if j.ID == id {
-			mutate(j)
-			j.UpdatedAt = s.now()
-			if err := s.flushLocked(); err != nil {
-				return err
-			}
-			cp := *j
-			s.publishLocked(Event{Kind: "job", Job: &cp})
-			return nil
+	return s.Batch(func(b *Batch) error {
+		if _, ok := b.UpdateJob(id, mutate); !ok {
+			return fmt.Errorf("store: job %d not found", id)
 		}
-	}
-	return fmt.Errorf("store: job %d not found", id)
+		return nil
+	})
 }
 
 // StartJob moves a queued job to running, returning false if the job no longer
 // exists or was already completed/failed/discarded by another operation.
 func (s *Store) StartJob(id int64) (Job, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, j := range s.jobs {
-		if j.ID != id {
-			continue
-		}
-		if j.State != Queued {
-			return *j, false, nil
-		}
-		j.State = Running
-		j.UpdatedAt = s.now()
-		if err := s.flushLocked(); err != nil {
-			return Job{}, false, err
-		}
-		cp := *j
-		s.publishLocked(Event{Kind: "job", Job: &cp})
-		return cp, true, nil
-	}
-	return Job{}, false, nil
+	var job Job
+	var ok bool
+	err := s.Batch(func(b *Batch) error {
+		job, ok = b.StartJob(id)
+		return nil
+	})
+	return job, ok, err
 }
 
 // RetryJob resets a failed job to queued so the sync engine will attempt it
 // again on the next drain pass.
 func (s *Store) RetryJob(id int64) (Job, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, j := range s.jobs {
-		if j.ID != id {
-			continue
+	var job Job
+	var ok bool
+	err := s.Batch(func(b *Batch) error {
+		job, ok = b.RetryJob(id)
+		if !ok && job.ID == 0 {
+			return fmt.Errorf("store: job %d not found", id)
 		}
-		if j.State != Failed {
-			return *j, false, nil
-		}
-		j.State = Queued
-		j.Attempts = 0
-		j.LastError = ""
-		j.UpdatedAt = s.now()
-		if err := s.flushLocked(); err != nil {
-			return Job{}, false, err
-		}
-		cp := *j
-		s.publishLocked(Event{Kind: "job", Job: &cp})
-		return cp, true, nil
-	}
-	return Job{}, false, fmt.Errorf("store: job %d not found", id)
+		return nil
+	})
+	return job, ok, err
 }
 
 // ListJobs returns all jobs in queue order.
@@ -641,26 +868,15 @@ func (s *Store) ListJobs() []Job {
 // PruneDoneJobs removes completed jobs older than the given age, keeping the
 // queue from growing without bound. Failed jobs are retained for visibility.
 func (s *Store) PruneDoneJobs(olderThan time.Duration) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	cutoff := s.now().Add(-olderThan)
-	kept := s.jobs[:0]
 	removed := 0
-	for _, j := range s.jobs {
-		if j.State == Done && j.UpdatedAt.Before(cutoff) {
-			removed++
-			continue
-		}
-		kept = append(kept, j)
+	err := s.Batch(func(b *Batch) error {
+		removed = b.PruneDoneJobs(cutoff)
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
-	if removed == 0 {
-		return 0, nil
-	}
-	s.jobs = kept
-	if err := s.flushLocked(); err != nil {
-		return removed, err
-	}
-	s.publishLocked(Event{Kind: "reset"})
 	return removed, nil
 }
 
@@ -673,13 +889,12 @@ func (s *Store) UISettings() UISettings {
 
 // SetUISettings replaces the durable operator UI settings.
 func (s *Store) SetUISettings(ui UISettings) (UISettings, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ui = normalizeUISettings(ui, s.now())
-	if err := s.flushLocked(); err != nil {
-		return UISettings{}, err
-	}
-	return copyUISettings(s.ui), nil
+	var out UISettings
+	err := s.Batch(func(b *Batch) error {
+		out = b.SetUISettings(ui)
+		return nil
+	})
+	return out, err
 }
 
 // ActiveGcodePath returns the durable proxy-side selected gcode path.
@@ -691,18 +906,10 @@ func (s *Store) ActiveGcodePath() string {
 
 // SetActiveGcodePath persists the proxy-side selected gcode path.
 func (s *Store) SetActiveGcodePath(path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	path = strings.TrimSpace(path)
-	if s.active == path {
+	return s.Batch(func(b *Batch) error {
+		b.SetActiveGcodePath(path)
 		return nil
-	}
-	s.active = path
-	if err := s.flushLocked(); err != nil {
-		return err
-	}
-	s.publishLocked(Event{Kind: "active_gcode", ActiveGcodePath: path})
-	return nil
+	})
 }
 
 // CacheDir returns the directory where cached file contents should live,
