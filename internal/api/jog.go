@@ -102,6 +102,8 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 			sess.SetInput(jog.Input{Seq: msg.Seq, Axes: axes, Deadman: msg.Deadman, Slow: msg.Slow})
 		case "step":
 			sess.Step(msg.Seq, msg.Axis, msg.Distance)
+		case "origin":
+			sess.SetOrigin(msg.Seq, msg.Axis)
 		case "target":
 			target, err := parseJogTarget(msg.Target)
 			if err != nil {
@@ -110,7 +112,7 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 			}
 			sess.Target(msg.Seq, target, msg.Feed)
 		default:
-			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, target, step, control, disarm")
+			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, target, step, origin, control, disarm")
 		}
 	}
 }

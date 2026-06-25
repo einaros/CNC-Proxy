@@ -306,6 +306,36 @@ func TestJogTargetUsesFreshStatusWhileStatusPollInFlight(t *testing.T) {
 	t.Fatalf("no target jog command observed: %v", fm.Gcodes())
 }
 
+func TestJogSetOriginSendsControllerCommand(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.SetOrigin(2, "z")
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("origin ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range fm.Gcodes() {
+			if line == "G10L20P0Z0" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no origin command observed: %v", fm.Gcodes())
+}
+
 func TestJogFastTickDoesNotFloodMotionEvents(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()

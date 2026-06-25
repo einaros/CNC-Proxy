@@ -219,11 +219,13 @@
   #gcode-form { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); background: var(--panel); }
   #gcode-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #jog, #gamepad-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; align-items: start; }
-  .tap-move-toolbar { display: grid; grid-template-columns: auto minmax(150px, 220px) minmax(180px, 1fr); gap: 8px; align-items: end; }
+  .tap-move-toolbar { display: grid; grid-template-columns: auto minmax(150px, 220px) auto minmax(180px, 1fr); gap: 8px; align-items: end; }
   .tap-move-toolbar label, .machine-settings-grid label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
   .tap-move-toolbar label span, .machine-settings-grid label span { text-transform: uppercase; letter-spacing: .04em; }
   #tap-feed-mm-min { width: 100%; }
   #tap-move-feedback { align-self: center; }
+  .origin-controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .origin-controls button { justify-content: center; min-width: 72px; }
   .tap-move-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(74px, 92px); gap: 10px; align-items: stretch; }
   .workarea-frame { width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #workarea-plot { display: block; width: 100%; height: 100%; touch-action: manipulation; cursor: crosshair; background: #12171c; }
@@ -236,6 +238,9 @@
   #workarea-boundary { fill: rgba(87,166,214,.08); stroke: rgba(145,160,174,.65); stroke-width: .45; }
   #workarea-grid line { stroke: rgba(145,160,174,.18); stroke-width: .25; }
   #workarea-origin-x, #workarea-origin-y { stroke: rgba(217,154,58,.75); stroke-width: .45; stroke-dasharray: 2 1.2; }
+  #workarea-origin-marker { fill: var(--warn); stroke: #12171c; stroke-width: .5; }
+  #workarea-origin-cross { stroke: #12171c; stroke-width: .45; }
+  #workarea-origin-label { fill: var(--warn); font: 4px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #workarea-spindle-marker { fill: var(--ok); stroke: #12171c; stroke-width: .6; }
   #workarea-spindle-cross { stroke: #12171c; stroke-width: .45; }
   #workarea-target-marker { fill: none; stroke: var(--warn); stroke-width: .7; }
@@ -607,6 +612,11 @@
         <div class="tap-move-toolbar">
           <button type="button" id="jog-arm">Arm Tap Move</button>
           <label><span>Feed</span><input id="tap-feed-mm-min" type="number" min="1" step="10" inputmode="decimal"></label>
+          <div class="origin-controls" aria-label="Set work origin">
+            <button type="button" data-origin-axis="x">Set X0</button>
+            <button type="button" data-origin-axis="y">Set Y0</button>
+            <button type="button" data-origin-axis="z">Set Z0</button>
+          </div>
           <div id="tap-move-feedback" class="action-feedback" aria-live="polite"></div>
         </div>
         <div class="tap-move-body">
@@ -616,6 +626,11 @@
               <g id="workarea-grid"></g>
               <line id="workarea-origin-x" x1="6" y1="94" x2="94" y2="94"></line>
               <line id="workarea-origin-y" x1="94" y1="6" x2="94" y2="94"></line>
+              <g id="workarea-origin" display="none">
+                <circle id="workarea-origin-marker" cx="0" cy="0" r="2.1"></circle>
+                <path id="workarea-origin-cross" d="M -3 0 L 3 0 M 0 -3 L 0 3"></path>
+                <text id="workarea-origin-label" x="3.2" y="-2.8">O</text>
+              </g>
               <g id="workarea-target" display="none">
                 <circle id="workarea-target-marker" cx="0" cy="0" r="2.5"></circle>
                 <path id="workarea-target-cross" d="M -4 0 L 4 0 M 0 -4 L 0 4"></path>

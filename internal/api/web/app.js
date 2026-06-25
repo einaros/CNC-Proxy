@@ -59,6 +59,11 @@ const state = {
     targetLabel: "",
     zStepPending: 0,
     zStepLabel: "",
+    originPending: 0,
+    originPendingAxis: "",
+    originPendingMode: "",
+    originVerifyDeadline: 0,
+    originVerifyTimer: null,
     tapFeedback: "",
     tapFeedbackKind: "",
     error: "",
@@ -728,6 +733,7 @@ function renderMachine() {
   renderAlarmPanel(m);
   renderActiveGcode();
   syncJogAvailabilityFromMachine(m);
+  checkOriginVerification();
   renderJog();
 }
 
@@ -867,16 +873,17 @@ function renderJog() {
   const arm = document.getElementById("jog-arm");
   arm.textContent = j.armPending ? (j.armPendingAction === "arm" ? "Arming..." : "Disarming...") : (j.armed ? "Disarm Tap Move" : "Arm Tap Move");
   arm.classList.toggle("armed", j.armed);
-  arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online" || !!j.armPending;
+  arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online" || !!j.armPending || !!j.originPendingAxis;
   const feed = document.getElementById("tap-feed-mm-min");
   if (feed) {
     const maxFeed = Number(j.caps?.max_xy_mm_min) || 1200;
     feed.max = String(Math.round(maxFeed));
-    feed.disabled = !!j.targetPending || !!j.zStepPending;
+    feed.disabled = !!j.targetPending || !!j.zStepPending || !!j.originPendingAxis;
   }
+  renderOriginButtons();
   const zStepDistance = document.getElementById("z-step-distance");
-  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending;
-  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending;
+  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending || !!j.originPendingAxis;
+  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending && !j.originPendingAxis;
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
     btn.disabled = !zStepReady;
   }
@@ -888,6 +895,26 @@ function renderJog() {
   const plot = document.getElementById("workarea-plot");
   if (plot) plot.classList.toggle("not-armed", !j.armed);
   renderWorkArea();
+}
+
+function machineReadyForOriginSet() {
+  const m = state.machine || {};
+  const age = Number(m.age_ms);
+  return !!m.connected && m.state === "Idle" && !m.stale && (!Number.isFinite(age) || age <= 10000);
+}
+
+function renderOriginButtons() {
+  const j = state.jog;
+  const pendingAxis = String(j.originPendingAxis || "").toLowerCase();
+  const jogReady = !!j.caps?.enabled && j.link === "online" && j.armed;
+  const externalJogBusy = !j.armed && j.availability && !j.availability.available && j.availability.reason === "busy";
+  const apiReady = !j.armed && machineReadyForOriginSet() && !externalJogBusy;
+  const ready = (jogReady || apiReady) && !j.armPending && !j.targetPending && !j.zStepPending && !pendingAxis;
+  for (const btn of document.querySelectorAll("[data-origin-axis]")) {
+    const axis = String(btn.dataset.originAxis || "").toLowerCase();
+    btn.disabled = !ready;
+    btn.textContent = pendingAxis === axis ? "Setting " + axis.toUpperCase() + "0" : "Set " + axis.toUpperCase() + "0";
+  }
 }
 
 function jogPanelMessage() {
@@ -979,6 +1006,39 @@ function updateMachineSettings() {
   renderWorkArea();
 }
 
+function axisValue(values, axis) {
+  const n = Number(values?.[axis]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function currentAxisValues() {
+  const preferJog = state.jog.armed || state.jog.originPendingMode === "jog" || !!state.jog.targetPending || !!state.jog.zStepPending;
+  return {
+    mpos: preferJog ? (state.jog.mpos || state.machine.mpos) : (state.machine.mpos || state.jog.mpos),
+    wpos: preferJog ? (state.jog.wpos || state.machine.wpos) : (state.machine.wpos || state.jog.wpos),
+  };
+}
+
+function currentWorkOrigin() {
+  const { mpos, wpos } = currentAxisValues();
+  const out = {};
+  let have = false;
+  for (const axis of ["x", "y", "z"]) {
+    const m = axisValue(mpos, axis);
+    const w = axisValue(wpos, axis);
+    if (m === null || w === null) continue;
+    out[axis] = m - w;
+    have = true;
+  }
+  return have ? out : null;
+}
+
+function visualWorkOrigin() {
+  const live = currentWorkOrigin();
+  if (axisValue(live, "x") !== null && axisValue(live, "y") !== null) return live;
+  return state.ui.machine?.origin || defaultMachineSettings().origin;
+}
+
 function workAreaBounds() {
   const m = normalizeMachineSettings(state.ui.machine);
   return m.work_area;
@@ -1053,14 +1113,16 @@ function renderWorkAreaGrid() {
 }
 
 function renderWorkAreaOrigin() {
-  const origin = state.ui.machine?.origin || defaultMachineSettings().origin;
+  const origin = visualWorkOrigin();
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
   const b = workAreaBounds();
   const r = workAreaRect();
   const vertical = document.getElementById("workarea-origin-y");
   const horizontal = document.getElementById("workarea-origin-x");
   if (vertical) {
-    if (origin.x >= b.x_min && origin.x <= b.x_max) {
-      const p = machineToWorkAreaPoint({ x: origin.x, y: b.y_min });
+    if (ox !== null && ox >= b.x_min && ox <= b.x_max) {
+      const p = machineToWorkAreaPoint({ x: ox, y: b.y_min });
       vertical.setAttribute("x1", p.x.toFixed(2));
       vertical.setAttribute("x2", p.x.toFixed(2));
       vertical.setAttribute("y1", r.y.toFixed(2));
@@ -1071,8 +1133,8 @@ function renderWorkAreaOrigin() {
     }
   }
   if (horizontal) {
-    if (origin.y >= b.y_min && origin.y <= b.y_max) {
-      const p = machineToWorkAreaPoint({ x: b.x_min, y: origin.y });
+    if (oy !== null && oy >= b.y_min && oy <= b.y_max) {
+      const p = machineToWorkAreaPoint({ x: b.x_min, y: oy });
       horizontal.setAttribute("x1", r.x.toFixed(2));
       horizontal.setAttribute("x2", (r.x + r.width).toFixed(2));
       horizontal.setAttribute("y1", p.y.toFixed(2));
@@ -1082,6 +1144,7 @@ function renderWorkAreaOrigin() {
       horizontal.setAttribute("display", "none");
     }
   }
+  setWorkAreaMarker("workarea-origin", ox !== null && oy !== null ? { x: ox, y: oy } : null);
 }
 
 function setWorkAreaMarker(id, machinePoint) {
@@ -2969,6 +3032,12 @@ function connectJog() {
       state.jog.tapFeedback = "Z move failed: jog service disconnected.";
       state.jog.tapFeedbackKind = "error";
     }
+    if (state.jog.originPendingMode === "jog" && state.jog.originPendingAxis) {
+      const axis = state.jog.originPendingAxis.toUpperCase();
+      clearOriginVerification();
+      state.jog.tapFeedback = "Set " + axis + " origin failed: jog service disconnected.";
+      state.jog.tapFeedbackKind = "error";
+    }
     renderJog();
     scheduleJogReconnect();
   };
@@ -3072,6 +3141,7 @@ function sendTapMove(target) {
     setTapFeedback("Arm tap move before selecting a target.", "error");
     return;
   }
+  if (state.jog.originPendingAxis) return;
   const feed = currentTapFeed();
   const label = tapTargetLabel(target);
   const seq = sendJog({ type: "target", target: { x: target.x, y: target.y }, feed_mm_min: feed });
@@ -3110,7 +3180,7 @@ function stepZ(dir) {
     setTapFeedback("Arm tap move before moving Z.", "error");
     return;
   }
-  if (state.jog.targetPending || state.jog.zStepPending) return;
+  if (state.jog.targetPending || state.jog.zStepPending || state.jog.originPendingAxis) return;
   const distance = currentZStepDistance() * dir;
   const label = zStepLabel(distance);
   const seq = sendJog({ type: "step", axis: "z", distance });
@@ -3123,6 +3193,125 @@ function stepZ(dir) {
   state.jog.tapFeedback = "Sending " + label + "...";
   state.jog.tapFeedbackKind = "";
   renderJog();
+}
+
+function originCommandLine(axis) {
+  return "G10L20P0" + axis.toUpperCase() + "0";
+}
+
+function clearOriginVerification() {
+  if (state.jog.originVerifyTimer) {
+    clearTimeout(state.jog.originVerifyTimer);
+    state.jog.originVerifyTimer = null;
+  }
+  state.jog.originPending = 0;
+  state.jog.originPendingAxis = "";
+  state.jog.originPendingMode = "";
+  state.jog.originVerifyDeadline = 0;
+}
+
+function beginOriginVerification(axis) {
+  state.jog.originPending = 0;
+  state.jog.originPendingAxis = axis;
+  state.jog.originVerifyDeadline = Date.now() + 5000;
+  state.jog.tapFeedback = "Verifying " + axis.toUpperCase() + "0...";
+  state.jog.tapFeedbackKind = "";
+  if (!checkOriginVerification()) scheduleOriginVerification();
+}
+
+function checkOriginVerification() {
+  const axis = String(state.jog.originPendingAxis || "").toLowerCase();
+  if (!axis || state.jog.originPending) return false;
+  const w = state.jog.originPendingMode === "jog"
+    ? (axisValue(state.jog.wpos, axis) ?? axisValue(state.machine.wpos, axis))
+    : (axisValue(state.machine.wpos, axis) ?? axisValue(state.jog.wpos, axis));
+  if (w !== null && Math.abs(w) <= 0.01) {
+    clearOriginVerification();
+    state.jog.tapFeedback = axis.toUpperCase() + " origin set.";
+    state.jog.tapFeedbackKind = "ok";
+    return true;
+  }
+  if (Date.now() > state.jog.originVerifyDeadline) {
+    const seen = w === null ? "no WPos" : axis.toUpperCase() + " " + w.toFixed(3);
+    clearOriginVerification();
+    state.jog.tapFeedback = "Set " + axis.toUpperCase() + " origin could not be verified (" + seen + ").";
+    state.jog.tapFeedbackKind = "error";
+    return true;
+  }
+  return false;
+}
+
+function scheduleOriginVerification() {
+  if (state.jog.originVerifyTimer) clearTimeout(state.jog.originVerifyTimer);
+  if (!state.jog.originPendingAxis || state.jog.originPending) return;
+  state.jog.originVerifyTimer = setTimeout(async () => {
+    state.jog.originVerifyTimer = null;
+    if (!state.jog.originPendingAxis || state.jog.originPending) return;
+    if (checkOriginVerification()) {
+      renderJog();
+      return;
+    }
+    await pollMachine();
+    if (!state.jog.originPendingAxis || state.jog.originPending) return;
+    if (checkOriginVerification()) renderJog();
+    else scheduleOriginVerification();
+  }, 350);
+}
+
+async function setOriginViaGcode(axis) {
+  const label = axis.toUpperCase();
+  state.jog.originPending = -1;
+  state.jog.originPendingAxis = axis;
+  state.jog.originPendingMode = "api";
+  state.jog.tapFeedback = "Setting " + label + "0...";
+  state.jog.tapFeedbackKind = "";
+  renderJog();
+  try {
+    await request("/api/gcode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ line: originCommandLine(axis) }),
+    });
+    beginOriginVerification(axis);
+  } catch (e) {
+    clearOriginVerification();
+    state.jog.tapFeedback = "Set " + label + " origin failed: " + e.message;
+    state.jog.tapFeedbackKind = "error";
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+  } finally {
+    renderJog();
+  }
+}
+
+function setOriginAxis(axis) {
+  axis = String(axis || "").toLowerCase();
+  if (!["x", "y", "z"].includes(axis)) return;
+  const label = axis.toUpperCase();
+  if (state.jog.originPendingAxis || state.jog.targetPending || state.jog.zStepPending) return;
+  if (state.jog.armed) {
+    if (state.jog.link !== "online") {
+      setTapFeedback("Jog service is not connected.", "error");
+      connectJog();
+      return;
+    }
+    const seq = sendJog({ type: "origin", axis });
+    if (!seq) {
+      setTapFeedback("Jog service is not connected.", "error");
+      return;
+    }
+    state.jog.originPending = seq;
+    state.jog.originPendingAxis = axis;
+    state.jog.originPendingMode = "jog";
+    state.jog.tapFeedback = "Setting " + label + "0...";
+    state.jog.tapFeedbackKind = "";
+    renderJog();
+    return;
+  }
+  if (!machineReadyForOriginSet()) {
+    setTapFeedback("Machine must be connected and Idle to set origin.", "error");
+    return;
+  }
+  setOriginViaGcode(axis);
 }
 
 function handleWorkAreaClick(e) {
@@ -3229,6 +3418,9 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = "Z move sent: " + state.jog.zStepLabel;
       state.jog.tapFeedbackKind = "";
     }
+    if (ev.seq && ev.seq === state.jog.originPending) {
+      beginOriginVerification(state.jog.originPendingAxis);
+    }
     state.jog.error = "";
     state.jog.errorCode = "";
   } else if (ev.type === "error") {
@@ -3248,6 +3440,12 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = "Z move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
+    if (ev.seq && ev.seq === state.jog.originPending) {
+      const axis = state.jog.originPendingAxis.toUpperCase();
+      clearOriginVerification();
+      state.jog.tapFeedback = "Set " + axis + " origin failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
     if (!ev.seq && state.jog.targetPending) {
       state.jog.targetPending = 0;
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
@@ -3256,6 +3454,12 @@ function applyJogEvent(ev) {
     if (!ev.seq && state.jog.zStepPending) {
       state.jog.zStepPending = 0;
       state.jog.tapFeedback = "Z move failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
+    if (!ev.seq && state.jog.originPendingMode === "jog" && state.jog.originPendingAxis) {
+      const axis = state.jog.originPendingAxis.toUpperCase();
+      clearOriginVerification();
+      state.jog.tapFeedback = "Set " + axis + " origin failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
     if (!ev.seq && state.jog.armPending) {
@@ -3592,6 +3796,9 @@ function init() {
   }
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
     btn.onclick = () => stepZ(Number(btn.dataset.zStepDir) || 1);
+  }
+  for (const btn of document.querySelectorAll("[data-origin-axis]")) {
+    btn.onclick = () => setOriginAxis(btn.dataset.originAxis);
   }
   document.getElementById("workarea-plot").onclick = handleWorkAreaClick;
 

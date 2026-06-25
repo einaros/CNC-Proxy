@@ -409,6 +409,11 @@ func (s *Session) Step(seq int64, axis string, distance float64) {
 	s.enqueue(command{typ: "step", seq: seq, axis: axis, distance: distance})
 }
 
+// SetOrigin sets one work-coordinate axis origin to the current position.
+func (s *Session) SetOrigin(seq int64, axis string) {
+	s.enqueue(command{typ: "origin", seq: seq, axis: axis})
+}
+
 // Target requests one explicit XY move from an armed session.
 func (s *Session) Target(seq int64, target machine.AxisValues, feedMMMin float64) {
 	s.enqueue(command{typ: "target", seq: seq, target: copyAxes(target), feed: feedMMMin})
@@ -504,6 +509,8 @@ func (s *Session) handleCommand(cmd command) {
 		s.emitState(cmd.seq)
 	case "step":
 		s.handleStep(cmd.seq, cmd.axis, cmd.distance)
+	case "origin":
+		s.handleOrigin(cmd.seq, cmd.axis)
 	case "target":
 		s.handleTarget(cmd.seq, cmd.target, cmd.feed)
 	}
@@ -587,6 +594,60 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	s.logMotion(now, cmd)
 	s.emitMotionEstimate(now, st, target, delta, cmd, queuedLead)
 	s.emit(Event{Type: "ack", Seq: seq})
+}
+
+func (s *Session) handleOrigin(seq int64, axis string) {
+	cmd, err := originCommand(axis)
+	if err != nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: err.Error()})
+		return
+	}
+	now := s.mgr.now()
+	s.mu.Lock()
+	lease := s.lease
+	st := s.lastStatus
+	lastStatusAt := s.lastStatusAt
+	queuedUntil := s.queuedUntil
+	statusInFlight := s.statusInFlight
+	s.mu.Unlock()
+	if lease == nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm tap move before setting origin"})
+		s.emitState(seq)
+		return
+	}
+	if st.State != machine.Idle {
+		if st.State == machine.Alarm {
+			s.logAlarmStatus(st)
+			s.release(nil)
+		} else if !canContinueJog(st.State) {
+			s.release(nil)
+		}
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeNotIdle, Message: "machine must be Idle to set origin: " + stateLabel(st.State)})
+		s.emitState(seq)
+		return
+	}
+	queuedLead := queueLead(now, queuedUntil)
+	if queuedLead > 0 {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for queued jog motion to finish before setting origin"})
+		return
+	}
+	if len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(s.mgr.cfg) {
+		if statusInFlight {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before setting origin."})
+			return
+		}
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before setting origin."})
+		s.requestStatus()
+		return
+	}
+	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
+		s.failLease(CodeMachineError, err)
+		return
+	}
+	s.log(gcodelog.DirSend, cmd)
+	s.log(gcodelog.DirRecv, "ok")
+	s.emit(Event{Type: "ack", Seq: seq})
+	s.requestStatus()
 }
 
 func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float64) {
@@ -1007,6 +1068,16 @@ func stepDelta(axis string, distance float64) (Axes, error) {
 		return Axes{Y: distance}, nil
 	default:
 		return Axes{Z: distance}, nil
+	}
+}
+
+func originCommand(axis string) (string, error) {
+	axis = strings.ToLower(strings.TrimSpace(axis))
+	switch axis {
+	case "x", "y", "z":
+		return "G10L20P0" + strings.ToUpper(axis) + "0", nil
+	default:
+		return "", fmt.Errorf("axis must be one of: x, y, z")
 	}
 }
 
