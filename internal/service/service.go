@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,8 @@ const (
 	maxGamepadMacros = 32
 	maxMachineSpanMM = 5000
 	maxTapFeedMMMin  = 10000
+	maxProbeDepthMM  = 200
+	maxProbeFeedMM   = 1000
 )
 
 // Service wires the store, arbiter (for machine state), and local cache.
@@ -157,6 +160,23 @@ type MachineStatus struct {
 	HaltReason   *machine.HaltReason `json:"halt_reason,omitempty"`
 	Progress     []float64           `json:"progress,omitempty"`
 	Machine      []float64           `json:"machine,omitempty"`
+}
+
+// ProbeZRequest describes one serialized Z probe at the current XY or at a
+// supplied machine-coordinate XY location.
+type ProbeZRequest struct {
+	MachineX     float64 `json:"machine_x"`
+	MachineY     float64 `json:"machine_y"`
+	MoveXY       bool    `json:"move_xy"`
+	SafeZMM      float64 `json:"safe_z_mm"`
+	ProbeDepthMM float64 `json:"probe_depth_mm"`
+	ProbeFeedMM  float64 `json:"probe_feed_mm_min"`
+}
+
+// ProbeZResult is the parsed firmware probe report.
+type ProbeZResult struct {
+	Machine machine.AxisValues `json:"machine"`
+	Output  string             `json:"output,omitempty"`
 }
 
 // Status returns the current machine state and proxy mode.
@@ -536,6 +556,7 @@ func validateMachineUI(m store.MachineUI) error {
 		"origin.x":        m.Origin.X,
 		"origin.y":        m.Origin.Y,
 		"tap_feed_mm_min": m.TapFeedMMMin,
+		"safe_z_mm":       m.SafeZMM,
 	}
 	allZero := true
 	for _, v := range values {
@@ -1016,6 +1037,150 @@ func (s *Service) SendGcode(line string) (string, error) {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
 	}
 	return out, err
+}
+
+// ProbeZ performs a single serialized Z probe transaction. It holds the arbiter
+// operation lock across the safe-Z move, optional XY move, probe command, and
+// final safe-Z lift so no other proxy operation can interleave with the probe.
+func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
+	if err := validateProbeZRequest(req); err != nil {
+		return ProbeZResult{}, err
+	}
+	if err := s.arb.WithMachine(true, func(*client.Conn) error { return nil }); err != nil {
+		return ProbeZResult{}, err
+	}
+	st, _ := s.arb.Tracker().Current()
+	if st.Tool == nil || st.Tool.Active != 0 {
+		return ProbeZResult{}, fmt.Errorf("%w: active tool is %s", ErrProbeUnavailable, toolStatusLabel(st.Tool))
+	}
+	var res ProbeZResult
+	err := s.arb.WithMachine(true, func(c *client.Conn) error {
+		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM), false); err != nil {
+			return err
+		}
+		if req.MoveXY {
+			if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 X%.4f Y%.4f", req.MachineX, req.MachineY), false); err != nil {
+				return err
+			}
+		}
+		line := fmt.Sprintf("G38.2 Z-%.4f F%.4f", req.ProbeDepthMM, req.ProbeFeedMM)
+		out, err := s.sendProbeLine(c, line, true)
+		if err != nil {
+			return err
+		}
+		pos, ok, err := parseProbeResult(out)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: probe did not report contact", ErrProbeUnavailable)
+		}
+		res = ProbeZResult{Machine: pos, Output: out}
+		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM), false); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return ProbeZResult{}, err
+	}
+	return res, nil
+}
+
+func validateProbeZRequest(req ProbeZRequest) error {
+	values := map[string]float64{
+		"machine_x":         req.MachineX,
+		"machine_y":         req.MachineY,
+		"safe_z_mm":         req.SafeZMM,
+		"probe_depth_mm":    req.ProbeDepthMM,
+		"probe_feed_mm_min": req.ProbeFeedMM,
+	}
+	for name, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("service: probe %s must be finite", name)
+		}
+	}
+	if req.ProbeDepthMM <= 0 || req.ProbeDepthMM > maxProbeDepthMM {
+		return fmt.Errorf("service: probe depth must be between 0 and %.0f mm", float64(maxProbeDepthMM))
+	}
+	if req.ProbeFeedMM <= 0 || req.ProbeFeedMM > maxProbeFeedMM {
+		return fmt.Errorf("service: probe feed must be between 0 and %.0f mm/min", float64(maxProbeFeedMM))
+	}
+	return nil
+}
+
+func (s *Service) sendProbeLine(c *client.Conn, line string, expectReply bool) (string, error) {
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "probe "+line)
+	cap := gcodeReplyCap
+	if expectReply {
+		cap = 2 * time.Minute
+	}
+	out, err := c.SendGcodeLine(line, client.GcodeOpts{ExpectReply: expectReply, Cap: cap})
+	if out != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return out, err
+	}
+	if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
+	}
+	return out, nil
+}
+
+func parseProbeResult(out string) (machine.AxisValues, bool, error) {
+	start := strings.Index(out, "[PRB:")
+	if start < 0 {
+		return nil, false, fmt.Errorf("%w: probe response did not include PRB", ErrProbeUnavailable)
+	}
+	rest := out[start+len("[PRB:"):]
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		return nil, false, fmt.Errorf("%w: malformed probe response", ErrProbeUnavailable)
+	}
+	payload := rest[:end]
+	coordText, statusText, ok := strings.Cut(payload, ":")
+	if !ok {
+		return nil, false, fmt.Errorf("%w: malformed probe response", ErrProbeUnavailable)
+	}
+	coords := strings.Split(coordText, ",")
+	if len(coords) < 3 {
+		return nil, false, fmt.Errorf("%w: malformed probe coordinates", ErrProbeUnavailable)
+	}
+	x, err := parseProbeFloat(coords[0])
+	if err != nil {
+		return nil, false, err
+	}
+	y, err := parseProbeFloat(coords[1])
+	if err != nil {
+		return nil, false, err
+	}
+	z, err := parseProbeFloat(coords[2])
+	if err != nil {
+		return nil, false, err
+	}
+	statusText = strings.TrimSpace(statusText)
+	success := statusText == "1" || strings.EqualFold(statusText, "true")
+	return machine.AxisValues{"x": x, "y": y, "z": z}, success, nil
+}
+
+func parseProbeFloat(s string) (float64, error) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("%w: malformed probe coordinates", ErrProbeUnavailable)
+	}
+	return v, nil
+}
+
+func toolStatusLabel(t *machine.ToolStatus) string {
+	if t == nil {
+		return "unknown"
+	}
+	if t.Active == 0 {
+		return "probe"
+	}
+	return fmt.Sprintf("tool %d", t.Active)
 }
 
 // Control characters accepted by SendControl (mirrors the protocol constants).
@@ -1781,4 +1946,5 @@ var (
 	ErrDiscardUnavailable     = errors.New("service: discard unavailable")
 	ErrNoActiveGcode          = errors.New("service: no active gcode selected")
 	ErrActiveGcodeUnavailable = errors.New("service: active gcode is not runnable")
+	ErrProbeUnavailable       = errors.New("service: probe unavailable")
 )

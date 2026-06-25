@@ -34,8 +34,8 @@ const (
 	baseMaxZLeadMM  = 1.0
 	// The firmware's `$J ... F` argument is a scale of the slowest selected
 	// actuator max rate, not a feedrate. These match CarveraFirmware
-	// config.default for XYZ and let proxy speed limits translate into segment
-	// durations instead of max-rate bursts.
+	// config.default for XYZ. Firmware accepts scales above 1; the firmware
+	// planner may still cap real hardware at configured machine limits.
 	firmwareMaxXYMMMin = 3000.0
 	firmwareMaxZMMMin  = 2000.0
 	minJogTick         = 5 * time.Millisecond
@@ -215,6 +215,8 @@ type command struct {
 	distance float64
 	target   machine.AxisValues
 	feed     float64
+	safeZOn  bool
+	safeZ    float64
 }
 
 type statusResult struct {
@@ -415,8 +417,8 @@ func (s *Session) SetOrigin(seq int64, axis string) {
 }
 
 // Target requests one explicit XY move from an armed session.
-func (s *Session) Target(seq int64, target machine.AxisValues, feedMMMin float64) {
-	s.enqueue(command{typ: "target", seq: seq, target: copyAxes(target), feed: feedMMMin})
+func (s *Session) Target(seq int64, target machine.AxisValues, feedMMMin float64, safeZEnabled bool, safeZMM float64) {
+	s.enqueue(command{typ: "target", seq: seq, target: copyAxes(target), feed: feedMMMin, safeZOn: safeZEnabled, safeZ: safeZMM})
 }
 
 // ReportError emits a client-facing validation error.
@@ -512,7 +514,7 @@ func (s *Session) handleCommand(cmd command) {
 	case "origin":
 		s.handleOrigin(cmd.seq, cmd.axis)
 	case "target":
-		s.handleTarget(cmd.seq, cmd.target, cmd.feed)
+		s.handleTarget(cmd.seq, cmd.target, cmd.feed, cmd.safeZOn, cmd.safeZ)
 	}
 }
 
@@ -650,11 +652,15 @@ func (s *Session) handleOrigin(seq int64, axis string) {
 	s.requestStatus()
 }
 
-func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float64) {
+func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float64, safeZEnabled bool, safeZMM float64) {
 	x, okX := xy["x"]
 	y, okY := xy["y"]
 	if !okX || !okY || math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target requires finite x and y"})
+		return
+	}
+	if safeZEnabled && (math.IsNaN(safeZMM) || math.IsInf(safeZMM, 0)) {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "safe Z must be finite"})
 		return
 	}
 	cfg := s.mgr.cfg.normalize()
@@ -707,20 +713,54 @@ func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float
 		return
 	}
 
+	xyTarget := copyAxes(planned)
+	xyTarget["x"] = x
+	xyTarget["y"] = y
+	xyDelta := Axes{X: xyTarget["x"] - planned["x"], Y: xyTarget["y"] - planned["y"]}
+	if xyDelta.X == 0 && xyDelta.Y == 0 {
+		s.emitMotionEstimate(now, st, xyTarget, xyDelta, "", queuedLead)
+		s.emit(Event{Type: "ack", Seq: seq})
+		return
+	}
+
+	lastCmd := ""
+	if safeZEnabled {
+		plannedZ, ok := planned["z"]
+		if !ok || math.IsNaN(plannedZ) || math.IsInf(plannedZ, 0) {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine Z position is unavailable for safe tap move"})
+			return
+		}
+		if plannedZ < safeZMM {
+			safeTarget := copyAxes(planned)
+			safeTarget["z"] = safeZMM
+			safeDelta := Axes{Z: safeZMM - plannedZ}
+			var err error
+			planned, queuedUntil, queuedLead, lastCmd, err = s.writePlannedJogSegment(now, lease, planned, safeTarget, safeDelta, stepJogDuration(safeDelta, cfg), queuedUntil, cfg)
+			if err != nil {
+				s.failLease(CodeMachineError, err)
+				return
+			}
+		}
+	}
+
 	target := copyAxes(planned)
 	target["x"] = x
 	target["y"] = y
 	delta := Axes{X: target["x"] - planned["x"], Y: target["y"] - planned["y"]}
-	if delta.X == 0 && delta.Y == 0 {
-		s.emitMotionEstimate(now, st, target, delta, "", queuedLead)
-		s.emit(Event{Type: "ack", Seq: seq})
-		return
-	}
-	dur := targetJogDuration(delta, feedMMMin)
-	cmd := jogCommandForDuration(target, delta, cfg, dur)
-	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
+	var err error
+	_, queuedUntil, queuedLead, lastCmd, err = s.writePlannedJogSegment(now, lease, planned, target, delta, targetJogDuration(delta, feedMMMin), queuedUntil, cfg)
+	if err != nil {
 		s.failLease(CodeMachineError, err)
 		return
+	}
+	s.emitMotionEstimate(now, st, target, delta, lastCmd, queuedLead)
+	s.emit(Event{Type: "ack", Seq: seq})
+}
+
+func (s *Session) writePlannedJogSegment(now time.Time, lease *session.JogLease, from, target machine.AxisValues, delta Axes, dur time.Duration, queuedUntil time.Time, cfg Config) (machine.AxisValues, time.Time, time.Duration, string, error) {
+	cmd := jogCommandForDuration(target, delta, cfg, dur)
+	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
+		return from, queuedUntil, queueLead(now, queuedUntil), "", err
 	}
 	segStart := queuedUntil
 	if segStart.Before(now) {
@@ -728,21 +768,20 @@ func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float
 	}
 	segEnd := segStart.Add(dur)
 	queuedUntil = segEnd
-	queuedLead = queueLead(now, queuedUntil)
+	queuedLead := queueLead(now, queuedUntil)
 	s.mu.Lock()
 	s.planned = target
 	s.queuedUntil = queuedUntil
 	s.segments = appendPlannedSegment(s.segments, plannedSegment{
 		start: segStart,
 		end:   segEnd,
-		from:  copyAxes(planned),
+		from:  copyAxes(from),
 		to:    copyAxes(target),
 	}, now)
 	s.lastMotionCmd = cmd
 	s.mu.Unlock()
 	s.logMotion(now, cmd)
-	s.emitMotionEstimate(now, st, target, delta, cmd, queuedLead)
-	s.emit(Event{Type: "ack", Seq: seq})
+	return copyAxes(target), queuedUntil, queuedLead, cmd, nil
 }
 
 func (s *Session) handleArm(seq int64) {
@@ -1187,9 +1226,6 @@ func jogFeedScale(delta Axes, cfg Config, d time.Duration) float64 {
 	scale := desiredMMMin / machineMax
 	if scale < 0.001 {
 		return 0.001
-	}
-	if scale > 1 {
-		return 1
 	}
 	return scale
 }

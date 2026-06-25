@@ -84,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tool/change", s.changeTool)              // body: {tool_id}
 	mux.HandleFunc("POST /api/tool/drop", s.dropCurrentTool)           // runs M6T-1
 	mux.HandleFunc("POST /api/tool/calibrate", s.calibrateCurrentTool) // starts M491
+	mux.HandleFunc("POST /api/probe/z", s.probeZ)                      // one serialized Z probe
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
 	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
@@ -303,6 +304,8 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrActiveGcodeUnavailable):
 		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrProbeUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrMachineStatusStale):
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case session.Retryable(err):
@@ -332,6 +335,19 @@ func (s *Server) postGcode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"output": out})
+}
+
+func (s *Server) probeZ(w http.ResponseWriter, r *http.Request) {
+	var body service.ProbeZRequest
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	res, err := s.svc.ProbeZ(body)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) getActiveGcode(w http.ResponseWriter, r *http.Request) {

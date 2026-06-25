@@ -142,9 +142,11 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 		MacroButtons: []MacroSlot{{ID: "slot1", MacroID: "probe", Region: "toolbar", Order: 4}},
 		Log:          LogSettings{Filter: "jog", Autoscroll: false},
 		Machine: MachineUI{
-			WorkArea:     WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
-			Origin:       XYPoint{X: 1, Y: 2},
-			TapFeedMMMin: 700,
+			WorkArea:      WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
+			Origin:        XYPoint{X: 1, Y: 2},
+			TapFeedMMMin:  700,
+			SafeZMM:       -1.5,
+			SafeZDisabled: true,
 		},
 		Gamepad: Gamepad{
 			Axes: GamepadAxes{
@@ -178,7 +180,7 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	if got.Log.Filter != "jog" || got.Log.Autoscroll {
 		t.Fatalf("reopened log settings = %+v", got.Log)
 	}
-	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.TapFeedMMMin != 700 {
+	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.TapFeedMMMin != 700 || got.Machine.SafeZMM != -1.5 || !got.Machine.SafeZDisabled {
 		t.Fatalf("reopened machine settings = %+v", got.Machine)
 	}
 	if got.Gamepad.Axes.X.Axis != 2 || got.Gamepad.Axes.X.Scale != 0.5 || got.Gamepad.DeadmanButton != 7 {

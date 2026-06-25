@@ -1002,6 +1002,7 @@ func defaultMachineUI() MachineUI {
 		},
 		Origin:       XYPoint{X: 0, Y: 0},
 		TapFeedMMMin: 600,
+		SafeZMM:      0,
 	}
 }
 
@@ -1021,7 +1022,9 @@ func normalizeMachineUI(in MachineUI) MachineUI {
 			X: normalizeFinite(in.Origin.X, d.Origin.X),
 			Y: normalizeFinite(in.Origin.Y, d.Origin.Y),
 		},
-		TapFeedMMMin: normalizeFinite(in.TapFeedMMMin, d.TapFeedMMMin),
+		TapFeedMMMin:  normalizeFinite(in.TapFeedMMMin, d.TapFeedMMMin),
+		SafeZMM:       normalizeFinite(in.SafeZMM, d.SafeZMM),
+		SafeZDisabled: in.SafeZDisabled,
 	}
 	if out.WorkArea.XMin >= out.WorkArea.XMax {
 		out.WorkArea.XMin = d.WorkArea.XMin

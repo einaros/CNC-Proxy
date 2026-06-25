@@ -54,6 +54,8 @@ func TestClassifyGcode(t *testing.T) {
 		{"$H", FireAndForget, true},
 		{"$X", FireAndForget, true},
 		{"", FireAndForget, true},
+		{"G30", ReplyExpected, true},
+		{"G38.2 Z-5 F50", ReplyExpected, true},
 
 		// Dual-nature: bare = report (reply, not gated); with arg = set (silent, gated).
 		{"M220", ReplyExpected, false},

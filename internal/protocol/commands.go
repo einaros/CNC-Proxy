@@ -151,19 +151,21 @@ func ControlLabel(c byte) (string, bool) {
 //
 // The load-bearing property, verified on hardware: the firmware replies
 // PROMPTLY or NEVER — there is no "silent for a while, then acks". Queries are
-// answered on the idle loop within milliseconds; motion/modal/dwell commands
-// produce no terminating frame ever. This is why a fire-and-forget command must
-// not wait for an "ok" (it would block until timeout, holding the arbiter's
-// opMu and stalling everything behind it — the original "second move hangs"
-// bug), and why a reply-expected read can safely bound itself with a short
-// settle window instead of a long keepalive loop.
+// answered on the idle loop within milliseconds; normal motion/modal/dwell
+// commands produce no terminating frame ever. Probe motion is an explicit
+// exception because the firmware reports the contacted point. This is why a
+// fire-and-forget command must not wait for an "ok" (it would block until
+// timeout, holding the arbiter's opMu and stalling everything behind it — the
+// original "second move hangs" bug), and why a reply-expected read can safely
+// bound itself with a short settle window instead of a long keepalive loop.
 type Response int
 
 const (
 	// FireAndForget: the firmware sends no terminating reply. The command is
 	// written and we only briefly drain for an immediate error/alarm line.
-	// Covers motion (G0–G3), modal/state sets (G90/G91/G21/G94, M5/M9, …),
-	// blocking waits (M400, G4 dwell), and anything unrecognized.
+	// Covers normal motion (G0–G3), modal/state sets (G90/G91/G21/G94, M5/M9,
+	// …), blocking waits (M400, G4 dwell), and anything unrecognized. Probe
+	// motion (G30/G38.x) is an explicit reply-producing exception below.
 	FireAndForget Response = iota
 	// ReplyExpected: the firmware answers promptly, either "ok"/"ok <payload>"
 	// (e.g. M114) or one-or-more output lines with no "ok" (e.g. version, $G).
@@ -277,6 +279,12 @@ func ClassifyGcode(line string) (resp Response, requiresIdle bool) {
 
 	if replyQueries[base] {
 		return ReplyExpected, false
+	}
+	// Firmware probe commands report the contacted position as NORMAL_INFO
+	// ([PRB:x,y,z:1] or Z:...), but they move the machine and must stay idle
+	// gated.
+	if base == "g30" || base == "g38" {
+		return ReplyExpected, true
 	}
 	if dualNatureReporters[base] {
 		if hasSettingArg(line, tok) {

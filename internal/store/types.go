@@ -145,9 +145,11 @@ type LogSettings struct {
 // surface. These values are UI state only; changing them never touches the
 // machine.
 type MachineUI struct {
-	WorkArea     WorkArea `json:"work_area"`
-	Origin       XYPoint  `json:"origin"`
-	TapFeedMMMin float64  `json:"tap_feed_mm_min"`
+	WorkArea      WorkArea `json:"work_area"`
+	Origin        XYPoint  `json:"origin"`
+	TapFeedMMMin  float64  `json:"tap_feed_mm_min"`
+	SafeZMM       float64  `json:"safe_z_mm"`
+	SafeZDisabled bool     `json:"safe_z_disabled,omitempty"`
 }
 
 // WorkArea is the top-down machine-coordinate XY rectangle shown in Control.

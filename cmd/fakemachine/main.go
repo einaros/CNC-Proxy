@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:2222", "listen address")
+	addr := flag.String("addr", "127.0.0.1:0", "listen address")
 	status := flag.String("status", "<Idle|MPos:0,0,0|WPos:0,0,0>", "status payload returned for ? queries")
 	flag.Parse()
 

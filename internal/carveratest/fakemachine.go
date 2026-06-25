@@ -5,7 +5,9 @@
 package carveratest
 
 import (
+	"math"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,11 @@ type FakeMachine struct {
 	uploadPacketSizes  []int             // packet sizes advertised by upload senders
 	unlockDoesNotClear bool              // test hook: $X replies but leaves status unchanged
 	m999DoesNotClear   bool              // test hook: M999 replies but leaves status unchanged
+	absolute           bool              // simulated modal distance mode for ordinary G0/G1 moves
+	unit               float64           // simulated modal unit scale, mm per gcode unit
+	motionMode         int               // simulated modal motion mode for ordinary axis words
+	feedMMMin          float64           // simulated modal G1 feed, in mm/min
+	motion             []fakeMotionSegment
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when
@@ -54,6 +61,9 @@ func NewOn(addr string) (*FakeMachine, error) {
 		failCmd:            map[string]bool{},
 		gcodeReplies:       map[string]string{},
 		downloadPacketSize: 8192,
+		absolute:           true,
+		unit:               1,
+		motionMode:         fakeMotionRapid,
 	}
 	go m.serve()
 	return m, nil
@@ -70,6 +80,7 @@ func (m *FakeMachine) SetStatus(s string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.status = s
+	m.motion = nil
 }
 
 // SetStatusReplyDelay delays replies to `?` status polls. It is a test hook for
@@ -229,9 +240,12 @@ func (m *FakeMachine) handle(c net.Conn) {
 						switch f.Data[0] {
 						case '?':
 							m.mu.Lock()
-							s := m.status
 							delay := m.statusReplyDelay
 							drop := m.dropStatusReplies
+							s := ""
+							if !drop && delay <= 0 {
+								s = m.statusAtLocked(time.Now())
+							}
 							m.mu.Unlock()
 							if drop {
 								break
@@ -239,6 +253,9 @@ func (m *FakeMachine) handle(c net.Conn) {
 							if delay > 0 {
 								go func() {
 									time.Sleep(delay)
+									m.mu.Lock()
+									s := m.statusAtLocked(time.Now())
+									m.mu.Unlock()
 									m.send(c, protocol.CmdStatusRes, s)
 								}()
 								break
@@ -528,6 +545,7 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		//     these, so the fake stays silent unless a reply is explicitly set.
 		m.mu.Lock()
 		m.gcodes = append(m.gcodes, line)
+		m.applySimulatedGcodeLocked(line)
 		reply, ok := m.gcodeReplies[line]
 		m.mu.Unlock()
 		resp, _ := protocol.ClassifyGcode(line)
@@ -545,17 +563,19 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 }
 
 // isGcodeLine reports whether a console line is a gcode/MDI command (G/M/T/S
-// codes, a grbl '$' command, an N-numbered line, or a console-word query the
-// firmware answers with NORMAL_INFO), as opposed to the filesystem/management
-// commands handled explicitly above. It mirrors the real firmware closely
-// enough that anything the proxy will send as CTRL_MULTI gets a NORMAL_INFO
-// reply rather than a LOAD_ERROR (which the client ignores, hanging to timeout).
+// codes, modal axis/feed words, a grbl '$' command, an N-numbered line, or a
+// console-word query the firmware answers with NORMAL_INFO), as opposed to the
+// filesystem/management commands handled explicitly above. It mirrors the real
+// firmware closely enough that anything the proxy will send as CTRL_MULTI gets a
+// NORMAL_INFO reply rather than a LOAD_ERROR (which the client ignores, hanging
+// to timeout).
 func isGcodeLine(line string) bool {
 	if line == "" {
 		return false
 	}
 	switch line[0] {
-	case 'G', 'M', 'T', 'S', '$', 'g', 'm', 't', 's', 'N', 'n':
+	case 'G', 'M', 'T', 'S', '$', 'N', 'X', 'Y', 'Z', 'A', 'B', 'C', 'F',
+		'g', 'm', 't', 's', 'n', 'x', 'y', 'z', 'a', 'b', 'c', 'f':
 		return true
 	}
 	// Console-word queries (version, model, ftype, time, echo, mem, diagnose).
@@ -563,4 +583,643 @@ func isGcodeLine(line string) bool {
 		return true
 	}
 	return false
+}
+
+type fakeGcodeWord struct {
+	letter byte
+	value  float64
+}
+
+type fakeStatusField struct {
+	key   string
+	value string
+}
+
+type fakeMotionSegment struct {
+	start time.Time
+	end   time.Time
+	fromM []float64
+	toM   []float64
+	fromW []float64
+	toW   []float64
+}
+
+const (
+	fakeFirmwareMaxXYMMMin = 3000.0
+	fakeFirmwareMaxZMMMin  = 2000.0
+)
+
+const (
+	fakeMotionRapid = iota
+	fakeMotionFeed
+)
+
+var fakeAxisLetters = []byte{'X', 'Y', 'Z', 'A', 'B', 'C'}
+
+var fakeAxisIndex = map[byte]int{
+	'X': 0,
+	'Y': 1,
+	'Z': 2,
+	'A': 3,
+	'B': 4,
+	'C': 5,
+}
+
+// applySimulatedGcodeLocked updates the fake's status position for the motion
+// commands CNC Proxy generates during manual/jog testing. It intentionally does
+// not emit replies; fire-and-forget motion stays silent like the firmware.
+func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
+	line = strings.TrimSpace(protocol.Unescape(line))
+	if line == "" {
+		return
+	}
+	if strings.HasPrefix(strings.ToUpper(line), "$J") {
+		words := parseFakeGcodeWords(line)
+		values, has := fakeWordValues(words, 1)
+		delta := fakeAxisValues(values, has)
+		scale := values['F']
+		if !has['F'] || scale <= 0 {
+			scale = 1
+		}
+		m.applyRelativeMoveLocked(delta, scale*fakeSelectedMachineMax(delta))
+		return
+	}
+
+	words := parseFakeGcodeWords(stripFakeGcodeComments(line))
+	if len(words) == 0 {
+		return
+	}
+	hasG10 := false
+	hasG53 := false
+	lineMotionMode := -1
+	var lineAbsolute *bool
+	unit := m.unit
+	if unit == 0 {
+		unit = 1
+	}
+	for _, w := range words {
+		if w.letter != 'G' {
+			continue
+		}
+		code, subcode := splitFakeGCode(w.value)
+		switch code {
+		case 0:
+			if subcode == 0 {
+				lineMotionMode = fakeMotionRapid
+			}
+		case 1:
+			if subcode == 0 {
+				lineMotionMode = fakeMotionFeed
+			}
+		case 10:
+			hasG10 = true
+		case 20:
+			unit = 25.4
+		case 21:
+			unit = 1
+		case 53:
+			hasG53 = true
+		case 90:
+			if subcode == 0 {
+				v := true
+				lineAbsolute = &v
+			}
+		case 91:
+			if subcode == 0 {
+				v := false
+				lineAbsolute = &v
+			}
+		}
+	}
+
+	values, has := fakeWordValues(words, unit)
+	m.unit = unit
+	if lineAbsolute != nil {
+		m.absolute = *lineAbsolute
+	}
+	if lineMotionMode >= 0 {
+		m.motionMode = lineMotionMode
+	}
+	if has['F'] && values['F'] > 0 {
+		m.feedMMMin = values['F']
+	}
+
+	if hasG10 && fakeNear(values['L'], 20) && fakeNear(values['P'], 0) {
+		m.advanceMotionLocked(time.Now())
+		m.applyWorkPositionLocked(fakeAxisValues(values, has))
+		return
+	}
+	axes := fakeAxisValues(values, has)
+	if len(axes) == 0 {
+		return
+	}
+	feedMMMin := 0.0
+	if m.motionMode == fakeMotionFeed {
+		feedMMMin = m.feedMMMin
+	}
+	if hasG53 || m.absolute {
+		m.applyAbsoluteMoveLocked(axes, feedMMMin)
+		return
+	}
+	m.applyRelativeMoveLocked(axes, feedMMMin)
+}
+
+func (m *FakeMachine) applyRelativeMoveLocked(delta map[byte]float64, feedMMMin float64) {
+	if len(delta) == 0 {
+		return
+	}
+	now := time.Now()
+	m.advanceMotionLocked(now)
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	mi := findFakeStatusField(fields, "MPos")
+	if mi < 0 {
+		return
+	}
+	mpos, ok := parseFakeAxisList(fields[mi].value)
+	if !ok {
+		return
+	}
+	wi := findFakeStatusField(fields, "WPos")
+	wpos, haveWPos := []float64(nil), false
+	if wi >= 0 {
+		if vals, ok := parseFakeAxisList(fields[wi].value); ok {
+			wpos, haveWPos = vals, true
+		}
+	}
+	start := now
+	if last := m.lastMotionSegmentLocked(); last != nil && last.end.After(now) {
+		start = last.end
+		mpos = append([]float64(nil), last.toM...)
+		if haveWPos {
+			wpos = append([]float64(nil), last.toW...)
+		}
+	}
+
+	fromM := append([]float64(nil), mpos...)
+	fromW := []float64(nil)
+	if haveWPos {
+		fromW = append([]float64(nil), wpos...)
+	}
+	for axis, d := range delta {
+		idx, ok := fakeAxisIndex[axis]
+		if !ok || !fakeFinite(d) {
+			continue
+		}
+		mpos = ensureFakeAxisLen(mpos, idx+1)
+		mpos[idx] += d
+		if haveWPos {
+			wpos = ensureFakeAxisLen(wpos, idx+1)
+			wpos[idx] += d
+		}
+	}
+	m.appendMotionLocked(bracketed, state, fields, start, fromM, mpos, fromW, wpos, fakeMoveDuration(delta, feedMMMin))
+}
+
+func (m *FakeMachine) applyAbsoluteMoveLocked(targets map[byte]float64, feedMMMin float64) {
+	if len(targets) == 0 {
+		return
+	}
+	now := time.Now()
+	m.advanceMotionLocked(now)
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	mi := findFakeStatusField(fields, "MPos")
+	if mi < 0 {
+		return
+	}
+	mpos, ok := parseFakeAxisList(fields[mi].value)
+	if !ok {
+		return
+	}
+	wi := findFakeStatusField(fields, "WPos")
+	wpos, haveWPos := []float64(nil), false
+	if wi >= 0 {
+		if vals, ok := parseFakeAxisList(fields[wi].value); ok {
+			wpos, haveWPos = vals, true
+		}
+	}
+	start := now
+	if last := m.lastMotionSegmentLocked(); last != nil && last.end.After(now) {
+		start = last.end
+		mpos = append([]float64(nil), last.toM...)
+		if haveWPos {
+			wpos = append([]float64(nil), last.toW...)
+		}
+	}
+
+	fromM := append([]float64(nil), mpos...)
+	fromW := []float64(nil)
+	if haveWPos {
+		fromW = append([]float64(nil), wpos...)
+	}
+	delta := map[byte]float64{}
+	for axis, target := range targets {
+		idx, ok := fakeAxisIndex[axis]
+		if !ok || !fakeFinite(target) {
+			continue
+		}
+		mpos = ensureFakeAxisLen(mpos, idx+1)
+		d := target - mpos[idx]
+		mpos[idx] = target
+		delta[axis] = d
+		if haveWPos {
+			wpos = ensureFakeAxisLen(wpos, idx+1)
+			wpos[idx] += d
+		}
+	}
+	m.appendMotionLocked(bracketed, state, fields, start, fromM, mpos, fromW, wpos, fakeMoveDuration(delta, feedMMMin))
+}
+
+func (m *FakeMachine) applyWorkPositionLocked(targets map[byte]float64) {
+	if len(targets) == 0 {
+		return
+	}
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	wi := findFakeStatusField(fields, "WPos")
+	wpos := []float64(nil)
+	if wi >= 0 {
+		vals, ok := parseFakeAxisList(fields[wi].value)
+		if !ok {
+			return
+		}
+		wpos = vals
+	} else {
+		mi := findFakeStatusField(fields, "MPos")
+		if mi < 0 {
+			return
+		}
+		vals, ok := parseFakeAxisList(fields[mi].value)
+		if !ok {
+			return
+		}
+		wpos = append([]float64(nil), vals...)
+		fields = append(fields, fakeStatusField{key: "WPos"})
+		wi = len(fields) - 1
+	}
+
+	for axis, target := range targets {
+		idx, ok := fakeAxisIndex[axis]
+		if !ok || !fakeFinite(target) {
+			continue
+		}
+		wpos = ensureFakeAxisLen(wpos, idx+1)
+		wpos[idx] = target
+	}
+	fields[wi].value = formatFakeAxisList(wpos)
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) statusAtLocked(now time.Time) string {
+	m.advanceMotionLocked(now)
+	return m.status
+}
+
+func (m *FakeMachine) advanceMotionLocked(now time.Time) {
+	if len(m.motion) == 0 {
+		return
+	}
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		m.motion = nil
+		return
+	}
+	for len(m.motion) > 0 && !now.Before(m.motion[0].end) {
+		seg := m.motion[0]
+		applyFakeAxesToFields(&fields, seg.toM, seg.toW)
+		m.motion = m.motion[1:]
+	}
+	if len(m.motion) == 0 {
+		m.status = formatFakeStatus(bracketed, state, fields)
+		return
+	}
+	seg := m.motion[0]
+	mpos := append([]float64(nil), seg.fromM...)
+	wpos := append([]float64(nil), seg.fromW...)
+	if !now.Before(seg.start) && seg.end.After(seg.start) {
+		t := now.Sub(seg.start).Seconds() / seg.end.Sub(seg.start).Seconds()
+		mpos = interpolateFakeAxes(seg.fromM, seg.toM, t)
+		if seg.toW != nil {
+			wpos = interpolateFakeAxes(seg.fromW, seg.toW, t)
+		}
+	}
+	applyFakeAxesToFields(&fields, mpos, wpos)
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) appendMotionLocked(bracketed bool, state string, fields []fakeStatusField, start time.Time, fromM, toM, fromW, toW []float64, dur time.Duration) {
+	if dur <= 0 {
+		applyFakeAxesToFields(&fields, toM, toW)
+		m.status = formatFakeStatus(bracketed, state, fields)
+		return
+	}
+	m.motion = append(m.motion, fakeMotionSegment{
+		start: start,
+		end:   start.Add(dur),
+		fromM: append([]float64(nil), fromM...),
+		toM:   append([]float64(nil), toM...),
+		fromW: append([]float64(nil), fromW...),
+		toW:   append([]float64(nil), toW...),
+	})
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) lastMotionSegmentLocked() *fakeMotionSegment {
+	if len(m.motion) == 0 {
+		return nil
+	}
+	return &m.motion[len(m.motion)-1]
+}
+
+func applyFakeAxesToFields(fields *[]fakeStatusField, mpos, wpos []float64) {
+	if len(mpos) > 0 {
+		if mi := findFakeStatusField(*fields, "MPos"); mi >= 0 {
+			(*fields)[mi].value = formatFakeAxisList(mpos)
+		}
+	}
+	if len(wpos) > 0 {
+		if wi := findFakeStatusField(*fields, "WPos"); wi >= 0 {
+			(*fields)[wi].value = formatFakeAxisList(wpos)
+		}
+	}
+}
+
+func parseFakeStatus(raw string) (bool, string, []fakeStatusField, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, "", nil, false
+	}
+	bracketed := strings.HasPrefix(raw, "<") && strings.HasSuffix(raw, ">")
+	body := strings.TrimPrefix(raw, "<")
+	body = strings.TrimSuffix(body, ">")
+	parts := strings.Split(body, "|")
+	state := strings.TrimSpace(parts[0])
+	if state == "" {
+		return false, "", nil, false
+	}
+	fields := make([]fakeStatusField, 0, len(parts)-1)
+	for _, part := range parts[1:] {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		fields = append(fields, fakeStatusField{key: key, value: strings.TrimSpace(value)})
+	}
+	return bracketed, state, fields, true
+}
+
+func formatFakeStatus(bracketed bool, state string, fields []fakeStatusField) string {
+	var b strings.Builder
+	b.WriteString(state)
+	for _, f := range fields {
+		b.WriteByte('|')
+		b.WriteString(f.key)
+		b.WriteByte(':')
+		b.WriteString(f.value)
+	}
+	if !bracketed {
+		return b.String()
+	}
+	return "<" + b.String() + ">"
+}
+
+func findFakeStatusField(fields []fakeStatusField, key string) int {
+	for i, f := range fields {
+		if strings.EqualFold(f.key, key) {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseFakeAxisList(s string) ([]float64, bool) {
+	parts := strings.Split(s, ",")
+	out := make([]float64, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(part, 64)
+		if err != nil || !fakeFinite(v) {
+			return nil, false
+		}
+		out = append(out, v)
+	}
+	return out, len(out) > 0
+}
+
+func formatFakeAxisList(vals []float64) string {
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		if math.Abs(v) < 0.00005 {
+			v = 0
+		}
+		parts[i] = strconv.FormatFloat(v, 'f', 4, 64)
+	}
+	return strings.Join(parts, ",")
+}
+
+func ensureFakeAxisLen(vals []float64, n int) []float64 {
+	if len(vals) >= n {
+		return vals
+	}
+	out := make([]float64, n)
+	copy(out, vals)
+	return out
+}
+
+func interpolateFakeAxes(from, to []float64, t float64) []float64 {
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	n := len(from)
+	if len(to) > n {
+		n = len(to)
+	}
+	out := ensureFakeAxisLen(append([]float64(nil), from...), n)
+	for i, target := range to {
+		out[i] = out[i] + (target-out[i])*t
+	}
+	return out
+}
+
+func stripFakeGcodeComments(line string) string {
+	var b strings.Builder
+	inParen := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inParen {
+			if c == ')' {
+				inParen = false
+			}
+			continue
+		}
+		switch c {
+		case '(':
+			inParen = true
+		case ';':
+			return b.String()
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+func parseFakeGcodeWords(line string) []fakeGcodeWord {
+	var out []fakeGcodeWord
+	for i := 0; i < len(line); {
+		c := line[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c < 'A' || c > 'Z' {
+			i++
+			continue
+		}
+		i++
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+			i++
+		}
+		start := i
+		if i < len(line) && (line[i] == '+' || line[i] == '-') {
+			i++
+		}
+		digits := false
+		exponent := false
+		for i < len(line) {
+			ch := line[i]
+			if ch >= '0' && ch <= '9' {
+				digits = true
+				i++
+				continue
+			}
+			if ch == '.' {
+				i++
+				continue
+			}
+			if (ch == 'e' || ch == 'E') && digits && !exponent {
+				exponent = true
+				i++
+				if i < len(line) && (line[i] == '+' || line[i] == '-') {
+					i++
+				}
+				continue
+			}
+			break
+		}
+		if !digits {
+			continue
+		}
+		v, err := strconv.ParseFloat(line[start:i], 64)
+		if err != nil || !fakeFinite(v) {
+			continue
+		}
+		out = append(out, fakeGcodeWord{letter: c, value: v})
+	}
+	return out
+}
+
+func splitFakeGCode(v float64) (int, int) {
+	code := int(math.Trunc(v))
+	subcode := int(math.Round((v - float64(code)) * 10))
+	return code, subcode
+}
+
+func fakeWordValues(words []fakeGcodeWord, unit float64) (map[byte]float64, map[byte]bool) {
+	values := map[byte]float64{}
+	has := map[byte]bool{}
+	if unit == 0 {
+		unit = 1
+	}
+	for _, w := range words {
+		switch w.letter {
+		case 'X', 'Y', 'Z', 'A', 'B', 'C':
+			values[w.letter] = w.value * unit
+			has[w.letter] = true
+		case 'F':
+			values[w.letter] = w.value * unit
+			has[w.letter] = true
+		case 'L', 'P':
+			values[w.letter] = w.value
+			has[w.letter] = true
+		}
+	}
+	return values, has
+}
+
+func fakeAxisTargets(words []fakeGcodeWord, unit float64) map[byte]float64 {
+	values, has := fakeWordValues(words, unit)
+	return fakeAxisValues(values, has)
+}
+
+func fakeAxisValues(values map[byte]float64, has map[byte]bool) map[byte]float64 {
+	out := map[byte]float64{}
+	for _, axis := range fakeAxisLetters {
+		if has[axis] && fakeFinite(values[axis]) {
+			out[axis] = values[axis]
+		}
+	}
+	return out
+}
+
+func fakeFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+func fakeNear(v, target float64) bool {
+	return math.Abs(v-target) < 0.000001
+}
+
+func fakeMoveDuration(delta map[byte]float64, feedMMMin float64) time.Duration {
+	dist := fakeMoveDistance(delta)
+	if dist == 0 {
+		return 0
+	}
+	if feedMMMin <= 0 || !fakeFinite(feedMMMin) {
+		feedMMMin = fakeSelectedMachineMax(delta)
+	}
+	if feedMMMin <= 0 {
+		return 0
+	}
+	return time.Duration((dist / feedMMMin) * float64(time.Minute))
+}
+
+func fakeMoveDistance(delta map[byte]float64) float64 {
+	sum := 0.0
+	for _, d := range delta {
+		sum += d * d
+	}
+	return math.Sqrt(sum)
+}
+
+func fakeSelectedMachineMax(delta map[byte]float64) float64 {
+	maxRate := 0.0
+	for axis, d := range delta {
+		if d == 0 {
+			continue
+		}
+		rate := fakeFirmwareMaxXYMMMin
+		if axis == 'Z' {
+			rate = fakeFirmwareMaxZMMMin
+		}
+		if maxRate == 0 || rate < maxRate {
+			maxRate = rate
+		}
+	}
+	return maxRate
 }

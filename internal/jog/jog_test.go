@@ -226,6 +226,17 @@ func TestInstantJogCommandIncludesVelocityScale(t *testing.T) {
 	}
 }
 
+func TestInstantJogCommandAllowsScaleAboveFirmwareDefault(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Tick = 20 * time.Millisecond
+	cfg.MaxXYMMMin = 6000
+	delta := Normalize(Axes{X: 1}, false, cfg)
+	got := jogCommand(machine.AxisValues{"x": 0, "y": 0, "z": 0}, delta, cfg)
+	if got != "$J X2.0000 F2.0000" {
+		t.Fatalf("instant jog command = %q, want configured speed above firmware default", got)
+	}
+}
+
 func TestMotionDeltaUsesBufferedSegment(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Tick = 20 * time.Millisecond
@@ -237,6 +248,27 @@ func TestMotionDeltaUsesBufferedSegment(t *testing.T) {
 	got := jogCommandForDuration(machine.AxisValues{"x": delta.X, "y": 0, "z": 0}, delta, cfg, jogSegmentDuration(cfg))
 	if got != "$J X1.6000 F0.4000" {
 		t.Fatalf("buffered instant jog command = %q, want velocity-matched 80ms segment", got)
+	}
+}
+
+func TestJogSessionAllowsScaleAboveFirmwareDefault(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.MaxXYMMMin = 6000
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+	ev := drainUntil(t, s, "motion")
+	if ev.Motion == nil || !strings.Contains(ev.Motion.Command, " F2.0000") {
+		t.Fatalf("motion command = %+v, want F2.0000 scale", ev.Motion)
 	}
 }
 
@@ -289,7 +321,7 @@ func TestJogTargetUsesFreshStatusWhileStatusPollInFlight(t *testing.T) {
 	s.mu.Lock()
 	s.statusInFlight = true
 	s.mu.Unlock()
-	s.Target(2, machine.AxisValues{"x": 10, "y": -5}, 600)
+	s.Target(2, machine.AxisValues{"x": 10, "y": -5}, 600, false, 0)
 	ack := drainUntil(t, s, "ack")
 	if ack.Seq != 2 {
 		t.Fatalf("target ack = %+v, want seq 2", ack)
@@ -304,6 +336,46 @@ func TestJogTargetUsesFreshStatusWhileStatusPollInFlight(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no target jog command observed: %v", fm.Gcodes())
+}
+
+func TestJogTargetMovesToSafeZBeforeXY(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	status := "<Idle|MPos:0,0,-5|WPos:0,0,-5>"
+	fm.SetStatus(status)
+	if !mgr.arb.Tracker().ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Target(2, machine.AxisValues{"x": 10, "y": -5}, 600, true, 0)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		gcodes := fm.Gcodes()
+		if len(gcodes) >= 2 {
+			if !strings.Contains(gcodes[0], "Z5.0000") {
+				t.Fatalf("first target command = %q, want safe Z lift; all=%v", gcodes[0], gcodes)
+			}
+			if !strings.Contains(gcodes[1], "X10.0000") || !strings.Contains(gcodes[1], "Y-5.0000") {
+				t.Fatalf("second target command = %q, want XY target; all=%v", gcodes[1], gcodes)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("safe Z target did not emit two jog commands: %v", fm.Gcodes())
 }
 
 func TestJogSetOriginSendsControllerCommand(t *testing.T) {

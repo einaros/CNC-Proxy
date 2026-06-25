@@ -36,6 +36,8 @@ type jogClientMessage struct {
 	Distance float64            `json:"distance"`
 	Target   map[string]float64 `json:"target"`
 	Feed     float64            `json:"feed_mm_min"`
+	SafeZ    float64            `json:"safe_z_mm"`
+	SafeZOn  *bool              `json:"safe_z_enabled"`
 }
 
 func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +112,15 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 				sess.ReportError(msg.Seq, jog.CodeBadInput, err.Error())
 				continue
 			}
-			sess.Target(msg.Seq, target, msg.Feed)
+			safeZEnabled := true
+			if msg.SafeZOn != nil {
+				safeZEnabled = *msg.SafeZOn
+			}
+			if safeZEnabled && (math.IsNaN(msg.SafeZ) || math.IsInf(msg.SafeZ, 0)) {
+				sess.ReportError(msg.Seq, jog.CodeBadInput, "safe_z_mm must be finite")
+				continue
+			}
+			sess.Target(msg.Seq, target, msg.Feed, safeZEnabled, msg.SafeZ)
 		default:
 			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, target, step, origin, control, disarm")
 		}

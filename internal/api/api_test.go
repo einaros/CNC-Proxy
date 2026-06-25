@@ -652,12 +652,12 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`<h2>Control</h2>`, `id="tap-feed-mm-min"`, `id="tap-move-feedback"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `data-origin-axis="x"`, `data-origin-axis="y"`, `data-origin-axis="z"`, `id="machine-settings"`, `id="machine-x-min"`, `<h2>Gamepad</h2>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
+	for _, want := range []string{`<h2>Control</h2>`, `id="tap-feed-mm-min"`, `id="tap-safe-z-enabled"`, `id="tap-move-feedback"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `id="outline-probe-point"`, `id="outline-close"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `data-origin-axis="x"`, `data-origin-axis="y"`, `data-origin-axis="z"`, `id="machine-settings"`, `id="machine-x-min"`, `id="machine-safe-z"`, `<h2>Gamepad</h2>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="origin-controls"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="z-step-controls"`, `class="table-scroll"`} {
+	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="origin-controls"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="outline-capture"`, `class="outline-toolbar"`, `class="z-step-controls"`, `class="table-scroll"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing layout marker %s", want)
 		}
@@ -688,6 +688,11 @@ func TestWebUIServed(t *testing.T) {
 	}
 	if !strings.Contains(string(jsBody), "renderWorkArea") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "sendTapMove") || !strings.Contains(string(jsBody), "stepZ") || !strings.Contains(string(jsBody), "setOriginAxis") || !strings.Contains(string(jsBody), `type: "target"`) || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), `type: "origin"`) || !strings.Contains(string(jsBody), "G10L20P0") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing work area, tap move, jog status messaging, or cache-only status polling")
+	}
+	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "runFieldProbe", "probeZAtWorkPoint", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "buildOutlineSVG", "field-probe-layer", "probe_diameter_mm", "spot_gap_mm", "center_spacing_mm", "exportHeightOBJ", "exportHeightImage", "zero_origin_machine_mm", "table-layer", "outline-layer", "data-z-mm", "safe_z_enabled", "safe_z_disabled"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing outline capture behavior %s", want)
+		}
 	}
 	if got := js.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("app.js Cache-Control = %q, want no-store", got)
@@ -730,9 +735,14 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing %s", want)
 		}
 	}
-	for _, want := range []string{"scheduleJogReconnect", "clearJogReconnect", "preferredPadIndex", "visibilitychange"} {
+	for _, want := range []string{"scheduleJogReconnect", "clearJogReconnect", "preferredPadIndex", "visibilitychange", "armQueuedAction", "flushQueuedTapMoveArm", "tapMoveArmFailureText", "setSoftDisabled", "aria-disabled"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing jog reconnect behavior %s", want)
+		}
+	}
+	for _, want := range []string{"jogEstimateActive", "estimatedUntil", "mergeMachineStatusForDisplay"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing jog estimate display behavior %s", want)
 		}
 	}
 }
@@ -1044,6 +1054,38 @@ func TestJogWebSocketTarget(t *testing.T) {
 	t.Fatalf("no target jog command observed: %v", m.Gcodes())
 }
 
+func TestJogWebSocketTargetSafeZ(t *testing.T) {
+	srv, m, tr := serverWithJog(t, false)
+	status := "<Idle|MPos:0,0,-4|WPos:0,0,-4|F:0,0,100|S:0,0,100>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+
+	writeWS(t, c, map[string]any{"type": "target", "seq": 2, "target": map[string]float64{"x": 10, "y": -5}, "feed_mm_min": 600, "safe_z_enabled": true, "safe_z_mm": 0})
+	ack := readWSEvent(t, c, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		gcodes := m.Gcodes()
+		if len(gcodes) >= 2 {
+			if !strings.Contains(gcodes[0], "Z4.0000") || !strings.Contains(gcodes[1], "X10.0000") || !strings.Contains(gcodes[1], "Y-5.0000") {
+				t.Fatalf("safe target gcodes = %v", gcodes)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no safe target jog commands observed: %v", m.Gcodes())
+}
+
 func TestJogWebSocketStatusTimeoutDoesNotCloseSession(t *testing.T) {
 	srv, m, _ := serverWithJog(t, false)
 	c := dialWS(t, srv.URL)
@@ -1175,6 +1217,52 @@ func TestPostGcodeQueryNotGated(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&out)
 	if out["output"] != "C: X:1.0" {
 		t.Errorf("output = %q", out["output"])
+	}
+}
+
+func TestProbeZEndpointSerializesSafeMoveProbeAndLift(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	m.SetGcodeReply("G38.2 Z-5.0000 F50.0000", "[PRB:10.0000,-5.0000,-1.2500:1]")
+
+	resp := postJSON(t, srv.URL+"/api/probe/z", map[string]any{
+		"machine_x":         10,
+		"machine_y":         -5,
+		"move_xy":           true,
+		"safe_z_mm":         0,
+		"probe_depth_mm":    5,
+		"probe_feed_mm_min": 50,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("probe status = %d: %s", resp.StatusCode, body)
+	}
+	var result service.ProbeZResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Machine["x"] != 10 || result.Machine["y"] != -5 || result.Machine["z"] != -1.25 {
+		t.Fatalf("probe result = %+v", result)
+	}
+	want := []string{
+		"G53 G0 Z0.0000",
+		"G53 G0 X10.0000 Y-5.0000",
+		"G38.2 Z-5.0000 F50.0000",
+		"G53 G0 Z0.0000",
+	}
+	got := m.Gcodes()
+	if len(got) != len(want) {
+		t.Fatalf("probe gcodes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("probe gcodes = %v, want %v", got, want)
+		}
 	}
 }
 

@@ -3,6 +3,12 @@ import * as THREE from "./three.module.min.js";
 const ROOT = "/sd/gcodes";
 const GCODE_MAX_LINES = 500;
 const GCODE_HISTORY_KEY = "cnc-proxy.gcode-history.v1";
+const PROBE_SPOT_DIAMETER_MM = 2;
+const PROBE_SPOT_RADIUS_MM = PROBE_SPOT_DIAMETER_MM / 2;
+const DEFAULT_FIELD_SPOT_GAP_MM = 8;
+const MAX_FIELD_PROBE_POINTS = 1500;
+const DEFAULT_PROBE_DEPTH_MM = 20;
+const DEFAULT_PROBE_FEED_MM = 50;
 
 const state = {
   files: new Map(),
@@ -48,6 +54,7 @@ const state = {
     wpos: null,
     observed: null,
     estimated: false,
+    estimatedUntil: 0,
     availability: null,
     target: null,
     lead: { x: 0, y: 0, z: 0 },
@@ -55,6 +62,7 @@ const state = {
     buttons: [],
     armPending: 0,
     armPendingAction: "",
+    armQueuedAction: "",
     targetPending: 0,
     targetLabel: "",
     zStepPending: 0,
@@ -74,6 +82,7 @@ const state = {
     sampleTimer: null,
     preferredPadIndex: null,
   },
+  outline: defaultOutlineState(),
 };
 
 const gcodeView = {
@@ -350,6 +359,30 @@ function defaultMachineSettings() {
     work_area: { x_min: -300, x_max: 0, y_min: -200, y_max: 0 },
     origin: { x: 0, y: 0 },
     tap_feed_mm_min: 600,
+    safe_z_mm: 0,
+    safe_z_disabled: false,
+  };
+}
+
+function defaultOutlineState() {
+  return {
+    active: false,
+    points: [],
+    closed: false,
+    curveFit: false,
+    origin: null,
+    undo: [],
+    redo: [],
+    probeEachPoint: false,
+    pointProbePending: false,
+    fieldSpotGapMM: DEFAULT_FIELD_SPOT_GAP_MM,
+    fieldProbePreview: [],
+    fieldProbeResults: [],
+    fieldProbePending: false,
+    fieldProbeIndex: 0,
+    fieldProbeTooDense: false,
+    feedback: "",
+    feedbackKind: "",
   };
 }
 
@@ -382,6 +415,8 @@ function normalizeMachineSettings(machine) {
       y: finiteOr(machine.origin?.y, d.origin.y),
     },
     tap_feed_mm_min: finiteOr(machine.tap_feed_mm_min, d.tap_feed_mm_min),
+    safe_z_mm: finiteOr(machine.safe_z_mm, d.safe_z_mm),
+    safe_z_disabled: !!machine.safe_z_disabled,
   };
   if (out.work_area.x_min >= out.work_area.x_max) {
     out.work_area.x_min = d.work_area.x_min;
@@ -735,6 +770,7 @@ function renderMachine() {
   syncJogAvailabilityFromMachine(m);
   checkOriginVerification();
   renderJog();
+  renderOutlineCapture();
 }
 
 function renderToolStatus(m) {
@@ -871,9 +907,12 @@ function renderJog() {
   msgEl.textContent = msg.text;
   msgEl.className = msg.kind || "";
   const arm = document.getElementById("jog-arm");
-  arm.textContent = j.armPending ? (j.armPendingAction === "arm" ? "Arming..." : "Disarming...") : (j.armed ? "Disarm Tap Move" : "Arm Tap Move");
+  setTextIfChanged(arm, j.armPending ? (j.armPendingAction === "arm" ? "Arming..." : "Disarming...") :
+    (j.armQueuedAction ? "Connecting..." : (j.armed ? "Disarm Tap Move" : "Arm Tap Move")));
   arm.classList.toggle("armed", j.armed);
-  arm.disabled = !j.caps || !j.caps.enabled || j.link !== "online" || !!j.armPending || !!j.originPendingAxis;
+  const armBusy = !!j.armPending || !!j.armQueuedAction;
+  arm.disabled = armBusy;
+  setSoftDisabled(arm, !armBusy && ((j.caps && !j.caps.enabled) || j.link === "unsupported" || !!j.originPendingAxis));
   const feed = document.getElementById("tap-feed-mm-min");
   if (feed) {
     const maxFeed = Number(j.caps?.max_xy_mm_min) || 1200;
@@ -884,8 +923,10 @@ function renderJog() {
   const zStepDistance = document.getElementById("z-step-distance");
   if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending || !!j.originPendingAxis;
   const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending && !j.originPendingAxis;
+  const zStepBusy = !!j.zStepPending || !!j.targetPending || !!j.originPendingAxis;
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
-    btn.disabled = !zStepReady;
+    btn.disabled = zStepBusy;
+    setSoftDisabled(btn, !zStepBusy && !zStepReady);
   }
   const feedback = document.getElementById("tap-move-feedback");
   if (feedback) {
@@ -895,6 +936,61 @@ function renderJog() {
   const plot = document.getElementById("workarea-plot");
   if (plot) plot.classList.toggle("not-armed", !j.armed);
   renderWorkArea();
+}
+
+function setSoftDisabled(el, disabled) {
+  if (!el) return;
+  if (disabled) el.setAttribute("aria-disabled", "true");
+  else el.removeAttribute("aria-disabled");
+}
+
+function setTextIfChanged(el, text) {
+  if (el && el.textContent !== text) el.textContent = text;
+}
+
+const actionPresses = new WeakMap();
+const actionSuppressClicks = new WeakMap();
+
+function bindButtonAction(el, handler) {
+  if (!el || el.dataset.actionBound === "true") return;
+  el.dataset.actionBound = "true";
+  el.addEventListener("pointerdown", (e) => {
+    if (typeof e.button === "number" && e.button !== 0) return;
+    if (el.disabled) return;
+    actionPresses.set(el, { pointerId: e.pointerId, x: e.clientX, y: e.clientY });
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      // Pointer capture is best-effort; the click fallback remains in place.
+    }
+  });
+  el.addEventListener("pointerup", (e) => {
+    const press = actionPresses.get(el);
+    if (!press || press.pointerId !== e.pointerId) return;
+    actionPresses.delete(el);
+    if (el.disabled) return;
+    const dx = Math.abs(e.clientX - press.x);
+    const dy = Math.abs(e.clientY - press.y);
+    const releaseTarget = document.elementFromPoint(e.clientX, e.clientY);
+    if (dx > 12 || dy > 12 || (releaseTarget && !el.contains(releaseTarget))) return;
+    actionSuppressClicks.set(el, performance.now());
+    e.preventDefault();
+    handler(e);
+  });
+  el.addEventListener("pointercancel", (e) => {
+    const press = actionPresses.get(el);
+    if (press && press.pointerId === e.pointerId) actionPresses.delete(el);
+  });
+  el.addEventListener("click", (e) => {
+    const last = actionSuppressClicks.get(el) || 0;
+    if (performance.now() - last < 700) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (el.disabled) return;
+    handler(e);
+  });
 }
 
 function machineReadyForOriginSet() {
@@ -910,9 +1006,11 @@ function renderOriginButtons() {
   const externalJogBusy = !j.armed && j.availability && !j.availability.available && j.availability.reason === "busy";
   const apiReady = !j.armed && machineReadyForOriginSet() && !externalJogBusy;
   const ready = (jogReady || apiReady) && !j.armPending && !j.targetPending && !j.zStepPending && !pendingAxis;
+  const busy = !!j.armPending || !!j.targetPending || !!j.zStepPending || !!pendingAxis;
   for (const btn of document.querySelectorAll("[data-origin-axis]")) {
     const axis = String(btn.dataset.originAxis || "").toLowerCase();
-    btn.disabled = !ready;
+    btn.disabled = busy;
+    setSoftDisabled(btn, !busy && !ready);
     btn.textContent = pendingAxis === axis ? "Setting " + axis.toUpperCase() + "0" : "Set " + axis.toUpperCase() + "0";
   }
 }
@@ -977,6 +1075,9 @@ function renderMachineSettings() {
   setInputValue("machine-origin-x", m.origin.x);
   setInputValue("machine-origin-y", m.origin.y);
   setInputValue("tap-feed-mm-min", m.tap_feed_mm_min);
+  setInputValue("machine-safe-z", m.safe_z_mm);
+  const safeToggle = document.getElementById("tap-safe-z-enabled");
+  if (safeToggle && safeToggle !== document.activeElement) safeToggle.checked = !m.safe_z_disabled;
 }
 
 function setInputValue(id, value) {
@@ -1000,10 +1101,30 @@ function updateMachineSettings() {
       y: read("machine-origin-y", current.origin.y),
     },
     tap_feed_mm_min: read("tap-feed-mm-min", current.tap_feed_mm_min),
+    safe_z_mm: read("machine-safe-z", current.safe_z_mm),
+    safe_z_disabled: !!current.safe_z_disabled,
   });
   queueSaveUISettings();
   renderMachineSettings();
   renderWorkArea();
+}
+
+function updateSafeZToggle() {
+  const current = state.ui.machine || defaultMachineSettings();
+  const nextEnabled = !!document.getElementById("tap-safe-z-enabled")?.checked;
+  if (!nextEnabled && !confirm("Disable safe Z before click-jog XY moves?")) {
+    renderMachineSettings();
+    return;
+  }
+  state.ui.machine = normalizeMachineSettings({
+    ...current,
+    safe_z_disabled: !nextEnabled,
+  });
+  state.jog.tapFeedback = nextEnabled ? "Safe Z before click-jog enabled." : "Safe Z before click-jog disabled.";
+  state.jog.tapFeedbackKind = nextEnabled ? "ok" : "";
+  queueSaveUISettings();
+  renderMachineSettings();
+  renderJog();
 }
 
 function axisValue(values, axis) {
@@ -1082,7 +1203,9 @@ function renderWorkArea() {
   renderWorkAreaBoundary();
   renderWorkAreaGrid();
   renderWorkAreaOrigin();
-  const spindle = state.jog.observed || state.jog.mpos || state.machine.mpos;
+  renderWorkAreaOutline();
+  renderWorkAreaFieldProbePreview();
+  const spindle = jogEstimateActive() ? (state.jog.mpos || state.machine.mpos) : (state.jog.observed || state.jog.mpos || state.machine.mpos);
   const target = state.jog.target;
   setWorkAreaMarker("workarea-spindle", spindle);
   setWorkAreaMarker("workarea-target", target);
@@ -1157,6 +1280,1032 @@ function setWorkAreaMarker(id, machinePoint) {
   }
   el.setAttribute("transform", `translate(${p.x.toFixed(2)} ${p.y.toFixed(2)})`);
   el.removeAttribute("display");
+}
+
+function cloneOutlinePoint(p) {
+  return {
+    id: p.id,
+    x: p.x,
+    y: p.y,
+    z: p.z,
+    machine_x: p.machine_x,
+    machine_y: p.machine_y,
+    machine_z: p.machine_z,
+    captured_at: p.captured_at,
+    probed: !!p.probed,
+    probe_output: p.probe_output || "",
+  };
+}
+
+function cloneOutlineOrigin(origin) {
+  if (!origin) return null;
+  const out = {};
+  for (const axis of ["x", "y", "z"]) {
+    const v = axisValue(origin, axis);
+    if (v !== null) out[axis] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function outlineSnapshot() {
+  const o = state.outline;
+  return {
+    active: o.active,
+    points: o.points.map(cloneOutlinePoint),
+    closed: !!o.closed,
+    origin: cloneOutlineOrigin(o.origin),
+  };
+}
+
+function restoreOutlineSnapshot(snap) {
+  const o = state.outline;
+  o.active = !!snap.active;
+  o.points = snap.points.map(cloneOutlinePoint);
+  o.closed = !!snap.closed;
+  o.origin = cloneOutlineOrigin(snap.origin);
+  clearFieldProbeData();
+  if (o.closed) updateFieldProbePreview();
+}
+
+function pushOutlineUndo() {
+  const o = state.outline;
+  o.undo.push(outlineSnapshot());
+  if (o.undo.length > 100) o.undo.shift();
+  o.redo = [];
+}
+
+function currentOutlineCapturePosition() {
+  const { mpos, wpos } = currentAxisValues();
+  const mx = axisValue(mpos, "x");
+  const my = axisValue(mpos, "y");
+  const mz = axisValue(mpos, "z");
+  const wx = axisValue(wpos, "x");
+  const wy = axisValue(wpos, "y");
+  const wz = axisValue(wpos, "z");
+  if (mx !== null && my !== null && wx !== null && wy !== null && wz !== null) {
+    const origin = { x: mx - wx, y: my - wy };
+    if (mz !== null) origin.z = mz - wz;
+    return {
+      machine: { x: mx, y: my, z: mz },
+      work: { x: wx, y: wy, z: wz },
+      origin,
+    };
+  }
+  const origin = state.outline.origin || currentWorkOrigin();
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const oz = axisValue(origin, "z");
+  if (mx !== null && my !== null && mz !== null && ox !== null && oy !== null && oz !== null) {
+    return {
+      machine: { x: mx, y: my, z: mz },
+      work: { x: mx - ox, y: my - oy, z: mz - oz },
+      origin,
+    };
+  }
+  return null;
+}
+
+function startOutlineCapture() {
+  const current = state.outline;
+  const keepCurveFit = !!current.curveFit;
+  const pos = currentOutlineCapturePosition();
+  state.outline = defaultOutlineState();
+  state.outline.active = true;
+  state.outline.curveFit = keepCurveFit;
+  state.outline.origin = cloneOutlineOrigin(pos?.origin || currentWorkOrigin());
+  state.outline.feedback = "Outline capture started.";
+  state.outline.feedbackKind = "ok";
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function endOutlineCapture() {
+  const current = state.outline;
+  if (current.points.length && !confirm("End outline capture and clear the captured outline?")) return;
+  const keepCurveFit = !!current.curveFit;
+  state.outline = defaultOutlineState();
+  state.outline.curveFit = keepCurveFit;
+  state.outline.feedback = "Outline cleared.";
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+async function addOutlinePoint() {
+  const o = state.outline;
+  if (!o.active) {
+    setOutlineFeedback("Capture outline before adding points.", "error");
+    return;
+  }
+  const pos = currentOutlineCapturePosition();
+  if (!pos) {
+    setOutlineFeedback("Add point failed: current XYZ work position is unavailable.", "error");
+    return;
+  }
+  if (o.closed) {
+    setOutlineFeedback("Undo close before adding another point.", "error");
+    return;
+  }
+  if (o.pointProbePending || o.fieldProbePending) return;
+  let capture = {
+    id: newID("outline-point"),
+    x: pos.work.x,
+    y: pos.work.y,
+    z: pos.work.z,
+    machine_x: pos.machine.x,
+    machine_y: pos.machine.y,
+    machine_z: pos.machine.z,
+    captured_at: new Date().toISOString(),
+  };
+  if (o.probeEachPoint) {
+    if (!isProbeToolActive()) {
+      setOutlineFeedback("Probe Z requires the probe tool to be active.", "error");
+      return;
+    }
+    if (state.jog.armed) {
+      setOutlineFeedback("Disarm tap move before probing Z for an outline point.", "error");
+      return;
+    }
+    o.pointProbePending = true;
+    o.feedback = "Probing Z for point...";
+    o.feedbackKind = "";
+    renderOutlineCapture();
+    try {
+      const probed = await probeZAtWorkPoint(pos.work, { moveXY: false, origin: pos.origin });
+      capture = {
+        ...capture,
+        x: probed.x,
+        y: probed.y,
+        z: probed.z,
+        machine_x: probed.machine_x,
+        machine_y: probed.machine_y,
+        machine_z: probed.machine_z,
+        probed: true,
+        probe_output: probed.output,
+      };
+    } catch (e) {
+      o.feedback = "Point probe failed: " + e.message;
+      o.feedbackKind = "error";
+      return;
+    } finally {
+      o.pointProbePending = false;
+      renderOutlineCapture();
+      pollMachine();
+    }
+  }
+  pushOutlineUndo();
+  o.active = true;
+  if (!o.origin) o.origin = cloneOutlineOrigin(pos.origin);
+  o.points.push(capture);
+  clearFieldProbeData();
+  o.feedback = "Point " + o.points.length + " added at " + outlinePointLabel(o.points[o.points.length - 1]) + ".";
+  o.feedbackKind = "ok";
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function closeOutline() {
+  const o = state.outline;
+  if (o.points.length < 2) {
+    setOutlineFeedback("Close outline needs at least two points.", "error");
+    return;
+  }
+  if (o.closed) {
+    setOutlineFeedback("Outline is already closed.", "error");
+    return;
+  }
+  pushOutlineUndo();
+  o.active = true;
+  o.closed = true;
+  updateFieldProbePreview();
+  o.feedback = "Outline closed.";
+  o.feedbackKind = "ok";
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function undoOutline() {
+  const o = state.outline;
+  if (!o.undo.length) return;
+  const current = outlineSnapshot();
+  const prev = o.undo.pop();
+  o.redo.push(current);
+  restoreOutlineSnapshot(prev);
+  o.feedback = "Undo.";
+  o.feedbackKind = "ok";
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function redoOutline() {
+  const o = state.outline;
+  if (!o.redo.length) return;
+  const current = outlineSnapshot();
+  const next = o.redo.pop();
+  o.undo.push(current);
+  restoreOutlineSnapshot(next);
+  o.feedback = "Redo.";
+  o.feedbackKind = "ok";
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function setOutlineFeedback(text, kind = "") {
+  state.outline.feedback = text;
+  state.outline.feedbackKind = kind;
+  renderOutlineCapture();
+}
+
+function outlinePointLabel(p) {
+  return "X " + fmtCoord(p.x) + " Y " + fmtCoord(p.y) + " Z " + fmtCoord(p.z);
+}
+
+function isProbeToolActive() {
+  return Number(state.machine?.tool?.active) === 0;
+}
+
+function outlineSummaryText() {
+  const o = state.outline;
+  if (!o.active) return "";
+  const count = o.points.length;
+  const parts = [count + " point" + (count === 1 ? "" : "s")];
+  if (o.closed) parts.push("closed");
+  if (o.curveFit) parts.push("curve fit");
+  if (o.fieldProbePreview.length) parts.push(o.fieldProbePreview.length + " field probes");
+  if (o.fieldProbeResults.length) parts.push(o.fieldProbeResults.length + " Z samples");
+  if (o.fieldProbeTooDense) parts.push("spot gap too dense");
+  return parts.join(" | ");
+}
+
+function renderOutlineCapture() {
+  const o = state.outline;
+  const start = document.getElementById("outline-start");
+  const activeControls = document.getElementById("outline-active-controls");
+  const end = document.getElementById("outline-end");
+  const add = document.getElementById("outline-add-point");
+  const undo = document.getElementById("outline-undo");
+  const redo = document.getElementById("outline-redo");
+  const close = document.getElementById("outline-close");
+  const curve = document.getElementById("outline-curve-fit");
+  const probeWrap = document.getElementById("outline-probe-point-wrap");
+  const probePoint = document.getElementById("outline-probe-point");
+  const exp = document.getElementById("outline-export");
+  const fieldControls = document.getElementById("outline-field-controls");
+  const spacing = document.getElementById("outline-field-spacing");
+  const fieldProbe = document.getElementById("outline-field-probe");
+  const exportControls = document.getElementById("outline-export-controls");
+  const exportObj = document.getElementById("outline-export-obj");
+  const exportHeight = document.getElementById("outline-export-height");
+  const summary = document.getElementById("outline-summary");
+  const feedback = document.getElementById("outline-feedback");
+  const busy = !!o.pointProbePending || !!o.fieldProbePending;
+  const probeActive = isProbeToolActive();
+  const fieldReady = o.active && o.closed && o.points.length >= 3;
+  if (start) {
+    start.hidden = !!o.active;
+    start.disabled = busy;
+    setSoftDisabled(start, false);
+  }
+  if (activeControls) activeControls.hidden = !o.active;
+  if (end) {
+    end.disabled = busy;
+    setSoftDisabled(end, false);
+  }
+  if (add) {
+    add.disabled = busy;
+    setSoftDisabled(add, !busy && !!o.closed);
+    setTextIfChanged(add, o.pointProbePending ? "Probing..." : "Add point");
+  }
+  if (undo) undo.disabled = busy || !o.undo.length;
+  if (redo) redo.disabled = busy || !o.redo.length;
+  if (close) {
+    close.disabled = busy;
+    setSoftDisabled(close, !busy && (!o.active || o.closed || o.points.length < 2));
+  }
+  if (curve) {
+    curve.checked = !!o.curveFit;
+    curve.disabled = busy || o.points.length < 2;
+  }
+  if (probeWrap) probeWrap.hidden = !probeActive;
+  if (probePoint) {
+    if (!probeActive) o.probeEachPoint = false;
+    probePoint.checked = !!o.probeEachPoint;
+    probePoint.disabled = busy;
+  }
+  if (exp) {
+    exp.disabled = busy;
+    setSoftDisabled(exp, !busy && o.points.length < 2);
+  }
+  if (fieldControls) fieldControls.hidden = !fieldReady;
+  if (spacing) {
+    spacing.value = pathNum(fieldProbeSpotGap());
+    spacing.disabled = busy;
+  }
+  if (fieldProbe) {
+    setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe field Z");
+    fieldProbe.disabled = busy;
+    setSoftDisabled(fieldProbe, !busy && (!probeActive || state.jog.armed || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
+  }
+  if (exportControls) exportControls.hidden = !o.fieldProbeResults.length;
+  if (exportObj) {
+    exportObj.disabled = busy;
+    setSoftDisabled(exportObj, !busy && o.fieldProbeResults.length < 3);
+  }
+  if (exportHeight) {
+    exportHeight.disabled = busy;
+    setSoftDisabled(exportHeight, !busy && o.fieldProbeResults.length < 3);
+  }
+  if (summary) summary.textContent = outlineSummaryText();
+  if (feedback) {
+    feedback.textContent = o.feedback || "";
+    feedback.className = "action-feedback " + (o.feedbackKind || "");
+  }
+}
+
+function toggleOutlineCurveFit() {
+  state.outline.curveFit = !!document.getElementById("outline-curve-fit")?.checked;
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function toggleOutlineProbePoint() {
+  state.outline.probeEachPoint = !!document.getElementById("outline-probe-point")?.checked;
+  renderOutlineCapture();
+}
+
+function updateOutlineFieldSpacing() {
+  const current = fieldProbeSpotGap();
+  const value = finiteOr(document.getElementById("outline-field-spacing")?.value, current);
+  state.outline.fieldSpotGapMM = Math.max(0, Math.min(250, value));
+  clearFieldProbeData(true);
+  updateFieldProbePreview();
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function fieldProbeSpotGap() {
+  const v = Number(state.outline.fieldSpotGapMM);
+  return Number.isFinite(v) ? Math.max(0, Math.min(250, v)) : DEFAULT_FIELD_SPOT_GAP_MM;
+}
+
+function fieldProbeCenterSpacing(gap = fieldProbeSpotGap()) {
+  return PROBE_SPOT_DIAMETER_MM + Math.max(0, Number(gap) || 0);
+}
+
+function renderWorkAreaOutline() {
+  const group = document.getElementById("workarea-outline");
+  const path = document.getElementById("workarea-outline-path");
+  const pointsGroup = document.getElementById("workarea-outline-points");
+  if (!group || !path || !pointsGroup) return;
+  const points = state.outline.points
+    .map((p) => machineToWorkAreaPoint({ x: p.machine_x, y: p.machine_y }))
+    .filter(Boolean);
+  if (!points.length) {
+    group.setAttribute("display", "none");
+    path.removeAttribute("d");
+    pointsGroup.innerHTML = "";
+    return;
+  }
+  path.setAttribute("d", outlinePathD(points, state.outline.closed, state.outline.curveFit));
+  group.classList.toggle("closed", !!state.outline.closed);
+  group.removeAttribute("display");
+  pointsGroup.innerHTML = points.map((p, i) =>
+    `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${i === points.length - 1 ? "1.45" : "1.15"}"></circle>`
+  ).join("");
+}
+
+function renderWorkAreaFieldProbePreview() {
+  const group = document.getElementById("workarea-field-probe-preview");
+  if (!group) return;
+  const o = state.outline;
+  const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin() || visualWorkOrigin());
+  const display = o.fieldProbePreview.length ? o.fieldProbePreview : o.fieldProbeResults;
+  const done = new Set(o.fieldProbeResults.map((p) => p.id));
+  const r = workAreaMMRadius(PROBE_SPOT_RADIUS_MM);
+  const points = display.map((p) => ({ src: p, plot: machineToWorkAreaPoint(workPointToMachinePoint(p, origin)) }))
+    .filter((p) => p.plot);
+  if (!points.length || !o.active || !o.closed) {
+    group.setAttribute("display", "none");
+    group.innerHTML = "";
+    return;
+  }
+  group.innerHTML = points.map((p, i) =>
+    `<circle class="${done.has(p.src.id) ? "done" : ""}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`
+  ).join("");
+  group.removeAttribute("display");
+}
+
+function workAreaMMRadius(mm) {
+  const b = workAreaBounds();
+  const r = workAreaRect();
+  const sx = r.width / Math.max(1e-9, b.x_max - b.x_min);
+  const sy = r.height / Math.max(1e-9, b.y_max - b.y_min);
+  return Math.max(0.45, Number(mm) * Math.min(sx, sy));
+}
+
+function clearFieldProbeData(keepPreview = false) {
+  const o = state.outline;
+  o.fieldProbeResults = [];
+  o.fieldProbeIndex = 0;
+  o.fieldProbeTooDense = false;
+  if (!keepPreview) o.fieldProbePreview = [];
+}
+
+function updateFieldProbePreview() {
+  const o = state.outline;
+  if (!o.closed || o.points.length < 3) {
+    o.fieldProbePreview = [];
+    o.fieldProbeTooDense = false;
+    return;
+  }
+  const built = buildFieldProbePreview(o.points, fieldProbeSpotGap());
+  o.fieldProbePreview = built.points;
+  o.fieldProbeTooDense = built.tooDense;
+}
+
+function buildFieldProbePreview(points, spotGap) {
+  // Fixed-diameter probe spots are placed on a hex lattice, then clipped to the
+  // polygon; several deterministic offsets/rotations are scored to reduce
+  // boundary bias for arbitrary outlines.
+  const spacing = fieldProbeCenterSpacing(spotGap);
+  const rotations = [0, 10, 20, 30, 40, 50].map((deg) => deg * Math.PI / 180);
+  const offsetFractions = [0, 0.25, 0.5, 0.75];
+  let best = { points: [], tooDense: false, score: null };
+  for (const rotation of rotations) {
+    for (const ox of offsetFractions) {
+      for (const oy of offsetFractions) {
+        const candidate = buildHexProbeCandidate(points, spacing, rotation, ox, oy);
+        if (isBetterProbeCandidate(candidate, best)) best = candidate;
+      }
+    }
+  }
+  return {
+    points: best.points.map((p, i) => ({ id: "field-probe-" + String(i + 1).padStart(4, "0"), x: p.x, y: p.y })),
+    tooDense: best.tooDense,
+  };
+}
+
+function buildHexProbeCandidate(points, spacing, rotation, offsetXFrac, offsetYFrac) {
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  const toLattice = (p) => ({ x: p.x * cos + p.y * sin, y: -p.x * sin + p.y * cos });
+  const fromLattice = (p) => ({ x: p.x * cos - p.y * sin, y: p.x * sin + p.y * cos });
+  const rotated = points.map(toLattice);
+  const b = pointBounds(rotated);
+  if (!Number.isFinite(b.x_min) || !Number.isFinite(b.y_min)) return scoredProbeCandidate([], false, points, rotation, offsetXFrac, offsetYFrac);
+  const rowGap = spacing * Math.sqrt(3) / 2;
+  const firstY = Math.floor((b.y_min - rowGap) / rowGap) * rowGap + offsetYFrac * rowGap;
+  const lastY = b.y_max + rowGap;
+  const firstXBase = Math.floor((b.x_min - spacing) / spacing) * spacing + offsetXFrac * spacing;
+  const lastX = b.x_max + spacing;
+  const out = [];
+  let tooDense = false;
+  let row = 0;
+  for (let y = firstY; y <= lastY + 1e-9; y += rowGap, row++) {
+    const rowOffset = row % 2 ? spacing / 2 : 0;
+    for (let x = firstXBase + rowOffset; x <= lastX + 1e-9; x += spacing) {
+      const p = fromLattice({ x, y });
+      const candidate = { x: Number(p.x.toFixed(4)), y: Number(p.y.toFixed(4)) };
+      if (!probeSpotFitsPolygon(candidate, points)) continue;
+      if (out.length >= MAX_FIELD_PROBE_POINTS) {
+        tooDense = true;
+        break;
+      }
+      out.push({ x: candidate.x, y: candidate.y });
+    }
+    if (tooDense) break;
+  }
+  return scoredProbeCandidate(out, tooDense, points, rotation, offsetXFrac, offsetYFrac);
+}
+
+function scoredProbeCandidate(points, tooDense, polygon, rotation, offsetXFrac, offsetYFrac) {
+  const polyCentroid = polygonCentroid(polygon);
+  const sampleCentroid = points.length ? averagePoint(points) : { x: Infinity, y: Infinity };
+  const centroidOffset = distance2(polyCentroid, sampleCentroid);
+  return {
+    points,
+    tooDense,
+    score: {
+      count: points.length,
+      centroidOffset,
+      rotation,
+      offset: offsetXFrac * offsetXFrac + offsetYFrac * offsetYFrac,
+    },
+  };
+}
+
+function isBetterProbeCandidate(candidate, best) {
+  if (!best.score) return true;
+  if (candidate.score.count !== best.score.count) return candidate.score.count > best.score.count;
+  if (Math.abs(candidate.score.centroidOffset - best.score.centroidOffset) > 1e-9) {
+    return candidate.score.centroidOffset < best.score.centroidOffset;
+  }
+  if (Math.abs(candidate.score.offset - best.score.offset) > 1e-9) return candidate.score.offset < best.score.offset;
+  return candidate.score.rotation < best.score.rotation;
+}
+
+function pointBounds(points) {
+  const out = { x_min: Infinity, x_max: -Infinity, y_min: Infinity, y_max: -Infinity };
+  for (const p of points) {
+    out.x_min = Math.min(out.x_min, p.x);
+    out.x_max = Math.max(out.x_max, p.x);
+    out.y_min = Math.min(out.y_min, p.y);
+    out.y_max = Math.max(out.y_max, p.y);
+  }
+  return out;
+}
+
+function probeSpotFitsPolygon(center, polygon) {
+  if (!pointInPolygon(center, polygon)) return false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    if (distancePointToSegment(center, polygon[j], polygon[i]) < PROBE_SPOT_RADIUS_MM - 1e-9) return false;
+  }
+  return true;
+}
+
+function distancePointToSegment(p, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (!len2) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+function polygonCentroid(points) {
+  let twiceArea = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const a = points[j];
+    const b = points[i];
+    const cross = a.x * b.y - b.x * a.y;
+    twiceArea += cross;
+    cx += (a.x + b.x) * cross;
+    cy += (a.y + b.y) * cross;
+  }
+  if (Math.abs(twiceArea) < 1e-9) return averagePoint(points);
+  return { x: cx / (3 * twiceArea), y: cy / (3 * twiceArea) };
+}
+
+function averagePoint(points) {
+  if (!points.length) return { x: 0, y: 0 };
+  let x = 0;
+  let y = 0;
+  for (const p of points) {
+    x += p.x;
+    y += p.y;
+  }
+  return { x: x / points.length, y: y / points.length };
+}
+
+function distance2(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i];
+    const b = polygon[j];
+    const crosses = ((a.y > point.y) !== (b.y > point.y)) &&
+      (point.x < ((b.x - a.x) * (point.y - a.y)) / ((b.y - a.y) || 1e-12) + a.x);
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function workPointToMachinePoint(p, origin) {
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const oz = axisValue(origin, "z");
+  if (ox === null || oy === null) return null;
+  const out = { x: Number(p.x) + ox, y: Number(p.y) + oy };
+  if (axisValue(p, "z") !== null && oz !== null) out.z = Number(p.z) + oz;
+  return out;
+}
+
+async function probeZAtWorkPoint(workPoint, opts = {}) {
+  const origin = cloneOutlineOrigin(opts.origin || state.outline.origin || currentWorkOrigin());
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const oz = axisValue(origin, "z");
+  if (ox === null || oy === null || oz === null) {
+    throw new Error("current work zero is unavailable");
+  }
+  const machine = normalizeMachineSettings(state.ui.machine);
+  const mx = Number(workPoint.x) + ox;
+  const my = Number(workPoint.y) + oy;
+  const depth = Math.max(0.1, Math.min(200, finiteOr(opts.depthMM, DEFAULT_PROBE_DEPTH_MM)));
+  const feed = Math.max(1, Math.min(1000, finiteOr(opts.feedMMMin, DEFAULT_PROBE_FEED_MM)));
+  const resp = await request("/api/probe/z", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      machine_x: mx,
+      machine_y: my,
+      move_xy: opts.moveXY !== false,
+      safe_z_mm: machine.safe_z_mm,
+      probe_depth_mm: depth,
+      probe_feed_mm_min: feed,
+    }),
+  });
+  const result = await resp.json();
+  const m = result.machine || {};
+  const px = axisValue(m, "x");
+  const py = axisValue(m, "y");
+  const pz = axisValue(m, "z");
+  if (px === null || py === null || pz === null) throw new Error("probe response did not include XYZ");
+  return {
+    x: px - ox,
+    y: py - oy,
+    z: pz - oz,
+    machine_x: px,
+    machine_y: py,
+    machine_z: pz,
+    output: result.output || "",
+  };
+}
+
+async function runFieldProbe() {
+  const o = state.outline;
+  if (!o.active || !o.closed || o.points.length < 3) return;
+  if (!isProbeToolActive()) {
+    setOutlineFeedback("Field Z probe requires the probe tool to be active.", "error");
+    return;
+  }
+  if (state.jog.armed) {
+    setOutlineFeedback("Disarm tap move before running field Z probe.", "error");
+    return;
+  }
+  updateFieldProbePreview();
+  if (o.fieldProbeTooDense) {
+    setOutlineFeedback("Spot gap creates too many probe points.", "error");
+    renderOutlineCapture();
+    return;
+  }
+  if (!o.fieldProbePreview.length) {
+    setOutlineFeedback("Field Z probe needs at least one preview point inside the outline.", "error");
+    return;
+  }
+  const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin());
+  o.fieldProbePending = true;
+  o.fieldProbeResults = [];
+  o.fieldProbeIndex = 0;
+  o.feedback = "Starting field Z probe...";
+  o.feedbackKind = "";
+  renderOutlineCapture();
+  renderWorkArea();
+  try {
+    for (let i = 0; i < o.fieldProbePreview.length; i++) {
+      o.fieldProbeIndex = i;
+      o.feedback = "Probing field point " + (i + 1) + " of " + o.fieldProbePreview.length + "...";
+      renderOutlineCapture();
+      const p = o.fieldProbePreview[i];
+      const probed = await probeZAtWorkPoint(p, { moveXY: true, origin });
+      o.fieldProbeResults.push({
+        id: p.id,
+        x: probed.x,
+        y: probed.y,
+        z: probed.z,
+        machine_x: probed.machine_x,
+        machine_y: probed.machine_y,
+        machine_z: probed.machine_z,
+        captured_at: new Date().toISOString(),
+        probe_output: probed.output,
+      });
+      renderWorkArea();
+    }
+    o.feedback = "Field Z probe completed with " + o.fieldProbeResults.length + " samples.";
+    o.feedbackKind = "ok";
+  } catch (e) {
+    o.feedback = "Field Z probe failed: " + e.message;
+    o.feedbackKind = "error";
+  } finally {
+    o.fieldProbePending = false;
+    o.fieldProbeIndex = 0;
+    renderOutlineCapture();
+    renderWorkArea();
+    pollMachine();
+  }
+}
+
+function pathNum(n) {
+  if (!Number.isFinite(n)) return "0";
+  const v = Math.abs(Number(n)) < 0.00005 ? 0 : Number(n);
+  return v.toFixed(4).replace(/\.?0+$/, "");
+}
+
+function pathPoint(p) {
+  return pathNum(p.x) + " " + pathNum(p.y);
+}
+
+function outlinePathD(points, closed, curveFit) {
+  if (!points.length) return "";
+  let d = "M " + pathPoint(points[0]);
+  if (!curveFit || points.length < 3) {
+    for (let i = 1; i < points.length; i++) d += " L " + pathPoint(points[i]);
+    if (closed && points.length > 1) d += " Z";
+    return d;
+  }
+  if (closed) {
+    for (let i = 0; i < points.length; i++) {
+      const p0 = points[(i - 1 + points.length) % points.length];
+      const p1 = points[i];
+      const p2 = points[(i + 1) % points.length];
+      const p3 = points[(i + 2) % points.length];
+      d += " " + curveCommand(p0, p1, p2, p3);
+    }
+    return d + " Z";
+  }
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = i === 0 ? points[i] : points[i - 1];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = i + 2 < points.length ? points[i + 2] : p2;
+    d += " " + curveCommand(p0, p1, p2, p3);
+  }
+  return d;
+}
+
+function curveCommand(p0, p1, p2, p3) {
+  const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
+  const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
+  return "C " + pathPoint(c1) + " " + pathPoint(c2) + " " + pathPoint(p2);
+}
+
+function exportOutline() {
+  try {
+    if (state.outline.points.length < 2) throw new Error("outline needs at least two points");
+    const svg = buildOutlineSVG();
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadBlob("cnc-outline-" + stamp + ".svg", svg, "image/svg+xml");
+    setOutlineFeedback("Outline export started.", "ok");
+  } catch (e) {
+    setOutlineFeedback("Export failed: " + e.message, "error");
+  }
+}
+
+function downloadBlob(filename, content, type) {
+  const blob = content instanceof Blob ? content : new Blob([content], { type });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function buildOutlineSVG() {
+  const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
+  const points = outlineExportPoints(origin);
+  const fieldPoints = fieldProbeExportPoints(origin);
+  const table = relativeTableBounds(origin);
+  const ext = exportExtents(table, points.concat(fieldPoints));
+  const path = outlinePathD(points, state.outline.closed, state.outline.curveFit);
+  const metadata = {
+    app: "cnc-proxy",
+    kind: "capture-outline",
+    version: 1,
+    units: "mm",
+    coordinate_space: "work_zero",
+    zero_origin_machine_mm: origin,
+    table_mm: table,
+    outline: {
+      closed: !!state.outline.closed,
+      curve_fit: !!state.outline.curveFit,
+      points,
+    },
+    field_probe: {
+      probe_diameter_mm: PROBE_SPOT_DIAMETER_MM,
+      spot_gap_mm: fieldProbeSpotGap(),
+      center_spacing_mm: fieldProbeCenterSpacing(),
+      samples: fieldPoints,
+    },
+  };
+  const pointMeta = points.map((p, i) =>
+    `<circle cx="${pathNum(p.x)}" cy="${pathNum(p.y)}" r="0.35" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probed="${p.probed ? "true" : "false"}"><title>${escapeHtml("Point " + (i + 1) + " " + outlinePointLabel(p))}</title></circle>`
+  ).join("\n      ");
+  const fieldMeta = fieldPoints.map((p, i) =>
+    `<circle cx="${pathNum(p.x)}" cy="${pathNum(p.y)}" r="${pathNum(PROBE_SPOT_RADIUS_MM)}" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probe-diameter-mm="${pathNum(PROBE_SPOT_DIAMETER_MM)}"></circle>`
+  ).join("\n      ");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${pathNum(ext.width)}mm" height="${pathNum(ext.height)}mm" viewBox="${pathNum(ext.x_min)} ${pathNum(-ext.y_max)} ${pathNum(ext.width)} ${pathNum(ext.height)}">
+  <title>CNC Proxy outline capture</title>
+  <metadata>${escapeHtml(JSON.stringify(metadata, null, 2))}</metadata>
+  <g id="table-layer" data-layer="table" inkscape:groupmode="layer" inkscape:label="Table" transform="scale(1 -1)">
+    <rect x="${pathNum(table.x_min)}" y="${pathNum(table.y_min)}" width="${pathNum(table.x_max - table.x_min)}" height="${pathNum(table.y_max - table.y_min)}" fill="none" stroke="#91a0ae" stroke-width="0.25" vector-effect="non-scaling-stroke" data-units="mm"></rect>
+  </g>
+  <g id="outline-layer" data-layer="outline" inkscape:groupmode="layer" inkscape:label="Outline" transform="scale(1 -1)" data-units="mm" data-closed="${state.outline.closed ? "true" : "false"}" data-curve-fit="${state.outline.curveFit ? "true" : "false"}">
+    <path id="outline-path" d="${escapeHtml(path)}" fill="none" stroke="#57a6d6" stroke-width="0.25" vector-effect="non-scaling-stroke"></path>
+    <g id="outline-points" display="none">
+      ${pointMeta}
+    </g>
+  </g>
+  <g id="field-probe-layer" data-layer="field-probe" inkscape:groupmode="layer" inkscape:label="Field Z Probe" transform="scale(1 -1)" data-units="mm" display="none">
+    ${fieldMeta}
+  </g>
+</svg>
+`;
+}
+
+function outlineExportPoints(origin) {
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const oz = axisValue(origin, "z");
+  return state.outline.points.map((p) => {
+    const mx = Number(p.machine_x);
+    const my = Number(p.machine_y);
+    const mz = Number(p.machine_z);
+    return {
+      x: Number.isFinite(mx) && ox !== null ? mx - ox : p.x,
+      y: Number.isFinite(my) && oy !== null ? my - oy : p.y,
+      z: Number.isFinite(mz) && oz !== null ? mz - oz : p.z,
+      captured_at: p.captured_at,
+      probed: !!p.probed,
+    };
+  });
+}
+
+function fieldProbeExportPoints(origin) {
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const oz = axisValue(origin, "z");
+  return state.outline.fieldProbeResults.map((p) => {
+    const mx = Number(p.machine_x);
+    const my = Number(p.machine_y);
+    const mz = Number(p.machine_z);
+    return {
+      x: Number.isFinite(mx) && ox !== null ? mx - ox : p.x,
+      y: Number.isFinite(my) && oy !== null ? my - oy : p.y,
+      z: Number.isFinite(mz) && oz !== null ? mz - oz : p.z,
+      captured_at: p.captured_at,
+    };
+  });
+}
+
+function relativeTableBounds(origin) {
+  const b = workAreaBounds();
+  const ox = axisValue(origin, "x") ?? 0;
+  const oy = axisValue(origin, "y") ?? 0;
+  return {
+    x_min: b.x_min - ox,
+    x_max: b.x_max - ox,
+    y_min: b.y_min - oy,
+    y_max: b.y_max - oy,
+  };
+}
+
+function exportExtents(table, points) {
+  let minX = table.x_min;
+  let maxX = table.x_max;
+  let minY = table.y_min;
+  let maxY = table.y_max;
+  for (const p of points) {
+    if (Number.isFinite(p.x)) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+    }
+    if (Number.isFinite(p.y)) {
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
+    minX = 0;
+    maxX = 1;
+  }
+  if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+    minY = 0;
+    maxY = 1;
+  }
+  const width = Math.max(1, maxX - minX);
+  const height = Math.max(1, maxY - minY);
+  return { x_min: minX, x_max: maxX, y_min: minY, y_max: maxY, width, height };
+}
+
+function exportHeightOBJ() {
+  try {
+    const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
+    const mesh = buildInterpolatedHeightGrid(origin);
+    const lines = [
+      "# CNC Proxy outline field Z probe",
+      "# units: mm",
+      "# coordinates: current work zero",
+      "o outline_field_probe",
+    ];
+    const index = Array.from({ length: mesh.rows }, () => Array(mesh.cols).fill(0));
+    let next = 1;
+    for (let r = 0; r < mesh.rows; r++) {
+      for (let c = 0; c < mesh.cols; c++) {
+        const p = mesh.points[r][c];
+        if (!p) continue;
+        index[r][c] = next++;
+        lines.push("v " + pathNum(p.x) + " " + pathNum(p.y) + " " + pathNum(p.z));
+      }
+    }
+    for (let r = 0; r < mesh.rows - 1; r++) {
+      for (let c = 0; c < mesh.cols - 1; c++) {
+        const a = index[r][c], b = index[r][c + 1], d = index[r + 1][c], e = index[r + 1][c + 1];
+        if (a && b && d) lines.push("f " + a + " " + b + " " + d);
+        if (b && e && d) lines.push("f " + b + " " + e + " " + d);
+      }
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadBlob("cnc-outline-height-" + stamp + ".obj", lines.join("\n") + "\n", "text/plain");
+    setOutlineFeedback("OBJ export started.", "ok");
+  } catch (e) {
+    setOutlineFeedback("OBJ export failed: " + e.message, "error");
+  }
+}
+
+function exportHeightImage() {
+  try {
+    const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
+    const mesh = buildInterpolatedHeightGrid(origin);
+    const values = [];
+    for (const row of mesh.points) {
+      for (const p of row) if (p) values.push(p.z);
+    }
+    if (!values.length) throw new Error("field probe has no samples inside the outline");
+    const minZ = Math.min(...values);
+    const maxZ = Math.max(...values);
+    const span = maxZ - minZ || 1;
+    const rows = [
+      "P2",
+      "# CNC Proxy outline height image",
+      "# units: mm",
+      "# coordinates: current work zero",
+      "# x_min_mm: " + pathNum(mesh.xMin),
+      "# y_min_mm: " + pathNum(mesh.yMin),
+      "# probe_diameter_mm: " + pathNum(PROBE_SPOT_DIAMETER_MM),
+      "# spot_gap_mm: " + pathNum(fieldProbeSpotGap()),
+      "# center_spacing_mm: " + pathNum(mesh.spacing),
+      "# z_min_mm: " + pathNum(minZ),
+      "# z_max_mm: " + pathNum(maxZ),
+      mesh.cols + " " + mesh.rows,
+      "65535",
+    ];
+    for (let r = mesh.rows - 1; r >= 0; r--) {
+      const row = [];
+      for (let c = 0; c < mesh.cols; c++) {
+        const p = mesh.points[r][c];
+        row.push(p ? String(Math.round(((p.z - minZ) / span) * 65535)) : "0");
+      }
+      rows.push(row.join(" "));
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadBlob("cnc-outline-height-" + stamp + ".pgm", rows.join("\n") + "\n", "image/x-portable-graymap");
+    setOutlineFeedback("Height image export started.", "ok");
+  } catch (e) {
+    setOutlineFeedback("Height image export failed: " + e.message, "error");
+  }
+}
+
+function buildInterpolatedHeightGrid(origin) {
+  const outline = outlineExportPoints(origin);
+  const samples = fieldProbeExportPoints(origin);
+  if (outline.length < 3) throw new Error("closed outline needs at least three points");
+  if (samples.length < 3) throw new Error("field probe needs at least three samples");
+  const ext = exportExtents({ x_min: Infinity, x_max: -Infinity, y_min: Infinity, y_max: -Infinity }, outline);
+  const spacing = fieldProbeCenterSpacing();
+  const cols = Math.max(2, Math.min(512, Math.floor(ext.width / spacing) + 1));
+  const rows = Math.max(2, Math.min(512, Math.floor(ext.height / spacing) + 1));
+  const actualX = ext.width / Math.max(1, cols - 1);
+  const actualY = ext.height / Math.max(1, rows - 1);
+  const actualSpacing = Math.max(actualX, actualY);
+  const grid = [];
+  for (let r = 0; r < rows; r++) {
+    const y = ext.y_min + r * actualY;
+    const row = [];
+    for (let c = 0; c < cols; c++) {
+      const x = ext.x_min + c * actualX;
+      if (!pointInPolygon({ x, y }, outline)) {
+        row.push(null);
+        continue;
+      }
+      row.push({ x, y, z: interpolateZ(x, y, samples) });
+    }
+    grid.push(row);
+  }
+  return { points: grid, rows, cols, xMin: ext.x_min, yMin: ext.y_min, spacing: actualSpacing };
+}
+
+function interpolateZ(x, y, samples) {
+  let num = 0;
+  let den = 0;
+  for (const s of samples) {
+    const dx = x - s.x;
+    const dy = y - s.y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < 1e-9) return s.z;
+    const w = 1 / d2;
+    num += s.z * w;
+    den += w;
+  }
+  return den ? num / den : 0;
 }
 
 function renderGamepadSettings() {
@@ -1706,7 +2855,8 @@ function renderActiveGcode() {
   if (!active.path) {
     title.textContent = "No active gcode selected.";
     meta.textContent = "-";
-    run.disabled = true;
+    run.disabled = false;
+    setSoftDisabled(run, true);
     drawGcodePreview(null);
     if (!state.activeGcodePending) {
       feedback.textContent = "";
@@ -1734,7 +2884,8 @@ function renderActiveGcode() {
     truncated,
   ].filter(Boolean).join(" | ");
   const machineReady = state.machine?.state === "Idle";
-  run.disabled = !!state.activeGcodePending || !active.runnable || !machineReady;
+  run.disabled = !!state.activeGcodePending;
+  setSoftDisabled(run, !state.activeGcodePending && (!active.runnable || !machineReady));
   if (!state.activeGcodePending && active.message) {
     feedback.textContent = active.message;
     feedback.className = "action-feedback error";
@@ -2150,7 +3301,19 @@ async function selectActiveGcode(path) {
 
 async function runActiveGcode() {
   const active = state.activeGcode || {};
-  if (!active.path) return;
+  if (!active.path) {
+    setActiveFeedback("Select an active gcode before running.", "error");
+    return;
+  }
+  if (!active.runnable) {
+    setActiveFeedback(active.message || "Active gcode is not runnable.", "error");
+    return;
+  }
+  if (state.machine?.state !== "Idle") {
+    setActiveFeedback("Machine must be Idle before running active gcode.", "error");
+    return;
+  }
+  if (state.activeGcodePending) return;
   if (!confirm("Start " + relPath(active.path) + "?")) return;
   state.activeGcodePending = "run";
   setActiveFeedback("Sending run command for " + relPath(active.path) + "...", "");
@@ -2626,7 +3789,7 @@ function renderMacroRegion(region, box) {
     btn.textContent = macro.name;
     btn.title = macro.description || macro.lines.join("\n");
     if (macro.color) btn.style.borderColor = macro.color;
-    btn.onclick = () => runMacro(macro);
+    bindButtonAction(btn, () => runMacro(macro));
     box.appendChild(btn);
   }
 }
@@ -2651,7 +3814,9 @@ function renderMacroEditor() {
   document.getElementById("macro-lines").value = macro ? macro.lines.join("\n") : "";
   document.getElementById("macro-placement").value = macro ? (slotForMacro(macro.id)?.region || "none") : "none";
   document.getElementById("macro-save").disabled = false;
-  document.getElementById("macro-run").disabled = !macro;
+  const run = document.getElementById("macro-run");
+  run.disabled = false;
+  setSoftDisabled(run, !macro);
   document.getElementById("macro-up").disabled = !macro || !slotForMacro(macro.id);
   document.getElementById("macro-down").disabled = !macro || !slotForMacro(macro.id);
   document.getElementById("macro-delete").disabled = !macro;
@@ -2734,7 +3899,14 @@ function moveSelectedMacro(dir) {
 }
 
 async function runMacro(macro, opts = {}) {
-  if (!macro || !macro.lines.length) return;
+  if (!macro) {
+    setNotice("Select a macro before running.", "error", "macro-run");
+    return;
+  }
+  if (!macro.lines.length) {
+    setNotice("Macro has no commands.", "error", "macro-run");
+    return;
+  }
   if (state.macroRunning) {
     setNotice("A macro is already running.", "error", "macro-run");
     return;
@@ -2890,7 +4062,7 @@ function confirmControl(action) {
 
 function bindDataControlButtons() {
   document.querySelectorAll("[data-control-action]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
+    bindButtonAction(btn, (e) => {
       e.preventDefault();
       const action = btn.dataset.controlAction;
       if (confirmControl(action)) sendControl(action);
@@ -3016,10 +4188,17 @@ function connectJog() {
     state.jog.link = "offline";
     state.jog.armed = false;
     state.jog.sent.clear();
+    if (state.jog.armQueuedAction) {
+      const action = state.jog.armQueuedAction;
+      state.jog.armQueuedAction = "";
+      state.jog.tapFeedback = tapMoveArmFailureText(action, "jog service disconnected");
+      state.jog.tapFeedbackKind = "error";
+    }
     if (state.jog.armPending) {
+      const action = state.jog.armPendingAction;
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
-      state.jog.tapFeedback = "Arm failed: jog service disconnected.";
+      state.jog.tapFeedback = tapMoveArmFailureText(action, "jog service disconnected");
       state.jog.tapFeedbackKind = "error";
     }
     if (state.jog.targetPending) {
@@ -3101,24 +4280,65 @@ function setTapFeedback(text, kind = "") {
   renderJog();
 }
 
-function toggleTapMoveArm() {
-  if (state.jog.link !== "online") {
-    setTapFeedback("Jog service is not connected.", "error");
-    connectJog();
-    return;
-  }
-  if (state.jog.armPending) return;
-  const action = state.jog.armed ? "disarm" : "arm";
+function tapMoveArmProgressText(action) {
+  return action === "arm" ? "Arming tap move..." : "Disarming tap move...";
+}
+
+function tapMoveArmSuccessText(action) {
+  return action === "arm" ? "Tap move armed." : "Tap move disarmed.";
+}
+
+function tapMoveArmFailureText(action, detail) {
+  const prefix = action === "disarm" ? "Disarm failed: " : "Arm failed: ";
+  return prefix + detail;
+}
+
+function sendTapMoveArmAction(action) {
   const seq = sendJog({ type: action });
   if (!seq) {
-    setTapFeedback("Jog service is not connected.", "error");
-    return;
+    return false;
   }
+  state.jog.armQueuedAction = "";
   state.jog.armPending = seq;
   state.jog.armPendingAction = action;
-  state.jog.tapFeedback = action === "arm" ? "Arming tap move..." : "Disarming tap move...";
+  state.jog.tapFeedback = tapMoveArmProgressText(action);
   state.jog.tapFeedbackKind = "";
   renderJog();
+  return true;
+}
+
+function flushQueuedTapMoveArm() {
+  const action = state.jog.armQueuedAction;
+  if (!action || state.jog.armPending || state.jog.link !== "online") return false;
+  return sendTapMoveArmAction(action);
+}
+
+function toggleTapMoveArm() {
+  if (state.jog.armPending || state.jog.armQueuedAction) return;
+  if (state.jog.originPendingAxis) {
+    setTapFeedback("Finish setting origin before changing tap move arm state.", "error");
+    return;
+  }
+  if (state.jog.caps && !state.jog.caps.enabled) {
+    setTapFeedback(jogErrorText("disabled"), "error");
+    return;
+  }
+  if (state.jog.link === "unsupported") {
+    setTapFeedback("Jog service is unavailable in this browser.", "error");
+    return;
+  }
+  const action = state.jog.armed ? "disarm" : "arm";
+  if (state.jog.link !== "online") {
+    state.jog.armQueuedAction = action;
+    state.jog.tapFeedback = "Connecting to jog service...";
+    state.jog.tapFeedbackKind = "";
+    connectJog();
+    renderJog();
+    return;
+  }
+  if (!sendTapMoveArmAction(action)) {
+    setTapFeedback("Jog service is not connected.", "error");
+  }
 }
 
 function currentTapFeed() {
@@ -3143,8 +4363,10 @@ function sendTapMove(target) {
   }
   if (state.jog.originPendingAxis) return;
   const feed = currentTapFeed();
+  const machine = normalizeMachineSettings(state.ui.machine);
+  const safeZEnabled = !machine.safe_z_disabled;
   const label = tapTargetLabel(target);
-  const seq = sendJog({ type: "target", target: { x: target.x, y: target.y }, feed_mm_min: feed });
+  const seq = sendJog({ type: "target", target: { x: target.x, y: target.y }, feed_mm_min: feed, safe_z_enabled: safeZEnabled, safe_z_mm: machine.safe_z_mm });
   if (!seq) {
     setTapFeedback("Jog service is not connected.", "error");
     return;
@@ -3171,6 +4393,10 @@ function zStepLabel(distance) {
 }
 
 function stepZ(dir) {
+  if (state.jog.caps && !state.jog.caps.enabled) {
+    setTapFeedback(jogErrorText("disabled"), "error");
+    return;
+  }
   if (state.jog.link !== "online") {
     setTapFeedback("Jog service is not connected.", "error");
     connectJog();
@@ -3337,6 +4563,7 @@ function applyJogEvent(ev) {
       state.jog.error = "";
       state.jog.errorCode = "";
     }
+    flushQueuedTapMoveArm();
   } else if (ev.type === "state") {
     state.jog.armed = !!ev.armed;
     if (ev.availability) {
@@ -3351,19 +4578,23 @@ function applyJogEvent(ev) {
     }
   } else if (ev.type === "status" && ev.status) {
     clearNotice("machine-status");
-    state.jog.mpos = ev.status.mpos || state.jog.mpos;
-    state.jog.wpos = ev.status.wpos || state.jog.wpos;
     state.jog.observed = ev.status.mpos || state.jog.observed;
-    state.jog.estimated = false;
+    const holdEstimate = jogEstimateActive();
+    if (!holdEstimate) {
+      state.jog.mpos = ev.status.mpos || state.jog.mpos;
+      state.jog.wpos = ev.status.wpos || state.jog.wpos;
+      state.jog.estimated = false;
+      state.jog.estimatedUntil = 0;
+    }
     state.machine = {
       ...state.machine,
       state: ev.status.state || state.machine.state,
       age_ms: ev.status.age_ms,
       observed_at: ev.status.observed_at || state.machine.observed_at,
       raw: ev.status.raw || state.machine.raw,
-      mpos: ev.status.mpos || state.machine.mpos,
-      wpos: ev.status.wpos || state.machine.wpos,
-      motion_estimated: false,
+      mpos: holdEstimate ? state.machine.mpos : (ev.status.mpos || state.machine.mpos),
+      wpos: holdEstimate ? state.machine.wpos : (ev.status.wpos || state.machine.wpos),
+      motion_estimated: holdEstimate ? !!state.machine.motion_estimated : false,
       connected: true,
     };
     machineChanged = true;
@@ -3381,6 +4612,11 @@ function applyJogEvent(ev) {
     state.jog.wpos = ev.motion.estimated_wpos || state.jog.wpos;
     state.jog.observed = predicted || state.jog.observed;
     state.jog.estimated = !!ev.motion.estimated;
+    if (state.jog.estimated && Number(ev.motion.queue_lead_ms) > 0) {
+      state.jog.estimatedUntil = performance.now() + Number(ev.motion.queue_lead_ms) + 75;
+    } else if (!state.jog.estimated) {
+      state.jog.estimatedUntil = 0;
+    }
     state.jog.lead = ev.motion.lead || state.jog.lead;
     if (predicted) {
       state.jog.path.push(predicted);
@@ -3403,9 +4639,10 @@ function applyJogEvent(ev) {
     }
     if (ev.seq && ev.seq === state.jog.armPending) {
       const action = state.jog.armPendingAction;
+      state.jog.armed = action === "arm";
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
-      state.jog.tapFeedback = action === "arm" ? "Tap move armed." : "Tap move disarmed.";
+      state.jog.tapFeedback = tapMoveArmSuccessText(action);
       state.jog.tapFeedbackKind = "ok";
     }
     if (ev.seq && ev.seq === state.jog.targetPending) {
@@ -3425,9 +4662,16 @@ function applyJogEvent(ev) {
     state.jog.errorCode = "";
   } else if (ev.type === "error") {
     if (ev.seq && ev.seq === state.jog.armPending) {
+      const action = state.jog.armPendingAction;
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
-      state.jog.tapFeedback = "Arm failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedbackKind = "error";
+    }
+    if (!ev.seq && state.jog.armQueuedAction) {
+      const action = state.jog.armQueuedAction;
+      state.jog.armQueuedAction = "";
+      state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
     if (ev.seq && ev.seq === state.jog.targetPending) {
@@ -3463,9 +4707,10 @@ function applyJogEvent(ev) {
       state.jog.tapFeedbackKind = "error";
     }
     if (!ev.seq && state.jog.armPending) {
+      const action = state.jog.armPendingAction;
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
-      state.jog.tapFeedback = "Arm failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
     state.jog.errorCode = ev.code || "";
@@ -3476,6 +4721,10 @@ function applyJogEvent(ev) {
   }
   if (machineChanged) renderMachine();
   else renderJog();
+}
+
+function jogEstimateActive() {
+  return !!state.jog.estimated && Number(state.jog.estimatedUntil) > performance.now();
 }
 
 function currentGamepad() {
@@ -3527,16 +4776,33 @@ function handleGamepadMacroButtons(buttons, deadman) {
   state.jog.buttons = buttons;
 }
 
+function sameJogAxes(a, b) {
+  return ["x", "y", "z"].every((axis) => Number(a?.[axis] || 0) === Number(b?.[axis] || 0));
+}
+
+function sameButtonStates(a, b) {
+  a = Array.isArray(a) ? a : [];
+  b = Array.isArray(b) ? b : [];
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (!!a[i] !== !!b[i]) return false;
+  }
+  return true;
+}
+
 function sampleJog() {
   try {
     const gp = currentGamepad();
     if (!gp) {
+      const changed = !!state.jog.pad || !!state.jog.deadman ||
+        !sameJogAxes(state.jog.axes, { x: 0, y: 0, z: 0 }) ||
+        (Array.isArray(state.jog.buttons) && state.jog.buttons.length > 0);
       state.jog.pad = "";
       state.jog.deadman = false;
       state.jog.axes = { x: 0, y: 0, z: 0 };
       state.jog.buttons = [];
       if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes });
-      renderJog();
+      if (changed) renderJog();
       return;
     }
     const gamepad = state.ui.gamepad;
@@ -3548,13 +4814,19 @@ function sampleJog() {
     const buttons = buttonStates(gp);
     const deadman = buttonPressed(gp, gamepad.deadman_button);
     const slow = gamepad.slow_buttons.some((btn) => buttonPressed(gp, btn));
+    const label = gamepadLabel(gp);
+    const changed = state.jog.preferredPadIndex !== gp.index ||
+      state.jog.pad !== label ||
+      state.jog.deadman !== deadman ||
+      !sameJogAxes(state.jog.axes, axes) ||
+      !sameButtonStates(state.jog.buttons, buttons);
     state.jog.preferredPadIndex = gp.index;
-    state.jog.pad = gamepadLabel(gp);
+    state.jog.pad = label;
     state.jog.deadman = deadman;
     state.jog.axes = axes;
     handleGamepadMacroButtons(buttons, deadman);
     if (state.jog.armed) sendJog({ type: "input", deadman, axes, slow });
-    renderJog();
+    if (changed) renderJog();
   } catch (e) {
     state.jog.error = "gamepad read failed: " + e.message;
     renderJog();
@@ -3579,7 +4851,8 @@ function clampAxis(v) {
 
 function applySnapshot(snap) {
   if (snap.machine) {
-    state.machine = snap.machine;
+    state.jog.observed = snap.machine.mpos || state.jog.observed;
+    state.machine = mergeMachineStatusForDisplay(snap.machine);
     clearNotice("machine-status");
   }
   if (Array.isArray(snap.files)) {
@@ -3666,7 +4939,9 @@ function showTab(name) {
 async function pollMachine() {
   try {
     const r = await request("/api/machine/status");
-    state.machine = await r.json();
+    const next = await r.json();
+    state.jog.observed = next.mpos || state.jog.observed;
+    state.machine = mergeMachineStatusForDisplay(next);
     clearNotice("machine-status");
     renderMachine();
   } catch (e) {
@@ -3677,6 +4952,16 @@ async function pollMachine() {
   } catch {
     // File SSE reports its own disconnect state; avoid duplicating it here.
   }
+}
+
+function mergeMachineStatusForDisplay(next) {
+  if (!jogEstimateActive()) return next;
+  return {
+    ...next,
+    mpos: state.machine.mpos,
+    wpos: state.machine.wpos,
+    motion_estimated: !!state.machine.motion_estimated,
+  };
 }
 
 async function loadRuns() {
@@ -3778,7 +5063,7 @@ function init() {
   };
   document.getElementById("macro-new").onclick = newMacro;
   document.getElementById("macro-save").onclick = saveMacroFromForm;
-  document.getElementById("macro-run").onclick = () => runMacro(macroByID(state.selectedMacroId));
+  bindButtonAction(document.getElementById("macro-run"), () => runMacro(macroByID(state.selectedMacroId)));
   document.getElementById("macro-up").onclick = () => moveSelectedMacro(-1);
   document.getElementById("macro-down").onclick = () => moveSelectedMacro(1);
   document.getElementById("macro-delete").onclick = deleteSelectedMacro;
@@ -3791,34 +5076,48 @@ function init() {
   document.getElementById("gamepad-slow-button-0").onchange = updateGamepadButtons;
   document.getElementById("gamepad-slow-button-1").onchange = updateGamepadButtons;
   document.getElementById("gamepad-add-macro").onclick = addGamepadMacroBinding;
-  for (const id of ["machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max", "machine-origin-x", "machine-origin-y", "tap-feed-mm-min"]) {
+  for (const id of ["machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max", "machine-origin-x", "machine-origin-y", "tap-feed-mm-min", "machine-safe-z"]) {
     document.getElementById(id).onchange = updateMachineSettings;
   }
+  document.getElementById("tap-safe-z-enabled").onchange = updateSafeZToggle;
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
-    btn.onclick = () => stepZ(Number(btn.dataset.zStepDir) || 1);
+    bindButtonAction(btn, () => stepZ(Number(btn.dataset.zStepDir) || 1));
   }
   for (const btn of document.querySelectorAll("[data-origin-axis]")) {
-    btn.onclick = () => setOriginAxis(btn.dataset.originAxis);
+    bindButtonAction(btn, () => setOriginAxis(btn.dataset.originAxis));
   }
   document.getElementById("workarea-plot").onclick = handleWorkAreaClick;
+  bindButtonAction(document.getElementById("outline-start"), startOutlineCapture);
+  bindButtonAction(document.getElementById("outline-end"), endOutlineCapture);
+  bindButtonAction(document.getElementById("outline-add-point"), addOutlinePoint);
+  bindButtonAction(document.getElementById("outline-undo"), undoOutline);
+  bindButtonAction(document.getElementById("outline-redo"), redoOutline);
+  bindButtonAction(document.getElementById("outline-close"), closeOutline);
+  document.getElementById("outline-curve-fit").onchange = toggleOutlineCurveFit;
+  document.getElementById("outline-probe-point").onchange = toggleOutlineProbePoint;
+  bindButtonAction(document.getElementById("outline-export"), exportOutline);
+  document.getElementById("outline-field-spacing").onchange = updateOutlineFieldSpacing;
+  bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
+  bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
+  bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);
 
-  document.getElementById("ctl-hold").onclick = () => sendControl("hold");
-  document.getElementById("ctl-resume").onclick = () => sendControl("resume");
-  document.getElementById("ctl-halt").onclick = () => sendControl("halt");
-  document.getElementById("tool-set").onclick = () => setCurrentTool();
-  document.getElementById("tool-change-set").onclick = () => changeTool();
-  document.getElementById("tool-calibrate").onclick = calibrateCurrentTool;
-  document.getElementById("tool-drop").onclick = dropCurrentTool;
+  bindButtonAction(document.getElementById("ctl-hold"), () => sendControl("hold"));
+  bindButtonAction(document.getElementById("ctl-resume"), () => sendControl("resume"));
+  bindButtonAction(document.getElementById("ctl-halt"), () => sendControl("halt"));
+  bindButtonAction(document.getElementById("tool-set"), () => setCurrentTool());
+  bindButtonAction(document.getElementById("tool-change-set"), () => changeTool());
+  bindButtonAction(document.getElementById("tool-calibrate"), calibrateCurrentTool);
+  bindButtonAction(document.getElementById("tool-drop"), dropCurrentTool);
   document.getElementById("tool-set-select").onchange = (e) => handleToolSelect("set", e.target.value);
   document.getElementById("tool-change-select").onchange = (e) => handleToolSelect("change", e.target.value);
-  document.getElementById("active-gcode-run").onclick = runActiveGcode;
+  bindButtonAction(document.getElementById("active-gcode-run"), runActiveGcode);
   document.getElementById("gcode-timeline").oninput = (e) => {
     gcodeView.cursor = Number(e.target.value) || 0;
     updateGcodeProgress();
   };
   bindDataControlButtons();
   initCommandPopouts();
-  document.getElementById("jog-arm").onclick = toggleTapMoveArm;
+  bindButtonAction(document.getElementById("jog-arm"), toggleTapMoveArm);
 
   loadUISettings();
   loadActiveGcode();

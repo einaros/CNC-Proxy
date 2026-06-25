@@ -112,7 +112,7 @@
   button, .actions a { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 10px; cursor: pointer; font-size: 13px; text-decoration: none; }
   button:hover, .actions a:hover { border-color: var(--accent); }
   button:focus-visible, .actions a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:disabled, button[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
   button.primary { border-color: rgba(87,166,214,.55); background: rgba(87,166,214,.16); color: #dff1fb; }
   button.primary:hover { border-color: var(--accent); background: rgba(87,166,214,.22); }
   button.danger { border-color: rgba(232,106,95,.48); color: var(--err); }
@@ -219,7 +219,7 @@
   #gcode-form { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); background: var(--panel); }
   #gcode-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #jog, #gamepad-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; align-items: start; }
-  .tap-move-toolbar { display: grid; grid-template-columns: auto minmax(150px, 220px) auto minmax(180px, 1fr); gap: 8px; align-items: end; }
+  .tap-move-toolbar { display: grid; grid-template-columns: auto minmax(120px, 180px) minmax(120px, 180px) auto minmax(180px, 1fr); gap: 8px; align-items: end; }
   .tap-move-toolbar label, .machine-settings-grid label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
   .tap-move-toolbar label span, .machine-settings-grid label span { text-transform: uppercase; letter-spacing: .04em; }
   #tap-feed-mm-min { width: 100%; }
@@ -230,6 +230,14 @@
   .workarea-frame { width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #workarea-plot { display: block; width: 100%; height: 100%; touch-action: manipulation; cursor: crosshair; background: #12171c; }
   #workarea-plot.not-armed { cursor: default; }
+  .outline-capture { display: grid; gap: 8px; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
+  .outline-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .outline-active-controls, .outline-field-controls, .outline-export-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .outline-field-controls { padding-top: 4px; border-top: 1px solid var(--border); }
+  .outline-toolbar label { min-height: 32px; display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  .outline-field-controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); min-height: 32px; }
+  .outline-field-controls input[type="number"] { width: 88px; }
+  .outline-summary { color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .z-step-controls { display: grid; grid-template-rows: minmax(68px, 1fr) auto minmax(68px, 1fr); gap: 8px; align-items: stretch; }
   .z-step-controls button { justify-content: center; min-height: 68px; font-size: 16px; font-weight: 650; }
   .z-step-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -237,6 +245,11 @@
   #z-step-distance { width: 100%; }
   #workarea-boundary { fill: rgba(87,166,214,.08); stroke: rgba(145,160,174,.65); stroke-width: .45; }
   #workarea-grid line { stroke: rgba(145,160,174,.18); stroke-width: .25; }
+  #workarea-outline-path { fill: none; stroke: var(--accent); stroke-width: .8; stroke-linecap: round; stroke-linejoin: round; }
+  #workarea-outline-points circle { fill: #dff1fb; stroke: #12171c; stroke-width: .45; }
+  #workarea-outline.closed #workarea-outline-path { stroke: var(--ok); }
+  #workarea-field-probe-preview circle { fill: rgba(217,154,58,.32); stroke: var(--warn); stroke-width: .35; }
+  #workarea-field-probe-preview circle.done { fill: rgba(68,194,123,.36); stroke: var(--ok); }
   #workarea-origin-x, #workarea-origin-y { stroke: rgba(217,154,58,.75); stroke-width: .45; stroke-dasharray: 2 1.2; }
   #workarea-origin-marker { fill: var(--warn); stroke: #12171c; stroke-width: .5; }
   #workarea-origin-cross { stroke: #12171c; stroke-width: .45; }
@@ -612,6 +625,7 @@
         <div class="tap-move-toolbar">
           <button type="button" id="jog-arm">Arm Tap Move</button>
           <label><span>Feed</span><input id="tap-feed-mm-min" type="number" min="1" step="10" inputmode="decimal"></label>
+          <label><span>Safe Z</span><input id="tap-safe-z-enabled" type="checkbox" checked></label>
           <div class="origin-controls" aria-label="Set work origin">
             <button type="button" data-origin-axis="x">Set X0</button>
             <button type="button" data-origin-axis="y">Set Y0</button>
@@ -631,6 +645,11 @@
                 <path id="workarea-origin-cross" d="M -3 0 L 3 0 M 0 -3 L 0 3"></path>
                 <text id="workarea-origin-label" x="3.2" y="-2.8">O</text>
               </g>
+              <g id="workarea-outline" display="none">
+                <path id="workarea-outline-path"></path>
+                <g id="workarea-outline-points"></g>
+              </g>
+              <g id="workarea-field-probe-preview" display="none"></g>
               <g id="workarea-target" display="none">
                 <circle id="workarea-target-marker" cx="0" cy="0" r="2.5"></circle>
                 <path id="workarea-target-cross" d="M -4 0 L 4 0 M 0 -4 L 0 4"></path>
@@ -655,6 +674,31 @@
             <button type="button" data-z-step-dir="-1">Z-</button>
           </div>
         </div>
+        <div id="outline-capture" class="outline-capture">
+          <div class="outline-toolbar">
+            <button type="button" id="outline-start" class="primary">Capture outline</button>
+            <div id="outline-active-controls" class="outline-active-controls" hidden>
+              <button type="button" id="outline-end">End outline</button>
+              <button type="button" id="outline-add-point">Add point</button>
+              <button type="button" id="outline-undo">Undo</button>
+              <button type="button" id="outline-redo">Redo</button>
+              <label><input type="checkbox" id="outline-curve-fit"> Curve fit</label>
+              <label id="outline-probe-point-wrap" hidden><input type="checkbox" id="outline-probe-point"> Probe Z</label>
+              <button type="button" id="outline-close">Close outline</button>
+              <button type="button" id="outline-export">Export SVG</button>
+            </div>
+          </div>
+          <div id="outline-field-controls" class="outline-field-controls" hidden>
+            <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
+            <button type="button" id="outline-field-probe">Probe field Z</button>
+            <div id="outline-export-controls" class="outline-export-controls" hidden>
+              <button type="button" id="outline-export-obj">Export OBJ</button>
+              <button type="button" id="outline-export-height">Export Height PGM</button>
+            </div>
+          </div>
+          <div id="outline-summary" class="outline-summary"></div>
+          <div id="outline-feedback" class="action-feedback" aria-live="polite"></div>
+        </div>
         <details id="machine-settings">
           <summary>Machine Settings</summary>
           <div class="detail-body">
@@ -665,6 +709,7 @@
               <label><span>Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
               <label><span>Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
               <label><span>Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
+              <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
             </div>
           </div>
         </details>
