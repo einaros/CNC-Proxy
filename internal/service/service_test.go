@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -750,6 +752,70 @@ func serviceWithMachine(t *testing.T) (*Service, *carveratest.FakeMachine, *mach
 	return svc, m, tr
 }
 
+func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
+	svc, m, _ := serviceWithMachine(t)
+	m.SetFtype("lz")
+	m.SetGcodeReply("model", "model = CarveraAir,FACTORY,PROBE")
+	m.SetGcodeReply("version", "version = 1.2.3")
+	m.SetGcodeReply("diagnose", "{S:0,0|L:0,0|G:1,0,0,0,0|E:0,1,0,1,1,0|P:1,0|RSSI:-55}")
+	m.SetGcodeReply("config-get-all -e", strings.Join([]string{
+		"soft_endstop.enable=false",
+		"soft_endstop.x_min=-302.0",
+		"soft_endstop.y_min=-212.0",
+		"soft_endstop.z_min=-121.0",
+		"alpha_max=0",
+		"beta_max=0",
+		"gamma_max=0",
+		"delta_min=0",
+		"delta_max=360",
+		"default_feed_rate=1000",
+		"default_seek_rate=3000",
+		"alpha_max_rate=3000.0",
+		"beta_max_rate=2800.0",
+		"gamma_max_rate=2000.0",
+		"delta_max_rate=1800.0",
+		"epsilon_max_rate=100.0",
+		"coordinate.clearance_x=-5.0",
+		"coordinate.clearance_y=-21.0",
+		"coordinate.clearance_z=-3.0",
+		"atc.probe.fast_rate_mm_m=500",
+		"atc.probe.slow_rate_mm_m=100",
+		"atc.probe.retract_mm=2",
+	}, "\n")+"\x04")
+
+	res, err := svc.LearnMachineParameters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Learned.Identity.Model != "CarveraAir,FACTORY,PROBE" || res.Learned.Identity.Version != "1.2.3" || res.Learned.Identity.FileType != "lz" {
+		t.Fatalf("identity = %+v", res.Learned.Identity)
+	}
+	if res.UI.Machine.WorkArea != (store.WorkArea{XMin: -302, XMax: 0, YMin: -212, YMax: 0}) {
+		t.Fatalf("learned work area = %+v", res.UI.Machine.WorkArea)
+	}
+	if res.UI.Machine.FeedMaxMMMin != 2800 || res.Learned.Feed.MaxXYMMMin != 2800 {
+		t.Fatalf("feed max = ui %v learned %+v", res.UI.Machine.FeedMaxMMMin, res.Learned.Feed)
+	}
+	if res.UI.Machine.SafeZMM != 0 || res.Learned.ZMinMM != -121 || res.Learned.ZMaxMM != 0 {
+		t.Fatalf("Z profile = ui safe %v learned %+v", res.UI.Machine.SafeZMM, res.Learned)
+	}
+	if res.Learned.SoftEndstop.Enabled || res.Learned.Clearance.X != -5 || res.Learned.Probe.RetractMM != 2 {
+		t.Fatalf("known config profile = %+v", res.Learned)
+	}
+	if got := res.Learned.Config["soft_endstop.x_min"]; got != "-302.0" {
+		t.Fatalf("raw config soft_endstop.x_min = %q", got)
+	}
+	if len(res.Learned.Diagnostics["E"]) != 6 || res.Learned.Diagnostics["RSSI"][0] != -55 {
+		t.Fatalf("diagnostics = %+v", res.Learned.Diagnostics)
+	}
+	gcodes := m.Gcodes()
+	for _, want := range []string{"model", "version", "diagnose", "config-get-all -e"} {
+		if !slices.Contains(gcodes, want) {
+			t.Fatalf("gcodes %v missing %q", gcodes, want)
+		}
+	}
+}
+
 func putCachedEntry(t *testing.T, svc *Service, remotePath string, content []byte, sync store.SyncState) store.Entry {
 	t.Helper()
 	remote, err := normalizeRemote(remotePath)
@@ -1034,6 +1100,132 @@ func TestToolActionsSendControllerCommands(t *testing.T) {
 		g[6] != "M491" {
 		t.Fatalf("machine gcodes = %v, want vendor tool commands", g)
 	}
+}
+
+func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	res, err := svc.TraceOutline(TraceOutlineRequest{
+		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 10, Y: 5}},
+		MachineZ:      -2,
+		SafeZMM:       5,
+		FeedMM:        600,
+		Closed:        true,
+	})
+	if err != nil {
+		t.Fatalf("TraceOutline: %v", err)
+	}
+	if !res.Verified || res.Points != 4 || res.CommandCount != 9 {
+		t.Fatalf("trace result = %+v", res)
+	}
+	want := []string{
+		"M494.1",
+		"G53 G0 Z5.0000",
+		"G53 G0 X0.0000 Y0.0000",
+		"G53 G0 Z-2.0000",
+		"G53 G1 X10.0000 Y0.0000 F600.0000",
+		"G53 G1 X10.0000 Y5.0000 F600.0000",
+		"G53 G1 X0.0000 Y0.0000 F600.0000",
+		"M400",
+		"M494.2",
+	}
+	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
+		t.Fatalf("trace gcodes = %v, want %v", got, want)
+	}
+}
+
+func TestTraceOutlineRejectsInvalidStateAndInput(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:3,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	req := TraceOutlineRequest{
+		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}},
+		MachineZ:      -2,
+		SafeZMM:       5,
+		FeedMM:        600,
+	}
+	if _, err := svc.TraceOutline(req); !errors.Is(err, ErrProbeUnavailable) {
+		t.Fatalf("TraceOutline non-probe err = %v, want ErrProbeUnavailable", err)
+	}
+	if g := m.Gcodes(); len(g) != 0 {
+		t.Fatalf("non-probe trace leaked to machine: %v", g)
+	}
+
+	status = "<Run|MPos:0,0,0|WPos:0,0,0|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	if _, err := svc.TraceOutline(req); !session.Retryable(err) {
+		t.Fatalf("TraceOutline non-idle err = %v, want retryable", err)
+	}
+
+	if _, err := svc.TraceOutline(TraceOutlineRequest{MachinePoints: []TracePoint{{X: 0, Y: 0}}, FeedMM: 600}); err == nil {
+		t.Fatal("expected too few trace points to be rejected")
+	}
+	if _, err := svc.TraceOutline(TraceOutlineRequest{
+		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: math.NaN(), Y: 1}},
+		MachineZ:      -2,
+		SafeZMM:       5,
+		FeedMM:        600,
+	}); err == nil {
+		t.Fatal("expected non-finite trace point to be rejected")
+	}
+	points := make([]TracePoint, maxTracePoints+1)
+	for i := range points {
+		points[i] = TracePoint{X: float64(i), Y: 0}
+	}
+	if _, err := svc.TraceOutline(TraceOutlineRequest{MachinePoints: points, MachineZ: -2, SafeZMM: 5, FeedMM: 600}); err == nil {
+		t.Fatal("expected excessive trace points to be rejected")
+	}
+}
+
+func TestTraceOutlineTurnsProbeLaserOffAfterFailure(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	m.SetGcodeReply("G53 G0 Z5.0000", "error: soft limit")
+
+	_, err := svc.TraceOutline(TraceOutlineRequest{
+		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}},
+		MachineZ:      -2,
+		SafeZMM:       5,
+		FeedMM:        600,
+	})
+	if err == nil {
+		t.Fatal("expected trace move failure")
+	}
+	want := []string{
+		"M494.1",
+		"G53 G0 Z5.0000",
+		"M494.2",
+	}
+	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
+		t.Fatalf("trace failure gcodes = %v, want %v", got, want)
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestSetCurrentToolIDValidation(t *testing.T) {
@@ -1428,7 +1620,7 @@ func TestBackupExportImportRoundTrip(t *testing.T) {
 		MacroButtons: []store.MacroSlot{{ID: "s1", MacroID: "m1", Region: "toolbar"}},
 		Log:          store.LogSettings{Filter: "all", Autoscroll: true},
 		Gamepad:      store.Gamepad{DeadmanButton: 2},
-		Machine:      store.MachineUI{WorkArea: store.WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10}, TapFeedMMMin: 700},
+		Machine:      store.MachineUI{WorkArea: store.WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10}, SavedOrigins: []store.SavedOrigin{{ID: "fixture", Label: "Fixture", Origin: store.XYPoint{X: -10, Y: -20}}}, FeedMinMMMin: 100, FeedMaxMMMin: 1800, TapFeedMMMin: 700},
 	})
 	if err != nil || len(ui.Macros) != 1 {
 		t.Fatalf("settings = %+v err=%v", ui, err)
@@ -1444,7 +1636,7 @@ func TestBackupExportImportRoundTrip(t *testing.T) {
 	if _, ok := restored.Lookup("part.nc"); !ok {
 		t.Fatal("restored backup missing catalog entry")
 	}
-	if got := restored.UISettings(); len(got.Macros) != 1 || got.Macros[0].Name != "Position" || got.Gamepad.DeadmanButton != 2 || got.Machine.TapFeedMMMin != 700 {
+	if got := restored.UISettings(); len(got.Macros) != 1 || got.Macros[0].Name != "Position" || got.Gamepad.DeadmanButton != 2 || got.Machine.FeedMinMMMin != 100 || got.Machine.FeedMaxMMMin != 1800 || got.Machine.TapFeedMMMin != 700 || len(got.Machine.SavedOrigins) != 1 {
 		t.Fatalf("restored UI = %+v", got)
 	}
 	if lines := restored.GcodeLog().Recent(); len(lines) != 1 || lines[0].Text != "M114" {

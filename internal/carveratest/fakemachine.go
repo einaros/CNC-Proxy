@@ -475,6 +475,15 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 			ft = "nc" // default: no compression
 		}
 		m.send(c, protocol.CmdNormalInfo, "ftype = "+ft+"\n")
+	case strings.HasPrefix(line, "config-get-all"):
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		reply, ok := m.gcodeReplies[line]
+		m.mu.Unlock()
+		if !ok {
+			reply = "soft_endstop.x_min=-300\nsoft_endstop.y_min=-200\nsoft_endstop.z_min=-120\nalpha_max=0\nbeta_max=0\ngamma_max=0\nalpha_max_rate=3000\nbeta_max_rate=3000\ngamma_max_rate=2000\ndefault_seek_rate=3000"
+		}
+		m.send(c, protocol.CmdNormalInfo, strings.TrimRight(reply, "\r\n")+"\n")
 	case strings.EqualFold(line, "diagnose"):
 		// Real firmware emits DIAG_RES for diagnose, not NORMAL_INFO. Keep the
 		// fake strict so tests catch callers that only listen for NORMAL_INFO.

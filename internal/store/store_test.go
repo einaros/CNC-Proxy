@@ -141,13 +141,26 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 		}},
 		MacroButtons: []MacroSlot{{ID: "slot1", MacroID: "probe", Region: "toolbar", Order: 4}},
 		Log:          LogSettings{Filter: "jog", Autoscroll: false},
-		Machine: MachineUI{
-			WorkArea:      WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
-			Origin:        XYPoint{X: 1, Y: 2},
-			TapFeedMMMin:  700,
-			SafeZMM:       -1.5,
-			SafeZDisabled: true,
-		},
+			Machine: MachineUI{
+				WorkArea:      WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
+				Origin:        XYPoint{X: 1, Y: 2},
+				SavedOrigins:  []SavedOrigin{{ID: "fixture", Label: "Fixture", Origin: XYPoint{X: -12.5, Y: -20}}},
+				FeedMinMMMin:  100,
+				FeedMaxMMMin:  1800,
+				TapFeedMMMin:  700,
+				SafeZMM:       -1.5,
+				SafeZDisabled: true,
+				Learned: MachineLearned{
+					Source:        "firmware",
+					Identity:      MachineIdentity{Model: "CarveraAir", Version: "1.2.3", FileType: "lz"},
+					WorkArea:      WorkArea{XMin: -302, XMax: 0, YMin: -212, YMax: 0},
+					Feed:          MachineFeedProfile{MaxXYMMMin: 3000},
+					Config:        map[string]string{"soft_endstop.x_min": "-302.0"},
+					ConfigNumbers: map[string]float64{"alpha_max_rate": 3000},
+					ConfigBools:   map[string]bool{"soft_endstop.enable": false},
+					Diagnostics:   map[string][]float64{"E": {0, 1, 0, 1, 1, 0}},
+				},
+			},
 		Gamepad: Gamepad{
 			Axes: GamepadAxes{
 				X: GamepadAxis{Axis: 2, Scale: 0.5},
@@ -180,8 +193,14 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	if got.Log.Filter != "jog" || got.Log.Autoscroll {
 		t.Fatalf("reopened log settings = %+v", got.Log)
 	}
-	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.TapFeedMMMin != 700 || got.Machine.SafeZMM != -1.5 || !got.Machine.SafeZDisabled {
-		t.Fatalf("reopened machine settings = %+v", got.Machine)
+		if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.FeedMinMMMin != 100 || got.Machine.FeedMaxMMMin != 1800 || got.Machine.TapFeedMMMin != 700 || got.Machine.SafeZMM != -1.5 || !got.Machine.SafeZDisabled {
+			t.Fatalf("reopened machine settings = %+v", got.Machine)
+		}
+		if got.Machine.Learned.Identity.Model != "CarveraAir" || got.Machine.Learned.ConfigNumbers["alpha_max_rate"] != 3000 || len(got.Machine.Learned.Diagnostics["E"]) != 6 {
+			t.Fatalf("reopened learned machine profile = %+v", got.Machine.Learned)
+		}
+	if len(got.Machine.SavedOrigins) != 1 || got.Machine.SavedOrigins[0].Label != "Fixture" || got.Machine.SavedOrigins[0].Origin.X != -12.5 {
+		t.Fatalf("reopened saved origins = %+v", got.Machine.SavedOrigins)
 	}
 	if got.Gamepad.Axes.X.Axis != 2 || got.Gamepad.Axes.X.Scale != 0.5 || got.Gamepad.DeadmanButton != 7 {
 		t.Fatalf("reopened gamepad = %+v", got.Gamepad)
@@ -217,11 +236,21 @@ func TestUISettingsCopiesAndNormalizesSlots(t *testing.T) {
 		t.Fatalf("SetUISettings returned shared macro lines: %+v", got.Macros)
 	}
 	got.Macros[0].Lines[0] = "version"
+	got.Machine.SavedOrigins = append(got.Machine.SavedOrigins, SavedOrigin{ID: "x", Label: "X", Origin: XYPoint{X: 1, Y: 2}})
+	got.Machine.Learned.Config = map[string]string{"soft_endstop.x_min": "-1"}
+	got.Machine.Learned.ConfigNumbers = map[string]float64{"alpha_max_rate": 1}
+	got.Machine.Learned.Diagnostics = map[string][]float64{"E": {9}}
 	got.Gamepad.SlowButtons = append(got.Gamepad.SlowButtons, 9)
 	got.Gamepad.MacroButtons = append(got.Gamepad.MacroButtons, GamepadMacroButton{ID: "x", Button: 2, MacroID: "probe"})
 	gotAgain := s.UISettings()
 	if gotAgain.Macros[0].Lines[0] != "M114" {
 		t.Fatalf("UISettings returned shared macro lines: %+v", gotAgain.Macros)
+	}
+	if len(gotAgain.Machine.SavedOrigins) != 0 {
+		t.Fatalf("UISettings returned shared saved origins: %+v", gotAgain.Machine.SavedOrigins)
+	}
+	if len(gotAgain.Machine.Learned.Config) != 0 || len(gotAgain.Machine.Learned.Diagnostics) != 0 {
+		t.Fatalf("UISettings returned shared learned profile maps: %+v", gotAgain.Machine.Learned)
 	}
 	if len(gotAgain.Gamepad.SlowButtons) != 2 || len(gotAgain.Gamepad.MacroButtons) != 0 {
 		t.Fatalf("UISettings returned shared gamepad slices: %+v", gotAgain.Gamepad)
@@ -251,8 +280,23 @@ func TestUISettingsMachineDefaults(t *testing.T) {
 	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.XMax != 0 || got.Machine.WorkArea.YMin != -200 || got.Machine.WorkArea.YMax != 0 {
 		t.Fatalf("default machine work area = %+v", got.Machine.WorkArea)
 	}
-	if got.Machine.Origin.X != 0 || got.Machine.Origin.Y != 0 || got.Machine.TapFeedMMMin != 600 {
+	if got.Machine.Origin.X != 0 || got.Machine.Origin.Y != 0 || got.Machine.FeedMinMMMin != 1 || got.Machine.FeedMaxMMMin != 3000 || got.Machine.TapFeedMMMin != 600 || got.Machine.SavedOrigins == nil || len(got.Machine.SavedOrigins) != 0 {
 		t.Fatalf("default machine settings = %+v", got.Machine)
+	}
+}
+
+func TestUISettingsMigratesOldGeneratedFeedMax(t *testing.T) {
+	s, _ := Open("")
+	ui := s.UISettings()
+	ui.Machine.FeedMinMMMin = 1
+	ui.Machine.FeedMaxMMMin = 1200
+	ui.Machine.TapFeedMMMin = 600
+	if _, err := s.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+	got := s.UISettings()
+	if got.Machine.FeedMaxMMMin != 3000 {
+		t.Fatalf("migrated feed max = %v, want 3000", got.Machine.FeedMaxMMMin)
 	}
 }
 

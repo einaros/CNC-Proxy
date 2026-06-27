@@ -634,7 +634,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="workarea-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing work area visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="alarm-panel"`, `id="alarm-recover"`, `id="alarm-feedback"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `<h2>Active job</h2>`, `id="gcode-console-view"`, `<h2>Gcode console</h2>`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-drop"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `<h2>Active job</h2>`, `id="gcode-console-view"`, `<h2>Gcode console</h2>`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-drop"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -652,17 +652,17 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`<h2>Control</h2>`, `id="tap-feed-mm-min"`, `id="tap-safe-z-enabled"`, `id="tap-move-feedback"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `id="outline-probe-point"`, `id="outline-close"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `data-origin-axis="x"`, `data-origin-axis="y"`, `data-origin-axis="z"`, `id="machine-settings"`, `id="machine-x-min"`, `id="machine-safe-z"`, `<h2>Gamepad</h2>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
+	for _, want := range []string{`<h2>Control</h2>`, `Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `Saved Zeros`, `id="origin-action"`, `Zero XY`, `Set X Value`, `Set Y Value`, `Reset XY to Machine`, `id="origin-value-x"`, `id="origin-value-y"`, `id="origin-apply"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `id="outline-probe-controls"`, `id="outline-probe-point"`, `id="outline-close"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings"`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learn-status"`, `id="machine-learned-summary"`, `<h2>Gamepad</h2>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="origin-controls"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="outline-capture"`, `class="outline-toolbar"`, `class="z-step-controls"`, `class="table-scroll"`} {
+	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="tap-arm-panel"`, `class="tap-primary-controls"`, `class="tap-feed-stepper"`, `class="tap-safe-z-field"`, `class="tap-safe-z-toggle"`, `class="tap-coordinate-panel"`, `class="tap-coordinate-row"`, `grid-template-columns: repeat(3, 112px) 64px`, `class="work-move-label"`, `class="work-move-field is-live"`, `class="work-move-reset"`, `class="icon-reset"`, `class="tap-origin-panel"`, `class="origin-row origin-row-action"`, `class="origin-row origin-row-saved"`, `class="saved-origin-label-field"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="workarea-controls"`, `class="outline-preview-controls"`, `class="outline-active-controls"`, `class="outline-capture"`, `class="outline-probe-controls"`, `class="machine-settings-actions"`, `class="machine-learned-summary"`, `class="z-step-controls"`, `class="table-scroll"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing layout marker %s", want)
 		}
 	}
-	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `id="run-history-panel" open`, `id="jog-step-distance"`, `data-jog-step-axis=`, `id="jog-step-feedback"`, `id="jog-plot"`, `id="jog-axes"`, `id="jog-mpos"`, `id="jog-wpos"`, `id="jog-target-pos"`} {
+	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `id="run-history-panel" open`, `id="jog-step-distance"`, `data-jog-step-axis=`, `id="jog-step-feedback"`, `id="jog-plot"`, `id="jog-axes"`, `id="jog-mpos"`, `id="jog-wpos"`, `id="jog-target-pos"`, `id="tap-mpos-x"`, `id="tap-mpos-y"`, `id="tap-wpos-x"`, `id="tap-wpos-y"`, `id="workarea-axis-overlay"`, `class="tap-position-readout"`, `class="outline-toolbar"`, `id="alarm-feedback"`, `id="tool-feedback"`, `id="active-gcode-feedback"`, `id="tap-move-feedback"`, `id="outline-feedback"`, `id="jog-error"`, `id="backup-status"`, `class="action-feedback"`, `>X</button>`} {
 		if strings.Contains(string(body), gone) {
 			t.Errorf("index still contains removed status details marker %s", gone)
 		}
@@ -683,16 +683,25 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), `setNotice("Machine status unavailable: " + e.message, "error", "machine-status")`) || !strings.Contains(string(jsBody), `clearNotice("machine-status")`) {
 		t.Errorf("app.js missing machine status notice lifecycle")
 	}
+	if !strings.Contains(string(jsBody), "function setStatusMessage") || !strings.Contains(string(jsBody), "function clearVisibleNotices") || !strings.Contains(string(jsBody), "NOTICE_REPEAT_SUPPRESS_MS") || !strings.Contains(string(jsBody), `setStatusMessage("tap-move"`) || !strings.Contains(string(jsBody), `setStatusMessage("jog-availability"`) {
+		t.Errorf("app.js missing shared transient status message routing")
+	}
 	if !strings.Contains(string(jsBody), "refreshJobs") || !strings.Contains(string(jsBody), "/api/jobs") {
 		t.Errorf("app.js missing active job diagnostic refresh")
 	}
-	if !strings.Contains(string(jsBody), "renderWorkArea") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "sendTapMove") || !strings.Contains(string(jsBody), "stepZ") || !strings.Contains(string(jsBody), "setOriginAxis") || !strings.Contains(string(jsBody), `type: "target"`) || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), `type: "origin"`) || !strings.Contains(string(jsBody), "G10L20P0") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
+	if !strings.Contains(string(jsBody), "renderWorkArea") || !strings.Contains(string(jsBody), "SPINDLE_DIAMETER_MM") || !strings.Contains(string(jsBody), "OUTLINE_POINT_DIAMETER_MM") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "sendTapMove") || !strings.Contains(string(jsBody), "sendWorkCoordinateMove") || !strings.Contains(string(jsBody), "workMoveTargetsFromInputs") || !strings.Contains(string(jsBody), "resetWorkMoveInput") || !strings.Contains(string(jsBody), "workMoveInputIsLive") || !strings.Contains(string(jsBody), "renderWorkMoveFieldState") || !strings.Contains(string(jsBody), "stepTapFeed") || !strings.Contains(string(jsBody), "feedBoundsFor") || !strings.Contains(string(jsBody), "stepZ") || !strings.Contains(string(jsBody), "setOriginAxis") || !strings.Contains(string(jsBody), "applyOriginAction") || !strings.Contains(string(jsBody), "recallSelectedOrigin") || !strings.Contains(string(jsBody), "saveCurrentOrigin") || !strings.Contains(string(jsBody), "deleteSelectedOrigin") || !strings.Contains(string(jsBody), "saved_origins") || !strings.Contains(string(jsBody), `type: "target"`) || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), `type: "origin"`) || !strings.Contains(string(jsBody), "G10L20P0") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing work area, tap move, jog status messaging, or cache-only status polling")
 	}
-	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "runFieldProbe", "probeZAtWorkPoint", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "buildOutlineSVG", "field-probe-layer", "probe_diameter_mm", "spot_gap_mm", "center_spacing_mm", "exportHeightOBJ", "exportHeightImage", "zero_origin_machine_mm", "table-layer", "outline-layer", "data-z-mm", "safe_z_enabled", "safe_z_disabled"} {
+	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "traceOutline", "traceOutlineMachinePoints", "/api/outline/trace", "runFieldProbe", "probeZAtWorkPoint", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "OUTLINE_CURVE_TOLERANCE_MM", "MAX_EFFECTIVE_OUTLINE_POINTS", "effectiveOutlineGeometry", "outlineEffectiveExportPoints", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "buildOutlineSVG", "svgExportPoint", `viewBox="0 0`, "visible_svg", "field-probe-layer", "probe_diameter_mm", "spot_gap_mm", "center_spacing_mm", "effective_point_count", "exportHeightOBJ", "exportHeightImage", "zero_origin_machine_mm", "table-layer", "outline-layer", "data-z-mm", "safe_z_enabled", "safe_z_disabled"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing outline capture behavior %s", want)
 		}
+	}
+	if strings.Contains(string(jsBody), `transform="scale(1 -1)"`) {
+		t.Errorf("app.js SVG export still uses flipped layer transforms")
+	}
+	if strings.Contains(string(jsBody), `vector-effect="non-scaling-stroke"`) {
+		t.Errorf("app.js SVG export still uses non-scaling hairline strokes")
 	}
 	if got := js.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("app.js Cache-Control = %q, want no-store", got)
@@ -730,7 +739,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing %s", want)
 		}
 	}
-	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "gamepadLabel", "Xbox-compatible gamepad", "standard gamepad", "defaultMachineSettings", "renderMachineSettings", "handleWorkAreaClick"} {
+	for _, want := range []string{"defaultGamepadSettings", "renderGamepadSettings", "mappedAxis", "handleGamepadMacroButtons", "addGamepadMacroBinding", "gamepadLabel", "Xbox-compatible gamepad", "standard gamepad", "defaultMachineSettings", "normalizeMachineLearned", "renderMachineSettings", "machineLearnedSummaryLines", "learnMachineParameters", "/api/machine/learn", "updateWorkAreaHoverPosition", "handleWorkAreaTap", "bindWorkAreaInteractions", "zoomWorkArea"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -757,13 +766,13 @@ func TestUISettingsAPI(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || initial.Log.Filter != "all" || !initial.Log.Autoscroll {
 		t.Fatalf("initial settings status=%d value=%+v", resp.StatusCode, initial)
 	}
-	if initial.Macros == nil || initial.MacroButtons == nil || initial.Gamepad.SlowButtons == nil || initial.Gamepad.MacroButtons == nil {
+	if initial.Macros == nil || initial.MacroButtons == nil || initial.Machine.SavedOrigins == nil || initial.Gamepad.SlowButtons == nil || initial.Gamepad.MacroButtons == nil {
 		t.Fatalf("initial settings should use empty arrays, got %+v", initial)
 	}
 	if initial.Gamepad.Axes.Y.Axis != 1 || !initial.Gamepad.Axes.Y.Invert || initial.Gamepad.Axes.Z.Axis != 3 {
 		t.Fatalf("initial gamepad defaults = %+v", initial.Gamepad)
 	}
-	if initial.Machine.WorkArea.XMin != -300 || initial.Machine.WorkArea.YMin != -200 || initial.Machine.TapFeedMMMin != 600 {
+	if initial.Machine.WorkArea.XMin != -300 || initial.Machine.WorkArea.YMin != -200 || initial.Machine.FeedMinMMMin != 1 || initial.Machine.FeedMaxMMMin != 3000 || initial.Machine.TapFeedMMMin != 600 {
 		t.Fatalf("initial machine defaults = %+v", initial.Machine)
 	}
 
@@ -771,7 +780,7 @@ func TestUISettingsAPI(t *testing.T) {
 		"macros":[{"id":"m1","name":"Probe","lines":["G38.2 Z-5 F50","G10 L20 P1 Z0"],"color":"#44c27b"}],
 		"macro_buttons":[{"id":"b1","macro_id":"m1","region":"toolbar","order":2}],
 		"log":{"filter":"jog","autoscroll":false},
-		"machine":{"work_area":{"x_min":-300,"x_max":5,"y_min":-210,"y_max":10},"origin":{"x":1,"y":2},"tap_feed_mm_min":700},
+		"machine":{"work_area":{"x_min":-300,"x_max":5,"y_min":-210,"y_max":10},"origin":{"x":1,"y":2},"saved_origins":[{"id":"fixture","label":"Fixture","origin":{"x":-12.5,"y":-20}}],"feed_min_mm_min":100,"feed_max_mm_min":1800,"tap_feed_mm_min":700},
 		"gamepad":{
 			"axes":{
 				"x":{"axis":2,"invert":false,"scale":0.5},
@@ -798,7 +807,7 @@ func TestUISettingsAPI(t *testing.T) {
 	if saved.Gamepad.Axes.X.Axis != 2 || saved.Gamepad.Axes.X.Scale != 0.5 || saved.Gamepad.DeadmanButton != 7 {
 		t.Fatalf("saved gamepad settings = %+v", saved.Gamepad)
 	}
-	if saved.Machine.WorkArea.XMin != -300 || saved.Machine.WorkArea.YMax != 10 || saved.Machine.Origin.X != 1 || saved.Machine.TapFeedMMMin != 700 {
+	if saved.Machine.WorkArea.XMin != -300 || saved.Machine.WorkArea.YMax != 10 || saved.Machine.Origin.X != 1 || saved.Machine.FeedMinMMMin != 100 || saved.Machine.FeedMaxMMMin != 1800 || saved.Machine.TapFeedMMMin != 700 || len(saved.Machine.SavedOrigins) != 1 {
 		t.Fatalf("saved machine settings = %+v", saved.Machine)
 	}
 	if len(saved.Gamepad.MacroButtons) != 1 || saved.Gamepad.MacroButtons[0].Button != 1 {
@@ -815,8 +824,48 @@ func TestUISettingsAPI(t *testing.T) {
 	if got.Gamepad.Axes.Z.Scale != 0.25 || len(got.Gamepad.SlowButtons) != 1 || got.Gamepad.SlowButtons[0] != 6 {
 		t.Fatalf("round trip gamepad settings = %+v", got.Gamepad)
 	}
-	if got.Machine.WorkArea.XMax != 5 || got.Machine.Origin.Y != 2 || got.Machine.TapFeedMMMin != 700 {
+	if got.Machine.WorkArea.XMax != 5 || got.Machine.Origin.Y != 2 || got.Machine.FeedMinMMMin != 100 || got.Machine.FeedMaxMMMin != 1800 || got.Machine.TapFeedMMMin != 700 || len(got.Machine.SavedOrigins) != 1 || got.Machine.SavedOrigins[0].Label != "Fixture" {
 		t.Fatalf("round trip machine settings = %+v", got.Machine)
+	}
+}
+
+func TestLearnMachineParametersAPI(t *testing.T) {
+	srv, m, _, _, st := serverWithMachineState(t)
+	m.SetFtype("lz")
+	m.SetGcodeReply("model", "model = CarveraAir")
+	m.SetGcodeReply("version", "version = 1.2.3")
+	m.SetGcodeReply("diagnose", "{E:0,1,0,1,1,0|P:1,0}")
+	m.SetGcodeReply("config-get-all -e", strings.Join([]string{
+		"soft_endstop.x_min=-371.0",
+		"soft_endstop.y_min=-250.0",
+		"soft_endstop.z_min=-135.0",
+		"alpha_max=0",
+		"beta_max=0",
+		"gamma_max=0",
+		"alpha_max_rate=3000.0",
+		"beta_max_rate=3000.0",
+		"default_seek_rate=3000",
+	}, "\n")+"\x04")
+
+	resp := postJSON(t, srv.URL+"/api/machine/learn", map[string]any{})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	var out service.MachineLearnResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Learned.Identity.Model != "CarveraAir" || out.Learned.Identity.Version != "1.2.3" {
+		t.Fatalf("learned identity = %+v", out.Learned.Identity)
+	}
+	if out.UI.Machine.WorkArea != (store.WorkArea{XMin: -371, XMax: 0, YMin: -250, YMax: 0}) {
+		t.Fatalf("api learned work area = %+v", out.UI.Machine.WorkArea)
+	}
+	got := st.UISettings()
+	if got.Machine.Learned.Config["soft_endstop.x_min"] != "-371.0" || got.Machine.WorkArea.XMin != -371 {
+		t.Fatalf("persisted UI settings = %+v", got.Machine)
 	}
 }
 
@@ -848,13 +897,17 @@ func TestUISettingsAPIRejectsInvalidGamepad(t *testing.T) {
 
 func TestUISettingsAPIRejectsInvalidMachine(t *testing.T) {
 	srv, _ := newTestServer(t)
-	body := `{"machine":{"work_area":{"x_min":10,"x_max":0,"y_min":-200,"y_max":0},"tap_feed_mm_min":600}}`
-	req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp := do(t, req)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	for _, body := range []string{
+		`{"machine":{"work_area":{"x_min":10,"x_max":0,"y_min":-200,"y_max":0},"tap_feed_mm_min":600}}`,
+		`{"machine":{"feed_min_mm_min":2000,"feed_max_mm_min":1000,"tap_feed_mm_min":600}}`,
+	} {
+		req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp := do(t, req)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for %s", resp.StatusCode, body)
+		}
 	}
 }
 
@@ -1025,10 +1078,14 @@ func TestJogWebSocketStep(t *testing.T) {
 	if ack.Seq != 2 {
 		t.Fatalf("step ack = %+v, want seq 2", ack)
 	}
-	for _, line := range m.Gcodes() {
-		if strings.HasPrefix(line, "$J X1.0000") {
-			return
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if strings.HasPrefix(line, "$J X1.0000") {
+				return
+			}
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no step jog command observed: %v", m.Gcodes())
 }
@@ -1046,12 +1103,41 @@ func TestJogWebSocketTarget(t *testing.T) {
 	if ack.Seq != 2 {
 		t.Fatalf("target ack = %+v, want seq 2", ack)
 	}
-	for _, line := range m.Gcodes() {
-		if strings.Contains(line, "X10.0000") && strings.Contains(line, "Y-5.0000") {
-			return
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if strings.Contains(line, "X10.0000") && strings.Contains(line, "Y-5.0000") {
+				return
+			}
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no target jog command observed: %v", m.Gcodes())
+}
+
+func TestJogWebSocketTargetZ(t *testing.T) {
+	srv, m, _ := serverWithJog(t, false)
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+
+	writeWS(t, c, map[string]any{"type": "target", "seq": 2, "target": map[string]float64{"z": 3}, "feed_mm_min": 600})
+	ack := readWSEvent(t, c, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if strings.Contains(line, "Z3.0000") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no Z target jog command observed: %v", m.Gcodes())
 }
 
 func TestJogWebSocketTargetSafeZ(t *testing.T) {
@@ -1262,6 +1348,53 @@ func TestProbeZEndpointSerializesSafeMoveProbeAndLift(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("probe gcodes = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestTraceOutlineEndpointSerializesProbeLaserTrace(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	resp := postJSON(t, srv.URL+"/api/outline/trace", map[string]any{
+		"machine_points": []map[string]float64{{"x": 0, "y": 0}, {"x": 10, "y": 0}},
+		"machine_z":      -2,
+		"safe_z_mm":      5,
+		"feed_mm_min":    600,
+		"closed":         false,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("trace status = %d: %s", resp.StatusCode, body)
+	}
+	var result service.TraceOutlineResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Verified || result.Points != 2 || result.CommandCount != 7 {
+		t.Fatalf("trace result = %+v", result)
+	}
+	want := []string{
+		"M494.1",
+		"G53 G0 Z5.0000",
+		"G53 G0 X0.0000 Y0.0000",
+		"G53 G0 Z-2.0000",
+		"G53 G1 X10.0000 Y0.0000 F600.0000",
+		"M400",
+		"M494.2",
+	}
+	got := m.Gcodes()
+	if len(got) != len(want) {
+		t.Fatalf("trace gcodes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("trace gcodes = %v, want %v", got, want)
 		}
 	}
 }

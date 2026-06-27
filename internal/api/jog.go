@@ -34,6 +34,7 @@ type jogClientMessage struct {
 	Action   string             `json:"action"`
 	Axis     string             `json:"axis"`
 	Distance float64            `json:"distance"`
+	Value    *float64           `json:"value"`
 	Target   map[string]float64 `json:"target"`
 	Feed     float64            `json:"feed_mm_min"`
 	SafeZ    float64            `json:"safe_z_mm"`
@@ -105,7 +106,15 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 		case "step":
 			sess.Step(msg.Seq, msg.Axis, msg.Distance)
 		case "origin":
-			sess.SetOrigin(msg.Seq, msg.Axis)
+			value := 0.0
+			if msg.Value != nil {
+				value = *msg.Value
+			}
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				sess.ReportError(msg.Seq, jog.CodeBadInput, "origin value must be finite")
+				continue
+			}
+			sess.SetOrigin(msg.Seq, msg.Axis, value)
 		case "target":
 			target, err := parseJogTarget(msg.Target)
 			if err != nil {
@@ -158,18 +167,18 @@ func parseJogAxes(in map[string]float64) (jog.Axes, error) {
 }
 
 func parseJogTarget(in map[string]float64) (machine.AxisValues, error) {
-	x, okX := in["x"]
-	y, okY := in["y"]
-	if !okX || !okY {
-		return nil, fmt.Errorf("target requires x and y")
+	if len(in) == 0 {
+		return nil, fmt.Errorf("target requires at least one axis")
 	}
+	out := machine.AxisValues{}
 	for k, v := range in {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			return nil, fmt.Errorf("target %q must be finite", k)
 		}
-		if k != "x" && k != "y" {
+		if k != "x" && k != "y" && k != "z" {
 			return nil, fmt.Errorf("unsupported target axis %q", k)
 		}
+		out[k] = v
 	}
-	return machine.AxisValues{"x": x, "y": y}, nil
+	return out, nil
 }

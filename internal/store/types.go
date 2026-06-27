@@ -141,15 +141,96 @@ type LogSettings struct {
 	Autoscroll bool   `json:"autoscroll"`
 }
 
-// MachineUI stores local machine geometry preferences used by the web control
+// MachineUI stores local machine control preferences used by the web control
 // surface. These values are UI state only; changing them never touches the
 // machine.
 type MachineUI struct {
-	WorkArea      WorkArea `json:"work_area"`
-	Origin        XYPoint  `json:"origin"`
-	TapFeedMMMin  float64  `json:"tap_feed_mm_min"`
-	SafeZMM       float64  `json:"safe_z_mm"`
-	SafeZDisabled bool     `json:"safe_z_disabled,omitempty"`
+	WorkArea      WorkArea       `json:"work_area"`
+	Origin        XYPoint        `json:"origin"`
+	SavedOrigins  []SavedOrigin  `json:"saved_origins"`
+	FeedMinMMMin  float64        `json:"feed_min_mm_min"`
+	FeedMaxMMMin  float64        `json:"feed_max_mm_min"`
+	TapFeedMMMin  float64        `json:"tap_feed_mm_min"`
+	SafeZMM       float64        `json:"safe_z_mm"`
+	SafeZDisabled bool           `json:"safe_z_disabled,omitempty"`
+	Learned       MachineLearned `json:"learned,omitempty"`
+}
+
+// MachineLearned is a read-only snapshot of parameters reported by the
+// firmware. It is local proxy metadata: refreshing it reads from the machine,
+// but changing or restoring it never writes firmware configuration.
+type MachineLearned struct {
+	LearnedAt     time.Time                 `json:"learned_at,omitempty"`
+	Source        string                    `json:"source,omitempty"`
+	Identity      MachineIdentity           `json:"identity,omitempty"`
+	WorkArea      WorkArea                  `json:"work_area,omitempty"`
+	ZMinMM        float64                   `json:"z_min_mm,omitempty"`
+	ZMaxMM        float64                   `json:"z_max_mm,omitempty"`
+	AMin          float64                   `json:"a_min,omitempty"`
+	AMax          float64                   `json:"a_max,omitempty"`
+	CMin          float64                   `json:"c_min,omitempty"`
+	CMax          float64                   `json:"c_max,omitempty"`
+	Feed          MachineFeedProfile        `json:"feed,omitempty"`
+	SoftEndstop   MachineSoftEndstopProfile `json:"soft_endstop,omitempty"`
+	Clearance     MachineClearanceProfile   `json:"clearance,omitempty"`
+	Probe         MachineProbeProfile       `json:"probe,omitempty"`
+	Config        map[string]string         `json:"config,omitempty"`
+	ConfigNumbers map[string]float64        `json:"config_numbers,omitempty"`
+	ConfigBools   map[string]bool           `json:"config_bools,omitempty"`
+	Diagnostics   map[string][]float64      `json:"diagnostics,omitempty"`
+	RawDiagnose   string                    `json:"raw_diagnose,omitempty"`
+}
+
+// MachineIdentity captures read-only firmware identity queries.
+type MachineIdentity struct {
+	Model    string `json:"model,omitempty"`
+	Version  string `json:"version,omitempty"`
+	FileType string `json:"file_type,omitempty"`
+}
+
+// MachineFeedProfile contains known feed-rate parameters reported in
+// /sd/config.txt. Values are in mm/min unless otherwise noted.
+type MachineFeedProfile struct {
+	DefaultMMMin float64 `json:"default_mm_min,omitempty"`
+	SeekMMMin    float64 `json:"seek_mm_min,omitempty"`
+	XMaxMMMin    float64 `json:"x_max_mm_min,omitempty"`
+	YMaxMMMin    float64 `json:"y_max_mm_min,omitempty"`
+	ZMaxMMMin    float64 `json:"z_max_mm_min,omitempty"`
+	AMax         float64 `json:"a_max,omitempty"`
+	ATCMaxMMMin  float64 `json:"atc_max_mm_min,omitempty"`
+	MaxXYMMMin   float64 `json:"max_xy_mm_min,omitempty"`
+}
+
+// MachineSoftEndstopProfile contains soft-limit settings from firmware config.
+type MachineSoftEndstopProfile struct {
+	Enabled bool    `json:"enabled,omitempty"`
+	XMin    float64 `json:"x_min,omitempty"`
+	YMin    float64 `json:"y_min,omitempty"`
+	ZMin    float64 `json:"z_min,omitempty"`
+}
+
+// MachineClearanceProfile contains known machine-coordinate clearance points.
+type MachineClearanceProfile struct {
+	X float64 `json:"x,omitempty"`
+	Y float64 `json:"y,omitempty"`
+	Z float64 `json:"z,omitempty"`
+}
+
+// MachineProbeProfile contains probe-related rates/distances from config.
+type MachineProbeProfile struct {
+	FastRateMMMin float64 `json:"fast_rate_mm_min,omitempty"`
+	SlowRateMMMin float64 `json:"slow_rate_mm_min,omitempty"`
+	RetractMM     float64 `json:"retract_mm,omitempty"`
+}
+
+// SavedOrigin is a labeled machine-coordinate work zero used by the web
+// control surface. Saving or deleting one is UI state only; recalling it is what
+// sends machine commands.
+type SavedOrigin struct {
+	ID        string    `json:"id"`
+	Label     string    `json:"label"`
+	Origin    XYPoint   `json:"origin"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 // WorkArea is the top-down machine-coordinate XY rectangle shown in Control.

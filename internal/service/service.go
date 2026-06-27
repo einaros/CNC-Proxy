@@ -43,20 +43,23 @@ import (
 const GcodeRoot = "/sd/gcodes"
 
 const (
-	maxUIMacros      = 48
-	maxMacroLines    = 40
-	maxMacroLineLen  = 240
-	maxMacroNameLen  = 80
-	maxMacroDescLen  = 240
-	maxMacroButtons  = 96
-	maxMacroColorLen = 32
-	maxGamepadAxis   = 31
-	maxGamepadButton = 63
-	maxGamepadMacros = 32
-	maxMachineSpanMM = 5000
-	maxTapFeedMMMin  = 10000
-	maxProbeDepthMM  = 200
-	maxProbeFeedMM   = 1000
+	maxUIMacros       = 48
+	maxMacroLines     = 40
+	maxMacroLineLen   = 240
+	maxMacroNameLen   = 80
+	maxMacroDescLen   = 240
+	maxMacroButtons   = 96
+	maxMacroColorLen  = 32
+	maxGamepadAxis    = 31
+	maxGamepadButton  = 63
+	maxGamepadMacros  = 32
+	maxMachineSpanMM  = 5000
+	maxTapFeedMMMin   = 10000
+	maxSavedOrigins   = 48
+	maxOriginLabelLen = 80
+	maxProbeDepthMM   = 200
+	maxProbeFeedMM    = 1000
+	maxTracePoints    = 4000
 )
 
 // Service wires the store, arbiter (for machine state), and local cache.
@@ -177,6 +180,39 @@ type ProbeZRequest struct {
 type ProbeZResult struct {
 	Machine machine.AxisValues `json:"machine"`
 	Output  string             `json:"output,omitempty"`
+}
+
+// TracePoint is one machine-coordinate XY point for a probe-laser outline trace.
+type TracePoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// TraceOutlineRequest describes a serialized probe-laser outline trace.
+type TraceOutlineRequest struct {
+	MachinePoints []TracePoint `json:"machine_points"`
+	MachineZ      float64      `json:"machine_z"`
+	SafeZMM       float64      `json:"safe_z_mm"`
+	FeedMM        float64      `json:"feed_mm_min"`
+	Closed        bool         `json:"closed"`
+}
+
+// TraceOutlineResult is returned after the probe-laser trace transaction.
+type TraceOutlineResult struct {
+	Action       string `json:"action"`
+	Points       int    `json:"points"`
+	CommandCount int    `json:"command_count"`
+	Verified     bool   `json:"verified"`
+	Message      string `json:"message"`
+}
+
+// MachineLearnResult is returned after refreshing read-only firmware
+// parameters into the proxy's local UI settings.
+type MachineLearnResult struct {
+	Action  string               `json:"action"`
+	UI      store.UISettings     `json:"ui"`
+	Learned store.MachineLearned `json:"learned"`
+	Message string               `json:"message"`
 }
 
 // Status returns the current machine state and proxy mode.
@@ -547,6 +583,387 @@ func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
 	return s.store.SetUISettings(ui)
 }
 
+// LearnMachineParameters refreshes read-only firmware-reported parameters into
+// local UI metadata. It mirrors the original controller's connection/config
+// queries where they expose durable machine parameters, and also asks diagnose
+// for the compact state tuple the controller parses for peripheral/endstop
+// status.
+func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
+	var modelOut, versionOut, ftypeOut, diagnoseOut, configOut string
+	err := s.arb.WithMachine(true, func(c *client.Conn) error {
+		var e error
+		if modelOut, e = s.sendLearnLine(c, "model"); e != nil {
+			return e
+		}
+		if versionOut, e = s.sendLearnLine(c, "version"); e != nil {
+			return e
+		}
+		if ftypeOut, e = s.sendLearnLine(c, "ftype"); e != nil {
+			return e
+		}
+		if diagnoseOut, e = s.sendLearnLine(c, "diagnose"); e != nil {
+			return e
+		}
+		if configOut, e = s.sendLearnLine(c, "config-get-all -e"); e != nil {
+			return e
+		}
+		return nil
+	})
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return MachineLearnResult{}, err
+	}
+
+	learned, err := buildMachineLearned(modelOut, versionOut, ftypeOut, diagnoseOut, configOut, time.Now())
+	if err != nil {
+		return MachineLearnResult{}, err
+	}
+	ui := s.store.UISettings()
+	ui.Machine.Learned = learned
+	applyLearnedMachineDefaults(&ui.Machine, learned)
+	ui, err = s.SetUISettings(ui)
+	if err != nil {
+		return MachineLearnResult{}, err
+	}
+	return MachineLearnResult{
+		Action:  "learn_machine_parameters",
+		UI:      ui,
+		Learned: ui.Machine.Learned,
+		Message: "Learned machine parameters from firmware.",
+	}, nil
+}
+
+func (s *Service) sendLearnLine(c *client.Conn, line string) (string, error) {
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "learn "+line)
+	out, err := c.SendConsoleCommand(ensureWireLine(line), client.GcodeOpts{ExpectReply: true, Cap: gcodeReplyCap})
+	if out != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		return out, err
+	}
+	if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
+	}
+	return out, nil
+}
+
+func applyLearnedMachineDefaults(m *store.MachineUI, learned store.MachineLearned) {
+	if validWorkArea(learned.WorkArea) {
+		m.WorkArea = learned.WorkArea
+	}
+	if learned.ZMaxMM != 0 || learned.ZMinMM != 0 {
+		m.SafeZMM = learned.ZMaxMM
+	}
+	if learned.Feed.MaxXYMMMin > 0 {
+		m.FeedMaxMMMin = learned.Feed.MaxXYMMMin
+	} else if learned.Feed.SeekMMMin > 0 {
+		m.FeedMaxMMMin = learned.Feed.SeekMMMin
+	}
+	if m.FeedMinMMMin <= 0 {
+		m.FeedMinMMMin = 1
+	}
+	if m.FeedMaxMMMin > 0 {
+		if m.TapFeedMMMin <= 0 {
+			m.TapFeedMMMin = m.FeedMaxMMMin
+		}
+		if m.TapFeedMMMin > m.FeedMaxMMMin {
+			m.TapFeedMMMin = m.FeedMaxMMMin
+		}
+	}
+}
+
+func buildMachineLearned(modelOut, versionOut, ftypeOut, diagnoseOut, configOut string, now time.Time) (store.MachineLearned, error) {
+	config := parseMachineConfig(configOut)
+	numbers := machineConfigNumbers(config)
+	bools := machineConfigBools(config)
+	diagnostics := parseMachineDiagnostics(diagnoseOut)
+	learned := store.MachineLearned{
+		LearnedAt:     now,
+		Source:        "firmware",
+		Identity:      parseMachineIdentity(modelOut, versionOut, ftypeOut),
+		Config:        config,
+		ConfigNumbers: numbers,
+		ConfigBools:   bools,
+		Diagnostics:   diagnostics,
+		RawDiagnose:   strings.TrimSpace(diagnoseOut),
+	}
+	applyKnownMachineConfig(&learned)
+	if len(config) == 0 && len(diagnostics) == 0 && learned.Identity == (store.MachineIdentity{}) {
+		return store.MachineLearned{}, errors.New("service: machine did not return learnable parameters")
+	}
+	return learned, nil
+}
+
+func parseMachineIdentity(modelOut, versionOut, ftypeOut string) store.MachineIdentity {
+	return store.MachineIdentity{
+		Model:    firstReplyValue(modelOut, "model", "del"),
+		Version:  firstReplyValue(versionOut, "version"),
+		FileType: firstReplyValue(ftypeOut, "ftype"),
+	}
+}
+
+func firstReplyValue(out string, keys ...string) string {
+	want := map[string]bool{}
+	for _, key := range keys {
+		want[strings.ToLower(strings.TrimSpace(key))] = true
+	}
+	for _, line := range strings.Split(stripFirmwareEOT(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		left, right, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(left))
+		if !want[key] {
+			continue
+		}
+		return strings.TrimSpace(right)
+	}
+	return ""
+}
+
+func parseMachineConfig(out string) map[string]string {
+	out = stripFirmwareEOT(out)
+	config := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			continue
+		}
+		config[key] = value
+	}
+	if len(config) == 0 {
+		return nil
+	}
+	return config
+}
+
+func stripFirmwareEOT(s string) string {
+	return strings.ReplaceAll(s, "\x04", "")
+}
+
+func machineConfigNumbers(config map[string]string) map[string]float64 {
+	out := map[string]float64{}
+	for key, value := range config {
+		n, ok := parseMachineNumber(value)
+		if ok {
+			out[key] = n
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func machineConfigBools(config map[string]string) map[string]bool {
+	out := map[string]bool{}
+	for key, value := range config {
+		if b, ok := parseMachineBool(value); ok {
+			out[key] = b
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseMachineNumber(value string) (float64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0, false
+	}
+	return n, true
+}
+
+func parseMachineBool(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "on", "yes", "1":
+		return true, true
+	case "false", "off", "no", "0":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func parseMachineDiagnostics(out string) map[string][]float64 {
+	record := extractMachineDiagnosticRecord(out)
+	if record == "" {
+		return nil
+	}
+	fields := map[string][]float64{}
+	for _, part := range strings.Split(record, "|") {
+		key, raw, ok := strings.Cut(part, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		values := []float64{}
+		for _, item := range strings.Split(raw, ",") {
+			n, ok := parseMachineNumber(item)
+			if ok {
+				values = append(values, n)
+			}
+		}
+		if len(values) > 0 {
+			fields[key] = values
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+func extractMachineDiagnosticRecord(out string) string {
+	out = strings.TrimSpace(stripFirmwareEOT(out))
+	start := strings.IndexByte(out, '{')
+	end := strings.LastIndexByte(out, '}')
+	if start < 0 || end <= start {
+		return ""
+	}
+	return out[start+1 : end]
+}
+
+func applyKnownMachineConfig(learned *store.MachineLearned) {
+	num := func(keys ...string) (float64, bool) {
+		for _, key := range keys {
+			if v, ok := learned.ConfigNumbers[key]; ok {
+				return v, true
+			}
+		}
+		return 0, false
+	}
+	boolValue := func(key string) (bool, bool) {
+		v, ok := learned.ConfigBools[key]
+		return v, ok
+	}
+
+	if v, ok := num("default_feed_rate"); ok {
+		learned.Feed.DefaultMMMin = v
+	}
+	if v, ok := num("default_seek_rate"); ok {
+		learned.Feed.SeekMMMin = v
+	}
+	if v, ok := num("x_axis_max_speed", "alpha_max_rate"); ok {
+		learned.Feed.XMaxMMMin = v
+	}
+	if v, ok := num("y_axis_max_speed", "beta_max_rate"); ok {
+		learned.Feed.YMaxMMMin = v
+	}
+	if v, ok := num("z_axis_max_speed", "gamma_max_rate"); ok {
+		learned.Feed.ZMaxMMMin = v
+	}
+	if v, ok := num("delta_max_rate"); ok {
+		learned.Feed.AMax = v
+	}
+	if v, ok := num("epsilon_max_rate"); ok {
+		learned.Feed.ATCMaxMMMin = v
+	}
+	if learned.Feed.XMaxMMMin > 0 && learned.Feed.YMaxMMMin > 0 {
+		learned.Feed.MaxXYMMMin = math.Min(learned.Feed.XMaxMMMin, learned.Feed.YMaxMMMin)
+	}
+
+	if v, ok := boolValue("soft_endstop.enable"); ok {
+		learned.SoftEndstop.Enabled = v
+	}
+	if v, ok := num("soft_endstop.x_min"); ok {
+		learned.SoftEndstop.XMin = v
+	}
+	if v, ok := num("soft_endstop.y_min"); ok {
+		learned.SoftEndstop.YMin = v
+	}
+	if v, ok := num("soft_endstop.z_min"); ok {
+		learned.SoftEndstop.ZMin = v
+		learned.ZMinMM = v
+	}
+
+	xMin, xMinOK := num("soft_endstop.x_min")
+	xMax, xMaxOK := num("soft_endstop.x_max", "alpha_max")
+	yMin, yMinOK := num("soft_endstop.y_min")
+	yMax, yMaxOK := num("soft_endstop.y_max", "beta_max")
+	if !xMaxOK {
+		xMax = 0
+		xMaxOK = xMinOK
+	}
+	if !yMaxOK {
+		yMax = 0
+		yMaxOK = yMinOK
+	}
+	if xMinOK && xMaxOK && yMinOK && yMaxOK {
+		area := store.WorkArea{XMin: xMin, XMax: xMax, YMin: yMin, YMax: yMax}
+		if validWorkArea(area) {
+			learned.WorkArea = area
+		}
+	}
+
+	if zMax, ok := num("soft_endstop.z_max", "gamma_max"); ok {
+		learned.ZMaxMM = zMax
+	}
+	if v, ok := num("delta_min"); ok {
+		learned.AMin = v
+	}
+	if v, ok := num("delta_max"); ok {
+		learned.AMax = v
+	}
+	if v, ok := num("zeta_min"); ok {
+		learned.CMin = v
+	}
+	if v, ok := num("zeta_max"); ok {
+		learned.CMax = v
+	}
+	if v, ok := num("coordinate.clearance_x"); ok {
+		learned.Clearance.X = v
+	}
+	if v, ok := num("coordinate.clearance_y"); ok {
+		learned.Clearance.Y = v
+	}
+	if v, ok := num("coordinate.clearance_z"); ok {
+		learned.Clearance.Z = v
+	}
+	if v, ok := num("atc.probe.fast_rate_mm_m"); ok {
+		learned.Probe.FastRateMMMin = v
+	}
+	if v, ok := num("atc.probe.slow_rate_mm_m"); ok {
+		learned.Probe.SlowRateMMMin = v
+	}
+	if v, ok := num("atc.probe.retract_mm"); ok {
+		learned.Probe.RetractMM = v
+	}
+}
+
+func validWorkArea(area store.WorkArea) bool {
+	return finite(area.XMin) && finite(area.XMax) && finite(area.YMin) && finite(area.YMax) &&
+		area.XMin < area.XMax && area.YMin < area.YMax &&
+		area.XMax-area.XMin <= maxMachineSpanMM && area.YMax-area.YMin <= maxMachineSpanMM
+}
+
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
 func validateMachineUI(m store.MachineUI) error {
 	values := map[string]float64{
 		"work_area.x_min": m.WorkArea.XMin,
@@ -555,6 +972,8 @@ func validateMachineUI(m store.MachineUI) error {
 		"work_area.y_max": m.WorkArea.YMax,
 		"origin.x":        m.Origin.X,
 		"origin.y":        m.Origin.Y,
+		"feed_min_mm_min": m.FeedMinMMMin,
+		"feed_max_mm_min": m.FeedMaxMMMin,
 		"tap_feed_mm_min": m.TapFeedMMMin,
 		"safe_z_mm":       m.SafeZMM,
 	}
@@ -565,7 +984,7 @@ func validateMachineUI(m store.MachineUI) error {
 			break
 		}
 	}
-	if allZero {
+	if allZero && len(m.SavedOrigins) == 0 {
 		return nil
 	}
 	for name, v := range values {
@@ -584,6 +1003,29 @@ func validateMachineUI(m store.MachineUI) error {
 	}
 	if m.TapFeedMMMin != 0 && (m.TapFeedMMMin < 1 || m.TapFeedMMMin > maxTapFeedMMMin) {
 		return fmt.Errorf("service: tap move feed must be between 1 and %.0f mm/min", float64(maxTapFeedMMMin))
+	}
+	if m.FeedMinMMMin != 0 && (m.FeedMinMMMin < 1 || m.FeedMinMMMin > maxTapFeedMMMin) {
+		return fmt.Errorf("service: machine minimum feed must be between 1 and %.0f mm/min", float64(maxTapFeedMMMin))
+	}
+	if m.FeedMaxMMMin != 0 && (m.FeedMaxMMMin < 1 || m.FeedMaxMMMin > maxTapFeedMMMin) {
+		return fmt.Errorf("service: machine maximum feed must be between 1 and %.0f mm/min", float64(maxTapFeedMMMin))
+	}
+	if m.FeedMinMMMin != 0 && m.FeedMaxMMMin != 0 && m.FeedMinMMMin > m.FeedMaxMMMin {
+		return fmt.Errorf("service: machine minimum feed must be less than or equal to maximum feed")
+	}
+	if len(m.SavedOrigins) > maxSavedOrigins {
+		return fmt.Errorf("service: saved origins must contain at most %d entries", maxSavedOrigins)
+	}
+	for _, saved := range m.SavedOrigins {
+		if strings.TrimSpace(saved.Label) == "" {
+			return fmt.Errorf("service: saved origin label is required")
+		}
+		if len(saved.Label) > maxOriginLabelLen {
+			return fmt.Errorf("service: saved origin label must be at most %d bytes", maxOriginLabelLen)
+		}
+		if math.IsNaN(saved.Origin.X) || math.IsInf(saved.Origin.X, 0) || math.IsNaN(saved.Origin.Y) || math.IsInf(saved.Origin.Y, 0) {
+			return fmt.Errorf("service: saved origin coordinates must be finite")
+		}
 	}
 	return nil
 }
@@ -982,6 +1424,12 @@ const gcodeReplyCap = 30 * time.Second
 
 const recoveryStatusTimeout = 2 * time.Second
 
+const (
+	traceStatusPollInterval = 250 * time.Millisecond
+	traceStatusMinTimeout   = 5 * time.Second
+	traceStatusMaxTimeout   = 2 * time.Minute
+)
+
 // RecoveryResult is returned by explicit alarm-recovery actions so operators
 // can see what was sent and what the machine reported afterward.
 type RecoveryResult struct {
@@ -1087,6 +1535,88 @@ func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
 	return res, nil
 }
 
+// TraceOutline runs a serialized probe-laser trace around a machine-coordinate
+// outline. The probe laser is switched off again if any command after activation
+// fails, so the operator is not left with an active laser after a partial trace.
+func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, error) {
+	if err := validateTraceOutlineRequest(req); err != nil {
+		return TraceOutlineResult{Action: "trace_outline", Message: err.Error()}, err
+	}
+	var res TraceOutlineResult
+	err := s.arb.WithMachine(true, func(c *client.Conn) error {
+		st, _ := s.arb.Tracker().Current()
+		if st.Tool == nil || st.Tool.Active != 0 {
+			return fmt.Errorf("%w: active tool is %s", ErrProbeUnavailable, toolStatusLabel(st.Tool))
+		}
+		points := traceOutlinePoints(req)
+		res = TraceOutlineResult{
+			Action:       "trace_outline",
+			Points:       len(points),
+			CommandCount: 0,
+			Verified:     false,
+		}
+		laserOn := false
+		run := func(line string) error {
+			res.CommandCount++
+			_, err := s.sendTraceLine(c, line)
+			return err
+		}
+		if err := run("M494.1"); err != nil {
+			return err
+		}
+		laserOn = true
+		var err error
+		first := points[0]
+		if err = run(fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM)); err == nil {
+			err = run(fmt.Sprintf("G53 G0 X%.4f Y%.4f", first.X, first.Y))
+		}
+		if err == nil {
+			err = run(fmt.Sprintf("G53 G0 Z%.4f", req.MachineZ))
+		}
+		for i := 1; err == nil && i < len(points); i++ {
+			p := points[i]
+			err = run(fmt.Sprintf("G53 G1 X%.4f Y%.4f F%.4f", p.X, p.Y, req.FeedMM))
+		}
+		if err == nil {
+			err = run("M400")
+		}
+		if laserOn {
+			offErr := run("M494.2")
+			laserOn = false
+			if err == nil {
+				err = offErr
+			}
+		}
+		if err != nil {
+			res.Message = "Trace outline failed: " + err.Error()
+			return err
+		}
+		st, err = s.waitTraceIdle(c, traceIdleTimeout(points, req.FeedMM))
+		if err != nil {
+			res.Message = "Trace outline could not verify final machine status: " + err.Error()
+			return err
+		}
+		if st.State != machine.Idle {
+			err := fmt.Errorf("%w: trace commands sent, but machine reports %s", ErrMachineStatusStale, statusSummary(st))
+			res.Message = err.Error()
+			return err
+		}
+		res.Verified = true
+		res.Message = fmt.Sprintf("Trace outline completed with %d points.", res.Points)
+		return nil
+	})
+	if err != nil {
+		if res.Action == "" {
+			res.Action = "trace_outline"
+		}
+		if res.Message == "" {
+			res.Message = err.Error()
+		}
+		return res, err
+	}
+	return res, nil
+}
+
 func validateProbeZRequest(req ProbeZRequest) error {
 	values := map[string]float64{
 		"machine_x":         req.MachineX,
@@ -1109,6 +1639,87 @@ func validateProbeZRequest(req ProbeZRequest) error {
 	return nil
 }
 
+func validateTraceOutlineRequest(req TraceOutlineRequest) error {
+	if len(req.MachinePoints) < 2 {
+		return fmt.Errorf("service: trace outline needs at least two points")
+	}
+	if len(req.MachinePoints) > maxTracePoints {
+		return fmt.Errorf("service: trace outline supports at most %d points", maxTracePoints)
+	}
+	values := map[string]float64{
+		"machine_z":   req.MachineZ,
+		"safe_z_mm":   req.SafeZMM,
+		"feed_mm_min": req.FeedMM,
+	}
+	for name, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("service: trace %s must be finite", name)
+		}
+	}
+	if req.FeedMM <= 0 || req.FeedMM > maxTapFeedMMMin {
+		return fmt.Errorf("service: trace feed must be between 0 and %.0f mm/min", float64(maxTapFeedMMMin))
+	}
+	for i, p := range req.MachinePoints {
+		if math.IsNaN(p.X) || math.IsInf(p.X, 0) || math.IsNaN(p.Y) || math.IsInf(p.Y, 0) {
+			return fmt.Errorf("service: trace point %d must be finite", i+1)
+		}
+	}
+	points := traceOutlinePoints(req)
+	if len(points) > maxTracePoints {
+		return fmt.Errorf("service: trace outline supports at most %d points", maxTracePoints)
+	}
+	return nil
+}
+
+func traceOutlinePoints(req TraceOutlineRequest) []TracePoint {
+	points := append([]TracePoint(nil), req.MachinePoints...)
+	if req.Closed && len(points) > 1 {
+		first := points[0]
+		last := points[len(points)-1]
+		if math.Hypot(last.X-first.X, last.Y-first.Y) > 0.00005 {
+			points = append(points, first)
+		}
+	}
+	return points
+}
+
+func traceIdleTimeout(points []TracePoint, feedMMMin float64) time.Duration {
+	if len(points) < 2 || feedMMMin <= 0 || math.IsNaN(feedMMMin) || math.IsInf(feedMMMin, 0) {
+		return traceStatusMinTimeout
+	}
+	var length float64
+	for i := 1; i < len(points); i++ {
+		length += math.Hypot(points[i].X-points[i-1].X, points[i].Y-points[i-1].Y)
+	}
+	estimated := time.Duration((length/feedMMMin)*float64(time.Minute)) + 10*time.Second
+	if estimated < traceStatusMinTimeout {
+		return traceStatusMinTimeout
+	}
+	if estimated > traceStatusMaxTimeout {
+		return traceStatusMaxTimeout
+	}
+	return estimated
+}
+
+func (s *Service) waitTraceIdle(c *client.Conn, timeout time.Duration) (machine.Status, error) {
+	deadline := time.Now().Add(timeout)
+	var last machine.Status
+	for {
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			return st, err
+		}
+		last = st
+		if st.State == machine.Idle {
+			return st, nil
+		}
+		if time.Now().After(deadline) {
+			return last, nil
+		}
+		time.Sleep(traceStatusPollInterval)
+	}
+}
+
 func (s *Service) sendProbeLine(c *client.Conn, line string, expectReply bool) (string, error) {
 	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "probe "+line)
 	cap := gcodeReplyCap
@@ -1116,6 +1727,22 @@ func (s *Service) sendProbeLine(c *client.Conn, line string, expectReply bool) (
 		cap = 2 * time.Minute
 	}
 	out, err := c.SendGcodeLine(line, client.GcodeOpts{ExpectReply: expectReply, Cap: cap})
+	if out != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return out, err
+	}
+	if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
+	}
+	return out, nil
+}
+
+func (s *Service) sendTraceLine(c *client.Conn, line string) (string, error) {
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "trace "+line)
+	out, err := c.SendGcodeLine(line, client.GcodeOpts{ExpectReply: false, Cap: gcodeReplyCap})
 	if out != "" {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
 	}

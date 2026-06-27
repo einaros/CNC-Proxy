@@ -190,6 +190,43 @@ Injection & control model (both modes — proxy alone OR with controller attache
   fall back to static JS checks, HTTP validation, screenshots from another
   approved tool, or manual/browser validation by the user.
 
+## UI/UX principles
+
+- **Design around operator tasks, not implementation objects.** Group controls
+  by what the operator is trying to do: primary machine action, motion/jog
+  parameters, origin actions, saved presets, status/readout. Do not lay out a
+  panel as a flat list of whichever fields happened to be added.
+- **Make the primary action visually primary.** High-risk or session-defining
+  controls such as arming tap move need a dedicated hit area, stronger visual
+  weight, clear state, and nearby feedback. Secondary settings must not compete
+  with them.
+- **Use a local sizing contract for dense control panels.** Within a panel,
+  controls that are peers must share explicit heights, label rhythm, and row
+  alignment. Buttons beside labeled inputs should align to the input box, not
+  stretch to the full label-plus-control height. Widths should reflect the
+  value domain: numeric feed fields are compact, saved-zero labels can grow,
+  and short commands stay short.
+- **Prefer custom controls when native controls fit badly.** Browser number
+  spinners, oversized selects, and generic checkboxes are not automatically the
+  right controls for machine operation. If a value changes in known increments,
+  use an attached stepper or segmented control sized for that value. If a toggle
+  must sit beside compact fields, use a switch sized to the same control height.
+- **Whitespace must encode grouping.** Use consistent small gaps inside a group,
+  larger gaps or rules between groups, and stable vertical spacing regardless of
+  how many controls a group contains. Avoid layouts where one group becomes tall
+  only because it has more labels or actions than its neighbor.
+- **Keep status visually quieter than actions.** Coordinate readouts, machine
+  state, and feedback should be close to the control they explain, but they
+  should not steal focus from the active machine-action controls.
+- **Do not duplicate persistent status.** If a value is already present in a
+  global/status bar, do not repeat it in a local panel unless the local copy is
+  transformed into task-specific context, such as a hover cursor coordinate or a
+  verification result tied to a just-clicked control.
+- **Machine-action UI must remain explicit.** Every control that can move the
+  machine, alter origin, run recovery, mutate files, or change durable machine
+  UI state needs immediate visible feedback, a disabled/in-progress state while
+  active, and a concrete terminal result when the effect can be verified.
+
 ## Layout
 
 | Path | Role |

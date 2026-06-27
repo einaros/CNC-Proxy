@@ -7,8 +7,17 @@ const PROBE_SPOT_DIAMETER_MM = 2;
 const PROBE_SPOT_RADIUS_MM = PROBE_SPOT_DIAMETER_MM / 2;
 const DEFAULT_FIELD_SPOT_GAP_MM = 8;
 const MAX_FIELD_PROBE_POINTS = 1500;
+const OUTLINE_CURVE_TOLERANCE_MM = 0.25;
+const MAX_EFFECTIVE_OUTLINE_POINTS = 4000;
 const DEFAULT_PROBE_DEPTH_MM = 20;
 const DEFAULT_PROBE_FEED_MM = 50;
+const DEFAULT_MACHINE_FEED_MIN_MM_MIN = 1;
+const DEFAULT_MACHINE_FEED_MAX_MM_MIN = 3000;
+const MAX_MACHINE_FEED_MM_MIN = 10000;
+const NOTICE_INFO_TIMEOUT_MS = 4500;
+const NOTICE_OK_TIMEOUT_MS = 3500;
+const NOTICE_ERROR_TIMEOUT_MS = 8000;
+const NOTICE_REPEAT_SUPPRESS_MS = 30000;
 
 const state = {
   files: new Map(),
@@ -26,6 +35,9 @@ const state = {
   selectedMacroId: "",
   ui: { macros: [], macro_buttons: [], log: { filter: "all", autoscroll: true }, gamepad: defaultGamepadSettings(), machine: defaultMachineSettings() },
   settingsSaveTimer: null,
+  machineLearnPending: false,
+  machineLearnFeedback: "",
+  machineLearnFeedbackKind: "",
   macroRunning: false,
   activeTab: "active-job",
   filesLoaded: false,
@@ -39,6 +51,7 @@ const state = {
   noticeKey: "",
   noticeSeq: 0,
   notices: new Map(),
+  statusMessages: new Map(),
   controlES: null,
   filesES: null,
   jog: {
@@ -70,6 +83,10 @@ const state = {
     originPending: 0,
     originPendingAxis: "",
     originPendingMode: "",
+    originPendingAxes: [],
+    originPendingIndex: 0,
+    originPendingTargets: null,
+    originPendingLabel: "",
     originVerifyDeadline: 0,
     originVerifyTimer: null,
     tapFeedback: "",
@@ -83,6 +100,7 @@ const state = {
     preferredPadIndex: null,
   },
   outline: defaultOutlineState(),
+  workarea: defaultWorkAreaView(),
 };
 
 const gcodeView = {
@@ -358,9 +376,13 @@ function defaultMachineSettings() {
   return {
     work_area: { x_min: -300, x_max: 0, y_min: -200, y_max: 0 },
     origin: { x: 0, y: 0 },
+    saved_origins: [],
+    feed_min_mm_min: DEFAULT_MACHINE_FEED_MIN_MM_MIN,
+    feed_max_mm_min: DEFAULT_MACHINE_FEED_MAX_MM_MIN,
     tap_feed_mm_min: 600,
     safe_z_mm: 0,
     safe_z_disabled: false,
+    learned: {},
   };
 }
 
@@ -381,8 +403,25 @@ function defaultOutlineState() {
     fieldProbePending: false,
     fieldProbeIndex: 0,
     fieldProbeTooDense: false,
+    tracePending: false,
     feedback: "",
     feedbackKind: "",
+  };
+}
+
+function defaultWorkAreaView() {
+  return {
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+    pointerId: null,
+    pointerStartX: 0,
+    pointerStartY: 0,
+    pointerLastX: 0,
+    pointerLastY: 0,
+    clientStartX: 0,
+    clientStartY: 0,
+    dragging: false,
   };
 }
 
@@ -392,15 +431,29 @@ function finiteOr(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function clampNumber(n, min, max) {
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
 function normalizeMachineSettings(machine) {
   const d = defaultMachineSettings();
   machine = machine || {};
+  const learned = normalizeMachineLearned(machine.learned);
   const work = machine.work_area || {};
   const oldGeneratedDefault = Number(work.x_min) === -302 && Number(work.x_max) === 0 &&
     Number(work.y_min) === -212 && Number(work.y_max) === 0 &&
     Number(machine.origin?.x || 0) === 0 && Number(machine.origin?.y || 0) === 0;
-  if (oldGeneratedDefault) {
+  const hasLearnedWorkArea = Number.isFinite(learned.work_area?.x_min) && Number.isFinite(learned.work_area?.x_max) &&
+    Number.isFinite(learned.work_area?.y_min) && Number.isFinite(learned.work_area?.y_max);
+  if (oldGeneratedDefault && !hasLearnedWorkArea) {
     machine = { ...machine, work_area: d.work_area };
+  }
+  const oldGeneratedFeedDefault = Number(machine.feed_min_mm_min || d.feed_min_mm_min) === 1 &&
+    Number(machine.feed_max_mm_min) === 1200 &&
+    Number(machine.tap_feed_mm_min || d.tap_feed_mm_min) === 600;
+  if (oldGeneratedFeedDefault) {
+    machine = { ...machine, feed_max_mm_min: d.feed_max_mm_min };
   }
   const normalizedWork = machine.work_area || {};
   const out = {
@@ -414,9 +467,13 @@ function normalizeMachineSettings(machine) {
       x: finiteOr(machine.origin?.x, d.origin.x),
       y: finiteOr(machine.origin?.y, d.origin.y),
     },
+    saved_origins: normalizeSavedOrigins(machine.saved_origins),
+    feed_min_mm_min: finiteOr(machine.feed_min_mm_min, d.feed_min_mm_min),
+    feed_max_mm_min: finiteOr(machine.feed_max_mm_min, d.feed_max_mm_min),
     tap_feed_mm_min: finiteOr(machine.tap_feed_mm_min, d.tap_feed_mm_min),
     safe_z_mm: finiteOr(machine.safe_z_mm, d.safe_z_mm),
     safe_z_disabled: !!machine.safe_z_disabled,
+    learned,
   };
   if (out.work_area.x_min >= out.work_area.x_max) {
     out.work_area.x_min = d.work_area.x_min;
@@ -426,8 +483,63 @@ function normalizeMachineSettings(machine) {
     out.work_area.y_min = d.work_area.y_min;
     out.work_area.y_max = d.work_area.y_max;
   }
-  const maxFeed = Number(state.jog.caps?.max_xy_mm_min) || 1200;
-  out.tap_feed_mm_min = Math.max(1, Math.min(maxFeed, out.tap_feed_mm_min || d.tap_feed_mm_min));
+  out.feed_min_mm_min = clampNumber(out.feed_min_mm_min, DEFAULT_MACHINE_FEED_MIN_MM_MIN, MAX_MACHINE_FEED_MM_MIN);
+  out.feed_max_mm_min = clampNumber(out.feed_max_mm_min, out.feed_min_mm_min, MAX_MACHINE_FEED_MM_MIN);
+  const bounds = feedBoundsFor(out);
+  out.tap_feed_mm_min = clampNumber(out.tap_feed_mm_min || d.tap_feed_mm_min, bounds.min, bounds.max);
+  return out;
+}
+
+function normalizeMachineLearned(learned) {
+  if (!learned || typeof learned !== "object") return {};
+  const out = { ...learned };
+  out.identity = learned.identity && typeof learned.identity === "object" ? { ...learned.identity } : {};
+  const work = learned.work_area && typeof learned.work_area === "object" ? {
+    x_min: finiteOr(learned.work_area.x_min, NaN),
+    x_max: finiteOr(learned.work_area.x_max, NaN),
+    y_min: finiteOr(learned.work_area.y_min, NaN),
+    y_max: finiteOr(learned.work_area.y_max, NaN),
+  } : null;
+  out.work_area = work && Number.isFinite(work.x_min) && Number.isFinite(work.x_max) &&
+    Number.isFinite(work.y_min) && Number.isFinite(work.y_max) && work.x_min < work.x_max && work.y_min < work.y_max ? work : {};
+  out.feed = learned.feed && typeof learned.feed === "object" ? { ...learned.feed } : {};
+  out.soft_endstop = learned.soft_endstop && typeof learned.soft_endstop === "object" ? { ...learned.soft_endstop } : {};
+  out.clearance = learned.clearance && typeof learned.clearance === "object" ? { ...learned.clearance } : {};
+  out.probe = learned.probe && typeof learned.probe === "object" ? { ...learned.probe } : {};
+  out.config = learned.config && typeof learned.config === "object" ? { ...learned.config } : {};
+  out.config_numbers = learned.config_numbers && typeof learned.config_numbers === "object" ? { ...learned.config_numbers } : {};
+  out.config_bools = learned.config_bools && typeof learned.config_bools === "object" ? { ...learned.config_bools } : {};
+  out.diagnostics = learned.diagnostics && typeof learned.diagnostics === "object" ? { ...learned.diagnostics } : {};
+  return out;
+}
+
+function feedBoundsFor(machine) {
+  const d = defaultMachineSettings();
+  const configuredMin = clampNumber(finiteOr(machine?.feed_min_mm_min, d.feed_min_mm_min), DEFAULT_MACHINE_FEED_MIN_MM_MIN, MAX_MACHINE_FEED_MM_MIN);
+  const configuredMax = clampNumber(finiteOr(machine?.feed_max_mm_min, d.feed_max_mm_min), configuredMin, MAX_MACHINE_FEED_MM_MIN);
+  return { min: configuredMin, max: configuredMax, configuredMin, configuredMax };
+}
+
+function normalizeSavedOrigins(origins) {
+  if (!Array.isArray(origins)) return [];
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < origins.length && out.length < 48; i++) {
+    const saved = origins[i] || {};
+    const id = String(saved.id || newID("origin"));
+    if (seen.has(id)) continue;
+    const label = String(saved.label || "").trim().slice(0, 80);
+    const x = finiteOr(saved.origin?.x, NaN);
+    const y = finiteOr(saved.origin?.y, NaN);
+    if (!label || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      label,
+      origin: { x, y },
+      created_at: saved.created_at || new Date().toISOString(),
+    });
+  }
   return out;
 }
 
@@ -584,6 +696,7 @@ function applyUISettings(ui) {
   renderMacroEditor();
   renderGamepadSettings();
   renderMachineSettings();
+  renderJog();
   renderGcodeLog();
   renderWorkArea();
 }
@@ -644,22 +757,26 @@ function setNotice(text, kind = "info", key = "", opts = {}) {
     return;
   }
   const noticeKey = key || "global";
+  const noticeText = String(text);
+  const noticeKind = kind || "info";
+  const timeoutMs = Object.prototype.hasOwnProperty.call(opts, "timeoutMs")
+    ? Number(opts.timeoutMs)
+    : noticeTimeoutMs(noticeKind);
   const prev = state.notices.get(noticeKey);
-  if (prev?.timer) clearTimeout(prev.timer);
+  if (!opts.force && prev?.text === noticeText && prev?.kind === noticeKind && prev?.timeoutMs === timeoutMs) return;
+  clearVisibleNotices();
   const notice = {
     key: noticeKey,
-    text: String(text),
-    kind: kind || "info",
+    text: noticeText,
+    kind: noticeKind,
     seq: ++state.noticeSeq,
     timer: null,
+    timeoutMs,
   };
   state.notices.set(noticeKey, notice);
   state.noticeKey = noticeKey;
   renderNoticeBar();
 
-  const timeoutMs = Object.prototype.hasOwnProperty.call(opts, "timeoutMs")
-    ? Number(opts.timeoutMs)
-    : (notice.kind === "ok" ? 5000 : 0);
   if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
     notice.timer = setTimeout(() => {
       const cur = state.notices.get(noticeKey);
@@ -668,20 +785,41 @@ function setNotice(text, kind = "info", key = "", opts = {}) {
   }
 }
 
-function clearNotice(key = "") {
-  if (key) {
-    const notice = state.notices.get(key);
-    if (!notice) return;
-    if (notice.timer) clearTimeout(notice.timer);
-    state.notices.delete(key);
-    if (state.noticeKey === key) state.noticeKey = "";
-  } else {
-    for (const notice of state.notices.values()) {
-      if (notice.timer) clearTimeout(notice.timer);
-    }
-    state.notices.clear();
-    state.noticeKey = "";
+function noticeTimeoutMs(kind) {
+  if (kind === "error") return NOTICE_ERROR_TIMEOUT_MS;
+  if (kind === "ok") return NOTICE_OK_TIMEOUT_MS;
+  return NOTICE_INFO_TIMEOUT_MS;
+}
+
+function statusMessageSignature(text, kind = "") {
+  return (kind || "info") + "\n" + String(text || "");
+}
+
+function setStatusMessage(key, text, kind = "", opts = {}) {
+  if (!text) {
+    state.statusMessages.delete(key);
+    clearNotice(key);
+    return;
   }
+  const sig = statusMessageSignature(text, kind);
+  const prev = state.statusMessages.get(key);
+  const now = performance.now();
+  if (!opts.force && prev?.sig === sig && !state.notices.has(key) && now - prev.shownAt < NOTICE_REPEAT_SUPPRESS_MS) return;
+  state.statusMessages.set(key, { sig, shownAt: now });
+  setNotice(text, kind || "info", key, opts);
+}
+
+function clearVisibleNotices() {
+  for (const notice of state.notices.values()) {
+    if (notice.timer) clearTimeout(notice.timer);
+  }
+  state.notices.clear();
+  state.noticeKey = "";
+}
+
+function clearNotice(key = "") {
+  if (key && !state.notices.has(key)) return;
+  clearVisibleNotices();
   renderNoticeBar();
 }
 
@@ -692,7 +830,7 @@ function renderNoticeBar() {
   const notices = [...state.notices.values()].sort((a, b) => b.seq - a.seq);
   bar.hidden = notices.length === 0;
   list.innerHTML = "";
-  for (const notice of notices) {
+  for (const notice of notices.slice(0, 1)) {
     const row = document.createElement("div");
     row.className = "status-item " + notice.kind;
     const dot = document.createElement("span");
@@ -794,11 +932,7 @@ function renderAlarmPanel(m) {
   const reason = haltReason(m);
   panel.hidden = m.state !== "Alarm";
   if (panel.hidden) {
-    const feedback = document.getElementById("alarm-feedback");
-    if (feedback) {
-      feedback.textContent = "";
-      feedback.className = "";
-    }
+    clearNotice("alarm");
     if (state.controlPendingAction !== "recover") {
       state.lastControlResult = null;
       clearNotice("control-recover");
@@ -812,21 +946,22 @@ function renderAlarmPanel(m) {
   document.getElementById("alarm-title").textContent = `Alarm ${code}: ${message}`;
   document.getElementById("alarm-detail").textContent = recoveryText(recovery, reason);
   const btn = document.getElementById("alarm-recover");
-  const feedback = document.getElementById("alarm-feedback");
   const pending = state.controlPendingAction === "recover";
   btn.hidden = recovery === "power_cycle";
   btn.disabled = pending || recovery === "inspect";
   btn.textContent = pending ? "Recovering..." : recoveryButtonText(recovery, reason);
+  let statusText = "";
+  let statusKind = "";
   if (pending) {
-    feedback.textContent = "Sending recovery command and verifying machine status...";
-    feedback.className = "";
+    statusText = "Sending recovery command and verifying machine status...";
   } else if (state.lastControlResult?.action === "recover" && state.lastControlResult?.message) {
-    feedback.textContent = state.lastControlResult.message;
-    feedback.className = state.lastControlResult.failed ? "error" : "ok";
+    statusText = state.lastControlResult.message;
+    statusKind = state.lastControlResult.failed ? "error" : "ok";
   } else {
-    feedback.textContent = recovery === "power_cycle" ? "This halt class cannot be cleared in software." : "";
-    feedback.className = recovery === "power_cycle" ? "error" : "";
+    statusText = recovery === "power_cycle" ? "This halt class cannot be cleared in software." : "";
+    statusKind = recovery === "power_cycle" ? "error" : "";
   }
+  setStatusMessage("alarm", statusText, statusKind);
 }
 
 function recoveryButtonText(recovery, reason = null) {
@@ -903,36 +1038,41 @@ function renderJog() {
   dead.textContent = j.deadman ? "on" : "off";
   dead.className = j.deadman ? "on" : "";
   const msg = jogPanelMessage();
-  const msgEl = document.getElementById("jog-error");
-  msgEl.textContent = msg.text;
-  msgEl.className = msg.kind || "";
+  if (state.activeTab === "control") setStatusMessage("jog-availability", msg.text, msg.kind);
+  else clearNotice("jog-availability");
   const arm = document.getElementById("jog-arm");
   setTextIfChanged(arm, j.armPending ? (j.armPendingAction === "arm" ? "Arming..." : "Disarming...") :
     (j.armQueuedAction ? "Connecting..." : (j.armed ? "Disarm Tap Move" : "Arm Tap Move")));
   arm.classList.toggle("armed", j.armed);
   const armBusy = !!j.armPending || !!j.armQueuedAction;
+  const originBusy = hasPendingOriginOperation();
   arm.disabled = armBusy;
-  setSoftDisabled(arm, !armBusy && ((j.caps && !j.caps.enabled) || j.link === "unsupported" || !!j.originPendingAxis));
+  setSoftDisabled(arm, !armBusy && ((j.caps && !j.caps.enabled) || j.link === "unsupported" || originBusy));
   const feed = document.getElementById("tap-feed-mm-min");
+  const machine = normalizeMachineSettings(state.ui.machine);
+  const feedBounds = feedBoundsFor(machine);
+  const feedValue = clampNumber(finiteOr(feed?.value, machine.tap_feed_mm_min), feedBounds.min, feedBounds.max);
   if (feed) {
-    const maxFeed = Number(j.caps?.max_xy_mm_min) || 1200;
-    feed.max = String(Math.round(maxFeed));
-    feed.disabled = !!j.targetPending || !!j.zStepPending || !!j.originPendingAxis;
+    feed.min = String(Math.round(feedBounds.min));
+    feed.max = String(Math.round(feedBounds.max));
+    if (feed !== document.activeElement) feed.value = String(feedValue);
+    feed.disabled = !!j.targetPending || !!j.zStepPending || originBusy;
   }
+  for (const btn of document.querySelectorAll("[data-feed-step]")) {
+    const step = Number(btn.dataset.feedStep) || 0;
+    btn.disabled = !!feed?.disabled || (step < 0 && feedValue <= feedBounds.min) || (step > 0 && feedValue >= feedBounds.max);
+  }
+  renderWorkMoveControls(originBusy);
   renderOriginButtons();
   const zStepDistance = document.getElementById("z-step-distance");
-  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending || !!j.originPendingAxis;
-  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending && !j.originPendingAxis;
-  const zStepBusy = !!j.zStepPending || !!j.targetPending || !!j.originPendingAxis;
+  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending || originBusy;
+  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending && !originBusy;
+  const zStepBusy = !!j.zStepPending || !!j.targetPending || originBusy;
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
     btn.disabled = zStepBusy;
     setSoftDisabled(btn, !zStepBusy && !zStepReady);
   }
-  const feedback = document.getElementById("tap-move-feedback");
-  if (feedback) {
-    feedback.textContent = j.tapFeedback || "";
-    feedback.className = "action-feedback " + (j.tapFeedbackKind || "");
-  }
+  setStatusMessage("tap-move", j.tapFeedback, j.tapFeedbackKind);
   const plot = document.getElementById("workarea-plot");
   if (plot) plot.classList.toggle("not-armed", !j.armed);
   renderWorkArea();
@@ -1001,18 +1141,146 @@ function machineReadyForOriginSet() {
 
 function renderOriginButtons() {
   const j = state.jog;
-  const pendingAxis = String(j.originPendingAxis || "").toLowerCase();
+  const pendingAxis = hasPendingOriginOperation();
   const jogReady = !!j.caps?.enabled && j.link === "online" && j.armed;
   const externalJogBusy = !j.armed && j.availability && !j.availability.available && j.availability.reason === "busy";
   const apiReady = !j.armed && machineReadyForOriginSet() && !externalJogBusy;
   const ready = (jogReady || apiReady) && !j.armPending && !j.targetPending && !j.zStepPending && !pendingAxis;
   const busy = !!j.armPending || !!j.targetPending || !!j.zStepPending || !!pendingAxis;
-  for (const btn of document.querySelectorAll("[data-origin-axis]")) {
-    const axis = String(btn.dataset.originAxis || "").toLowerCase();
-    btn.disabled = busy;
-    setSoftDisabled(btn, !busy && !ready);
-    btn.textContent = pendingAxis === axis ? "Setting " + axis.toUpperCase() + "0" : "Set " + axis.toUpperCase() + "0";
+  const action = document.getElementById("origin-action");
+  const actionValue = action?.value || "zero-x";
+  if (action) action.disabled = busy;
+  for (const id of ["origin-value-x-wrap", "origin-value-y-wrap"]) {
+    const wrap = document.getElementById(id);
+    if (wrap) wrap.hidden = true;
   }
+  const xNeeded = actionValue === "set-x";
+  const yNeeded = actionValue === "set-y";
+  const actionRow = action?.closest(".origin-row-action");
+  if (actionRow) actionRow.classList.toggle("needs-value", xNeeded || yNeeded);
+  const xWrap = document.getElementById("origin-value-x-wrap");
+  const yWrap = document.getElementById("origin-value-y-wrap");
+  if (xWrap) xWrap.hidden = !xNeeded;
+  if (yWrap) yWrap.hidden = !yNeeded;
+  const xValue = document.getElementById("origin-value-x");
+  const yValue = document.getElementById("origin-value-y");
+  if (xValue) xValue.disabled = busy || !xNeeded;
+  if (yValue) yValue.disabled = busy || !yNeeded;
+  renderSavedOriginSelect();
+  const apply = document.getElementById("origin-apply");
+  if (apply) {
+    apply.disabled = busy;
+    setSoftDisabled(apply, !busy && !ready);
+    setTextIfChanged(apply, pendingAxis ? "Applying..." : "Apply");
+  }
+  const save = document.getElementById("saved-origin-save");
+  const label = document.getElementById("saved-origin-label");
+  const currentOrigin = currentWorkOrigin();
+  if (label) label.disabled = busy;
+  if (save) {
+    save.disabled = busy;
+    setSoftDisabled(save, !busy && !currentOrigin);
+  }
+  const del = document.getElementById("saved-origin-delete");
+  const selected = selectedSavedOrigin();
+  const recall = document.getElementById("saved-origin-recall");
+  if (recall) {
+    recall.disabled = busy || !selected;
+    setSoftDisabled(recall, !busy && !!selected && !ready);
+  }
+  if (del) {
+    del.disabled = busy || !selected;
+  }
+}
+
+function hasPendingOriginOperation() {
+  return !!state.jog.originPendingAxis || !!state.jog.originPending || !!state.jog.originPendingTargets;
+}
+
+function savedOrigins() {
+  const machine = state.ui.machine || defaultMachineSettings();
+  return Array.isArray(machine.saved_origins) ? machine.saved_origins : [];
+}
+
+function selectedSavedOrigin() {
+  const id = document.getElementById("saved-origin-select")?.value || "";
+  return savedOrigins().find((origin) => origin.id === id) || null;
+}
+
+function savedOriginLabel(origin) {
+  if (!origin) return "";
+  return `${origin.label} (${fmtCoord(origin.origin?.x)}, ${fmtCoord(origin.origin?.y)})`;
+}
+
+function renderSavedOriginSelect() {
+  const select = document.getElementById("saved-origin-select");
+  if (!select) return;
+  const previous = select.value;
+  const origins = savedOrigins();
+  select.innerHTML = "";
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = origins.length ? "Select saved zero" : "No saved zeros";
+  select.appendChild(empty);
+  for (const origin of origins) {
+    const option = document.createElement("option");
+    option.value = origin.id;
+    option.textContent = savedOriginLabel(origin);
+    select.appendChild(option);
+  }
+  if (origins.some((origin) => origin.id === previous)) select.value = previous;
+  select.disabled = hasPendingOriginOperation();
+}
+
+function saveCurrentOrigin() {
+  if (hasPendingOriginOperation()) return;
+  const origin = currentWorkOrigin();
+  if (!origin || axisValue(origin, "x") === null || axisValue(origin, "y") === null) {
+    setTapFeedback("Current work zero is unavailable.", "error");
+    return;
+  }
+  const input = document.getElementById("saved-origin-label");
+  const label = String(input?.value || "").trim();
+  if (!label) {
+    setTapFeedback("Enter a label before saving the current zero.", "error");
+    return;
+  }
+  const machine = normalizeMachineSettings(state.ui.machine);
+  const saved = {
+    id: newID("origin"),
+    label: label.slice(0, 80),
+    origin: { x: axisValue(origin, "x"), y: axisValue(origin, "y") },
+    created_at: new Date().toISOString(),
+  };
+  state.ui.machine = normalizeMachineSettings({
+    ...machine,
+    saved_origins: [...savedOrigins(), saved],
+  });
+  if (input) input.value = "";
+  queueSaveUISettings();
+  renderMachineSettings();
+  renderJog();
+  const select = document.getElementById("saved-origin-select");
+  if (select) select.value = saved.id;
+  setTapFeedback("Saved zero " + saved.label + ".", "ok");
+}
+
+function deleteSelectedOrigin() {
+  if (hasPendingOriginOperation()) return;
+  const selected = selectedSavedOrigin();
+  if (!selected) {
+    setTapFeedback("Select a saved zero to delete.", "error");
+    return;
+  }
+  const machine = normalizeMachineSettings(state.ui.machine);
+  state.ui.machine = normalizeMachineSettings({
+    ...machine,
+    saved_origins: savedOrigins().filter((origin) => origin.id !== selected.id),
+  });
+  queueSaveUISettings();
+  renderMachineSettings();
+  renderJog();
+  setTapFeedback("Deleted saved zero " + selected.label + ".", "");
 }
 
 function jogPanelMessage() {
@@ -1065,6 +1333,12 @@ function jogErrorText(err) {
 
 const WORKAREA_PAD = 6;
 const WORKAREA_VIEW_SIZE = 100;
+const WORKAREA_MIN_ZOOM = 1;
+const WORKAREA_MAX_ZOOM = 8;
+const WORKAREA_ZOOM_STEP = 1.25;
+const WORKAREA_PAN_THRESHOLD_PX = 4;
+const SPINDLE_DIAMETER_MM = 3.175;
+const OUTLINE_POINT_DIAMETER_MM = SPINDLE_DIAMETER_MM + 0.5;
 
 function renderMachineSettings() {
   const m = state.ui.machine || defaultMachineSettings();
@@ -1074,16 +1348,90 @@ function renderMachineSettings() {
   setInputValue("machine-y-max", m.work_area.y_max);
   setInputValue("machine-origin-x", m.origin.x);
   setInputValue("machine-origin-y", m.origin.y);
+  setInputValue("machine-feed-min", m.feed_min_mm_min);
+  setInputValue("machine-feed-max", m.feed_max_mm_min);
   setInputValue("tap-feed-mm-min", m.tap_feed_mm_min);
   setInputValue("machine-safe-z", m.safe_z_mm);
   const safeToggle = document.getElementById("tap-safe-z-enabled");
   if (safeToggle && safeToggle !== document.activeElement) safeToggle.checked = !m.safe_z_disabled;
+  const learn = document.getElementById("machine-learn");
+  if (learn) {
+    learn.disabled = state.machineLearnPending;
+    setTextIfChanged(learn, state.machineLearnPending ? "Learning..." : "Learn from machine");
+  }
+  const learnStatus = document.getElementById("machine-learn-status");
+  if (learnStatus) {
+    learnStatus.textContent = state.machineLearnFeedback || "";
+    learnStatus.dataset.kind = state.machineLearnFeedbackKind || "";
+  }
+  renderMachineLearnedSummary(m.learned);
 }
 
 function setInputValue(id, value) {
   const el = document.getElementById(id);
   if (!el || el === document.activeElement) return;
   el.value = Number.isFinite(value) ? String(value) : "";
+}
+
+function renderMachineLearnedSummary(learned) {
+  const box = document.getElementById("machine-learned-summary");
+  if (!box) return;
+  box.innerHTML = "";
+  const lines = machineLearnedSummaryLines(learned);
+  for (const line of lines) {
+    const div = document.createElement("div");
+    div.textContent = line;
+    box.appendChild(div);
+  }
+}
+
+function machineLearnedSummaryLines(learned) {
+  learned = normalizeMachineLearned(learned);
+  const lines = [];
+  const id = learned.identity || {};
+  const identity = [id.model, id.version, id.file_type].filter(Boolean).join(" / ");
+  if (identity) lines.push(identity);
+  if (learned.learned_at) lines.push("learned " + learned.learned_at);
+  const area = learned.work_area || {};
+  if (Number.isFinite(area.x_min) && Number.isFinite(area.x_max) && Number.isFinite(area.y_min) && Number.isFinite(area.y_max)) {
+    lines.push(`bounds X ${fmtCoord(area.x_min)}..${fmtCoord(area.x_max)}  Y ${fmtCoord(area.y_min)}..${fmtCoord(area.y_max)}`);
+  }
+  const zMin = finiteOr(learned.z_min_mm, NaN);
+  const zMax = finiteOr(learned.z_max_mm, NaN);
+  if (Number.isFinite(zMin) || Number.isFinite(zMax)) lines.push(`Z ${fmtCoord(zMin)}..${fmtCoord(zMax)}`);
+  const feed = learned.feed || {};
+  const maxXY = finiteOr(feed.max_xy_mm_min, NaN);
+  const seek = finiteOr(feed.seek_mm_min, NaN);
+  if (Number.isFinite(maxXY)) lines.push(`XY max feed ${Math.round(maxXY)} mm/min`);
+  else if (Number.isFinite(seek)) lines.push(`seek feed ${Math.round(seek)} mm/min`);
+  const configCount = Object.keys(learned.config || {}).length;
+  const diagCount = Object.keys(learned.diagnostics || {}).length;
+  if (configCount || diagCount) lines.push(`${configCount} config values, ${diagCount} diagnostic groups`);
+  return lines;
+}
+
+async function learnMachineParameters() {
+  if (state.machineLearnPending) return;
+  state.machineLearnPending = true;
+  state.machineLearnFeedback = "Learning machine parameters...";
+  state.machineLearnFeedbackKind = "info";
+  renderMachineSettings();
+  try {
+    const r = await request("/api/machine/learn", { method: "POST" });
+    const result = await r.json();
+    if (result.ui) applyUISettings(result.ui);
+    state.machineLearnFeedback = result.message || "Learned machine parameters from firmware.";
+    state.machineLearnFeedbackKind = "ok";
+    renderMachineSettings();
+    renderJog();
+  } catch (e) {
+    state.machineLearnFeedback = "Learning machine parameters failed: " + e.message;
+    state.machineLearnFeedbackKind = "error";
+    renderMachineSettings();
+  } finally {
+    state.machineLearnPending = false;
+    renderMachineSettings();
+  }
 }
 
 function updateMachineSettings() {
@@ -1100,13 +1448,28 @@ function updateMachineSettings() {
       x: read("machine-origin-x", current.origin.x),
       y: read("machine-origin-y", current.origin.y),
     },
-    tap_feed_mm_min: read("tap-feed-mm-min", current.tap_feed_mm_min),
-    safe_z_mm: read("machine-safe-z", current.safe_z_mm),
-    safe_z_disabled: !!current.safe_z_disabled,
-  });
+    saved_origins: current.saved_origins || [],
+    feed_min_mm_min: read("machine-feed-min", current.feed_min_mm_min),
+    feed_max_mm_min: read("machine-feed-max", current.feed_max_mm_min),
+	    tap_feed_mm_min: read("tap-feed-mm-min", current.tap_feed_mm_min),
+	    safe_z_mm: read("machine-safe-z", current.safe_z_mm),
+	    safe_z_disabled: !!current.safe_z_disabled,
+	    learned: current.learned || {},
+	  });
   queueSaveUISettings();
   renderMachineSettings();
   renderWorkArea();
+}
+
+function stepTapFeed(delta) {
+  const input = document.getElementById("tap-feed-mm-min");
+  if (!input || input.disabled) return;
+  const current = state.ui.machine || defaultMachineSettings();
+  const bounds = feedBoundsFor(current);
+  const next = clampNumber(finiteOr(input.value, current.tap_feed_mm_min) + delta, bounds.min, bounds.max);
+  input.value = String(Math.round(next));
+  updateMachineSettings();
+  renderJog();
 }
 
 function updateSafeZToggle() {
@@ -1138,6 +1501,116 @@ function currentAxisValues() {
     mpos: preferJog ? (state.jog.mpos || state.machine.mpos) : (state.machine.mpos || state.jog.mpos),
     wpos: preferJog ? (state.jog.wpos || state.machine.wpos) : (state.machine.wpos || state.jog.wpos),
   };
+}
+
+function normalizeWorkAreaView() {
+  const v = state.workarea || (state.workarea = defaultWorkAreaView());
+  v.zoom = clampNumber(Number(v.zoom) || WORKAREA_MIN_ZOOM, WORKAREA_MIN_ZOOM, WORKAREA_MAX_ZOOM);
+  const half = WORKAREA_VIEW_SIZE / (2 * v.zoom);
+  const cx = clampNumber(WORKAREA_VIEW_SIZE / 2 + finiteOr(v.panX, 0), half, WORKAREA_VIEW_SIZE - half);
+  const cy = clampNumber(WORKAREA_VIEW_SIZE / 2 + finiteOr(v.panY, 0), half, WORKAREA_VIEW_SIZE - half);
+  v.panX = cx - WORKAREA_VIEW_SIZE / 2;
+  v.panY = cy - WORKAREA_VIEW_SIZE / 2;
+  return v;
+}
+
+function workAreaViewCenter() {
+  const v = normalizeWorkAreaView();
+  return {
+    x: WORKAREA_VIEW_SIZE / 2 + v.panX,
+    y: WORKAREA_VIEW_SIZE / 2 + v.panY,
+  };
+}
+
+function applyWorkAreaViewport() {
+  const group = document.getElementById("workarea-viewport");
+  const v = normalizeWorkAreaView();
+  const c = workAreaViewCenter();
+  if (group) {
+    group.setAttribute("transform", `translate(${WORKAREA_VIEW_SIZE / 2} ${WORKAREA_VIEW_SIZE / 2}) scale(${pathNum(v.zoom)}) translate(${pathNum(-c.x)} ${pathNum(-c.y)})`);
+  }
+  const zoomOut = document.getElementById("workarea-zoom-out");
+  const reset = document.getElementById("workarea-zoom-reset");
+  const zoomIn = document.getElementById("workarea-zoom-in");
+  if (zoomOut) zoomOut.disabled = v.zoom <= WORKAREA_MIN_ZOOM + 1e-6;
+  if (zoomIn) zoomIn.disabled = v.zoom >= WORKAREA_MAX_ZOOM - 1e-6;
+  if (reset) reset.disabled = v.zoom <= WORKAREA_MIN_ZOOM + 1e-6 && Math.abs(v.panX) < 1e-6 && Math.abs(v.panY) < 1e-6;
+}
+
+function resetWorkAreaView() {
+  state.workarea = { ...defaultWorkAreaView() };
+  applyWorkAreaViewport();
+}
+
+function setWorkAreaZoom(nextZoom, anchorLocal = null) {
+  const v = normalizeWorkAreaView();
+  const anchor = anchorLocal || { x: WORKAREA_VIEW_SIZE / 2, y: WORKAREA_VIEW_SIZE / 2 };
+  const anchorContent = workAreaLocalToContentPoint(anchor);
+  v.zoom = clampNumber(Number(nextZoom) || v.zoom, WORKAREA_MIN_ZOOM, WORKAREA_MAX_ZOOM);
+  v.panX = anchorContent.x - ((anchor.x - WORKAREA_VIEW_SIZE / 2) / v.zoom) - WORKAREA_VIEW_SIZE / 2;
+  v.panY = anchorContent.y - ((anchor.y - WORKAREA_VIEW_SIZE / 2) / v.zoom) - WORKAREA_VIEW_SIZE / 2;
+  applyWorkAreaViewport();
+}
+
+function zoomWorkArea(multiplier, anchorLocal = null) {
+  const v = normalizeWorkAreaView();
+  setWorkAreaZoom(v.zoom * multiplier, anchorLocal);
+}
+
+function panWorkArea(deltaX, deltaY) {
+  const v = normalizeWorkAreaView();
+  v.panX -= deltaX / v.zoom;
+  v.panY -= deltaY / v.zoom;
+  applyWorkAreaViewport();
+}
+
+function workAreaSVGPointFromClient(e) {
+  const svg = document.getElementById("workarea-plot");
+  if (!svg) return null;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return null;
+  const pt = svg.createSVGPoint();
+  pt.x = e.clientX;
+  pt.y = e.clientY;
+  return pt.matrixTransform(ctm.inverse());
+}
+
+function workAreaLocalToContentPoint(local) {
+  const v = normalizeWorkAreaView();
+  const c = workAreaViewCenter();
+  return {
+    x: ((local.x - WORKAREA_VIEW_SIZE / 2) / v.zoom) + c.x,
+    y: ((local.y - WORKAREA_VIEW_SIZE / 2) / v.zoom) + c.y,
+  };
+}
+
+function hideWorkAreaHoverPosition() {
+  const el = document.getElementById("workarea-hover-position");
+  if (!el) return;
+  el.hidden = true;
+}
+
+function updateWorkAreaHoverPosition(local) {
+  const el = document.getElementById("workarea-hover-position");
+  if (!el) return;
+  if (!local) {
+    hideWorkAreaHoverPosition();
+    return;
+  }
+  const machine = workAreaToMachinePoint(workAreaLocalToContentPoint(local));
+  if (!machine) {
+    hideWorkAreaHoverPosition();
+    return;
+  }
+  const origin = visualWorkOrigin();
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const work = {
+    x: ox === null ? NaN : machine.x - ox,
+    y: oy === null ? NaN : machine.y - oy,
+  };
+  el.textContent = `M ${fmtCoord(machine.x)}, ${fmtCoord(machine.y)}  W ${fmtCoord(work.x)}, ${fmtCoord(work.y)}`;
+  el.hidden = false;
 }
 
 function currentWorkOrigin() {
@@ -1178,6 +1651,22 @@ function workAreaRect() {
   return { x: WORKAREA_PAD + (usable - width) / 2, y: WORKAREA_PAD, width, height: usable };
 }
 
+function workAreaMMToSVGUnits() {
+  const b = workAreaBounds();
+  const r = workAreaRect();
+  const spanX = Math.max(1, b.x_max - b.x_min);
+  const spanY = Math.max(1, b.y_max - b.y_min);
+  return Math.min(r.width / spanX, r.height / spanY);
+}
+
+function setWorkAreaToolRadius() {
+  const radius = (SPINDLE_DIAMETER_MM / 2) * workAreaMMToSVGUnits();
+  for (const id of ["workarea-spindle-marker", "workarea-target-marker"]) {
+    const el = document.getElementById(id);
+    if (el) el.setAttribute("r", radius.toFixed(3));
+  }
+}
+
 function machineToWorkAreaPoint(p) {
   if (!p || !Number.isFinite(Number(p.x)) || !Number.isFinite(Number(p.y))) return null;
   const b = workAreaBounds();
@@ -1200,11 +1689,13 @@ function workAreaToMachinePoint(p) {
 }
 
 function renderWorkArea() {
+  applyWorkAreaViewport();
   renderWorkAreaBoundary();
   renderWorkAreaGrid();
   renderWorkAreaOrigin();
   renderWorkAreaOutline();
   renderWorkAreaFieldProbePreview();
+  setWorkAreaToolRadius();
   const spindle = jogEstimateActive() ? (state.jog.mpos || state.machine.mpos) : (state.jog.observed || state.jog.mpos || state.machine.mpos);
   const target = state.jog.target;
   setWorkAreaMarker("workarea-spindle", spindle);
@@ -1239,34 +1730,8 @@ function renderWorkAreaOrigin() {
   const origin = visualWorkOrigin();
   const ox = axisValue(origin, "x");
   const oy = axisValue(origin, "y");
-  const b = workAreaBounds();
-  const r = workAreaRect();
-  const vertical = document.getElementById("workarea-origin-y");
-  const horizontal = document.getElementById("workarea-origin-x");
-  if (vertical) {
-    if (ox !== null && ox >= b.x_min && ox <= b.x_max) {
-      const p = machineToWorkAreaPoint({ x: ox, y: b.y_min });
-      vertical.setAttribute("x1", p.x.toFixed(2));
-      vertical.setAttribute("x2", p.x.toFixed(2));
-      vertical.setAttribute("y1", r.y.toFixed(2));
-      vertical.setAttribute("y2", (r.y + r.height).toFixed(2));
-      vertical.removeAttribute("display");
-    } else {
-      vertical.setAttribute("display", "none");
-    }
-  }
-  if (horizontal) {
-    if (oy !== null && oy >= b.y_min && oy <= b.y_max) {
-      const p = machineToWorkAreaPoint({ x: b.x_min, y: oy });
-      horizontal.setAttribute("x1", r.x.toFixed(2));
-      horizontal.setAttribute("x2", (r.x + r.width).toFixed(2));
-      horizontal.setAttribute("y1", p.y.toFixed(2));
-      horizontal.setAttribute("y2", p.y.toFixed(2));
-      horizontal.removeAttribute("display");
-    } else {
-      horizontal.setAttribute("display", "none");
-    }
-  }
+  document.getElementById("workarea-origin-x")?.setAttribute("display", "none");
+  document.getElementById("workarea-origin-y")?.setAttribute("display", "none");
   setWorkAreaMarker("workarea-origin", ox !== null && oy !== null ? { x: ox, y: oy } : null);
 }
 
@@ -1512,6 +1977,7 @@ function redoOutline() {
 function setOutlineFeedback(text, kind = "") {
   state.outline.feedback = text;
   state.outline.feedbackKind = kind;
+  setStatusMessage("outline", text, kind, { force: true });
   renderOutlineCapture();
 }
 
@@ -1545,7 +2011,9 @@ function renderOutlineCapture() {
   const undo = document.getElementById("outline-undo");
   const redo = document.getElementById("outline-redo");
   const close = document.getElementById("outline-close");
+  const trace = document.getElementById("outline-trace");
   const curve = document.getElementById("outline-curve-fit");
+  const probeControls = document.getElementById("outline-probe-controls");
   const probeWrap = document.getElementById("outline-probe-point-wrap");
   const probePoint = document.getElementById("outline-probe-point");
   const exp = document.getElementById("outline-export");
@@ -1556,8 +2024,7 @@ function renderOutlineCapture() {
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
-  const feedback = document.getElementById("outline-feedback");
-  const busy = !!o.pointProbePending || !!o.fieldProbePending;
+  const busy = !!o.pointProbePending || !!o.fieldProbePending || !!o.tracePending;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
   if (start) {
@@ -1581,11 +2048,18 @@ function renderOutlineCapture() {
     close.disabled = busy;
     setSoftDisabled(close, !busy && (!o.active || o.closed || o.points.length < 2));
   }
+  if (trace) {
+    trace.hidden = !probeActive;
+    trace.disabled = busy;
+    setTextIfChanged(trace, o.tracePending ? "Tracing..." : "Trace outline");
+    setSoftDisabled(trace, !busy && (!o.active || o.points.length < 2 || state.jog.armed));
+  }
   if (curve) {
     curve.checked = !!o.curveFit;
     curve.disabled = busy || o.points.length < 2;
   }
-  if (probeWrap) probeWrap.hidden = !probeActive;
+  if (probeControls) probeControls.hidden = !o.active || !probeActive;
+  if (probeWrap) probeWrap.hidden = !o.active || !probeActive;
   if (probePoint) {
     if (!probeActive) o.probeEachPoint = false;
     probePoint.checked = !!o.probeEachPoint;
@@ -1615,14 +2089,13 @@ function renderOutlineCapture() {
     setSoftDisabled(exportHeight, !busy && o.fieldProbeResults.length < 3);
   }
   if (summary) summary.textContent = outlineSummaryText();
-  if (feedback) {
-    feedback.textContent = o.feedback || "";
-    feedback.className = "action-feedback " + (o.feedbackKind || "");
-  }
+  setStatusMessage("outline", o.feedback, o.feedbackKind);
 }
 
 function toggleOutlineCurveFit() {
   state.outline.curveFit = !!document.getElementById("outline-curve-fit")?.checked;
+  clearFieldProbeData();
+  updateFieldProbePreview();
   renderOutlineCapture();
   renderWorkArea();
 }
@@ -1651,6 +2124,88 @@ function fieldProbeCenterSpacing(gap = fieldProbeSpotGap()) {
   return PROBE_SPOT_DIAMETER_MM + Math.max(0, Number(gap) || 0);
 }
 
+function outlineWorkPoints() {
+  return state.outline.points
+    .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+}
+
+function effectiveOutlineGeometry(points, closed, curveFit) {
+  const source = (points || [])
+    .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  const out = [];
+  let limited = false;
+  const addPoint = (p) => {
+    if (limited) return;
+    const last = out[out.length - 1];
+    if (last && Math.hypot(last.x - p.x, last.y - p.y) <= 0.00005) return;
+    if (out.length >= MAX_EFFECTIVE_OUTLINE_POINTS) {
+      limited = true;
+      return;
+    }
+    out.push({ x: Number(p.x.toFixed(4)), y: Number(p.y.toFixed(4)) });
+  };
+  if (!source.length) return { points: [], limited: false };
+  if (!curveFit || source.length < 3) {
+    for (const p of source) addPoint(p);
+    if (closed && source.length > 1) addPoint(source[0]);
+    return { points: out, limited };
+  }
+  addPoint(source[0]);
+  if (closed) {
+    for (let i = 0; i < source.length && !limited; i++) {
+      flattenCurveSegment(
+        source[(i - 1 + source.length) % source.length],
+        source[i],
+        source[(i + 1) % source.length],
+        source[(i + 2) % source.length],
+        addPoint,
+      );
+    }
+    addPoint(source[0]);
+  } else {
+    for (let i = 0; i < source.length - 1 && !limited; i++) {
+      const p0 = i === 0 ? source[i] : source[i - 1];
+      const p1 = source[i];
+      const p2 = source[i + 1];
+      const p3 = i + 2 < source.length ? source[i + 2] : p2;
+      flattenCurveSegment(p0, p1, p2, p3, addPoint);
+    }
+  }
+  return { points: out, limited };
+}
+
+function flattenCurveSegment(p0, p1, p2, p3, addPoint) {
+  const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
+  const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
+  flattenCubic(p1, c1, c2, p2, addPoint, 0);
+}
+
+function flattenCubic(p0, c1, c2, p3, addPoint, depth) {
+  if (depth >= 12 || cubicFlatEnough(p0, c1, c2, p3)) {
+    addPoint(p3);
+    return;
+  }
+  const a = midpoint(p0, c1);
+  const b = midpoint(c1, c2);
+  const c = midpoint(c2, p3);
+  const d = midpoint(a, b);
+  const e = midpoint(b, c);
+  const m = midpoint(d, e);
+  flattenCubic(p0, a, d, m, addPoint, depth + 1);
+  flattenCubic(m, e, c, p3, addPoint, depth + 1);
+}
+
+function cubicFlatEnough(p0, c1, c2, p3) {
+  return distancePointToSegment(c1, p0, p3) <= OUTLINE_CURVE_TOLERANCE_MM &&
+    distancePointToSegment(c2, p0, p3) <= OUTLINE_CURVE_TOLERANCE_MM;
+}
+
+function midpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
 function renderWorkAreaOutline() {
   const group = document.getElementById("workarea-outline");
   const path = document.getElementById("workarea-outline-path");
@@ -1668,8 +2223,9 @@ function renderWorkAreaOutline() {
   path.setAttribute("d", outlinePathD(points, state.outline.closed, state.outline.curveFit));
   group.classList.toggle("closed", !!state.outline.closed);
   group.removeAttribute("display");
+  const pointRadius = (OUTLINE_POINT_DIAMETER_MM / 2) * workAreaMMToSVGUnits();
   pointsGroup.innerHTML = points.map((p, i) =>
-    `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${i === points.length - 1 ? "1.45" : "1.15"}"></circle>`
+    `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${pointRadius.toFixed(3)}"></circle>`
   ).join("");
 }
 
@@ -1717,7 +2273,13 @@ function updateFieldProbePreview() {
     o.fieldProbeTooDense = false;
     return;
   }
-  const built = buildFieldProbePreview(o.points, fieldProbeSpotGap());
+  const geometry = effectiveOutlineGeometry(outlineWorkPoints(), o.closed, o.curveFit);
+  if (geometry.limited) {
+    o.fieldProbePreview = [];
+    o.fieldProbeTooDense = true;
+    return;
+  }
+  const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap());
   o.fieldProbePreview = built.points;
   o.fieldProbeTooDense = built.tooDense;
 }
@@ -1991,6 +2553,87 @@ async function runFieldProbe() {
   }
 }
 
+function traceOutlineMachinePoints(origin) {
+  const geometry = effectiveOutlineGeometry(outlineWorkPoints(), state.outline.closed, state.outline.curveFit);
+  if (geometry.limited) throw new Error("curve fit generated too many trace points");
+  const points = geometry.points.map((p) => workPointToMachinePoint(p, origin));
+  if (points.some((p) => !p || !Number.isFinite(p.x) || !Number.isFinite(p.y))) {
+    throw new Error("outline trace coordinates are unavailable");
+  }
+  return points.map((p) => ({ x: p.x, y: p.y }));
+}
+
+function traceOutlineMachineZ() {
+  const pos = currentOutlineCapturePosition();
+  if (axisValue(pos?.machine, "z") !== null) return pos.machine.z;
+  for (let i = state.outline.points.length - 1; i >= 0; i--) {
+    const z = axisValue(state.outline.points[i], "machine_z");
+    if (z !== null) return z;
+  }
+  return null;
+}
+
+async function traceOutline() {
+  const o = state.outline;
+  if (!o.active || o.points.length < 2) return;
+  if (!isProbeToolActive()) {
+    setOutlineFeedback("Trace outline requires the probe tool to be active.", "error");
+    return;
+  }
+  if (state.jog.armed) {
+    setOutlineFeedback("Disarm tap move before tracing an outline.", "error");
+    return;
+  }
+  if (o.pointProbePending || o.fieldProbePending || o.tracePending) return;
+  const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin());
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const machineZ = traceOutlineMachineZ();
+  if (ox === null || oy === null || machineZ === null) {
+    setOutlineFeedback("Trace outline failed: current outline origin or Z level is unavailable.", "error");
+    return;
+  }
+  let machinePoints;
+  try {
+    machinePoints = traceOutlineMachinePoints(origin);
+  } catch (e) {
+    setOutlineFeedback("Trace outline failed: " + e.message, "error");
+    return;
+  }
+  if (machinePoints.length < 2) {
+    setOutlineFeedback("Trace outline needs at least two trace points.", "error");
+    return;
+  }
+  const machine = normalizeMachineSettings(state.ui.machine);
+  o.tracePending = true;
+  o.feedback = "Tracing outline...";
+  o.feedbackKind = "";
+  renderOutlineCapture();
+  try {
+    const resp = await request("/api/outline/trace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        machine_points: machinePoints,
+        machine_z: machineZ,
+        safe_z_mm: machine.safe_z_mm,
+        feed_mm_min: currentTapFeed(),
+        closed: !!o.closed,
+      }),
+    });
+    const result = await resp.json();
+    o.feedback = result.message || ("Trace outline completed with " + machinePoints.length + " points.");
+    o.feedbackKind = result.verified ? "ok" : "";
+  } catch (e) {
+    o.feedback = "Trace outline failed: " + e.message;
+    o.feedbackKind = "error";
+  } finally {
+    o.tracePending = false;
+    renderOutlineCapture();
+    pollMachine();
+  }
+}
+
 function pathNum(n) {
   if (!Number.isFinite(n)) return "0";
   const v = Math.abs(Number(n)) < 0.00005 ? 0 : Number(n);
@@ -2035,6 +2678,19 @@ function curveCommand(p0, p1, p2, p3) {
   return "C " + pathPoint(c1) + " " + pathPoint(c2) + " " + pathPoint(p2);
 }
 
+function svgExportPoint(p, ext) {
+  return { x: p.x - ext.x_min, y: ext.y_max - p.y };
+}
+
+function svgExportRect(rect, ext) {
+  return {
+    x: rect.x_min - ext.x_min,
+    y: ext.y_max - rect.y_max,
+    width: rect.x_max - rect.x_min,
+    height: rect.y_max - rect.y_min,
+  };
+}
+
 function exportOutline() {
   try {
     if (state.outline.points.length < 2) throw new Error("outline needs at least two points");
@@ -2061,10 +2717,14 @@ function downloadBlob(filename, content, type) {
 function buildOutlineSVG() {
   const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
   const points = outlineExportPoints(origin);
+  const boundaryPoints = outlineEffectiveExportPoints(origin);
   const fieldPoints = fieldProbeExportPoints(origin);
   const table = relativeTableBounds(origin);
-  const ext = exportExtents(table, points.concat(fieldPoints));
-  const path = outlinePathD(points, state.outline.closed, state.outline.curveFit);
+  const ext = exportExtents(table, boundaryPoints.concat(points, fieldPoints));
+  const tableSVG = svgExportRect(table, ext);
+  const visiblePoints = points.map((p) => svgExportPoint(p, ext));
+  const visibleFieldPoints = fieldPoints.map((p) => svgExportPoint(p, ext));
+  const path = outlinePathD(visiblePoints, state.outline.closed, state.outline.curveFit);
   const metadata = {
     app: "cnc-proxy",
     kind: "capture-outline",
@@ -2073,10 +2733,16 @@ function buildOutlineSVG() {
     coordinate_space: "work_zero",
     zero_origin_machine_mm: origin,
     table_mm: table,
+    visible_svg: {
+      coordinate_space: "svg_viewbox",
+      x_mm: "work_zero_x_mm + " + pathNum(-ext.x_min),
+      y_mm: pathNum(ext.y_max) + " - work_zero_y_mm",
+    },
     outline: {
       closed: !!state.outline.closed,
       curve_fit: !!state.outline.curveFit,
       points,
+      effective_point_count: boundaryPoints.length,
     },
     field_probe: {
       probe_diameter_mm: PROBE_SPOT_DIAMETER_MM,
@@ -2086,25 +2752,25 @@ function buildOutlineSVG() {
     },
   };
   const pointMeta = points.map((p, i) =>
-    `<circle cx="${pathNum(p.x)}" cy="${pathNum(p.y)}" r="0.35" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probed="${p.probed ? "true" : "false"}"><title>${escapeHtml("Point " + (i + 1) + " " + outlinePointLabel(p))}</title></circle>`
+    `<circle cx="${pathNum(visiblePoints[i].x)}" cy="${pathNum(visiblePoints[i].y)}" r="0.35" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probed="${p.probed ? "true" : "false"}"><title>${escapeHtml("Point " + (i + 1) + " " + outlinePointLabel(p))}</title></circle>`
   ).join("\n      ");
   const fieldMeta = fieldPoints.map((p, i) =>
-    `<circle cx="${pathNum(p.x)}" cy="${pathNum(p.y)}" r="${pathNum(PROBE_SPOT_RADIUS_MM)}" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probe-diameter-mm="${pathNum(PROBE_SPOT_DIAMETER_MM)}"></circle>`
+    `<circle cx="${pathNum(visibleFieldPoints[i].x)}" cy="${pathNum(visibleFieldPoints[i].y)}" r="${pathNum(PROBE_SPOT_RADIUS_MM)}" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probe-diameter-mm="${pathNum(PROBE_SPOT_DIAMETER_MM)}"></circle>`
   ).join("\n      ");
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${pathNum(ext.width)}mm" height="${pathNum(ext.height)}mm" viewBox="${pathNum(ext.x_min)} ${pathNum(-ext.y_max)} ${pathNum(ext.width)} ${pathNum(ext.height)}">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${pathNum(ext.width)}mm" height="${pathNum(ext.height)}mm" viewBox="0 0 ${pathNum(ext.width)} ${pathNum(ext.height)}">
   <title>CNC Proxy outline capture</title>
   <metadata>${escapeHtml(JSON.stringify(metadata, null, 2))}</metadata>
-  <g id="table-layer" data-layer="table" inkscape:groupmode="layer" inkscape:label="Table" transform="scale(1 -1)">
-    <rect x="${pathNum(table.x_min)}" y="${pathNum(table.y_min)}" width="${pathNum(table.x_max - table.x_min)}" height="${pathNum(table.y_max - table.y_min)}" fill="none" stroke="#91a0ae" stroke-width="0.25" vector-effect="non-scaling-stroke" data-units="mm"></rect>
+  <g id="table-layer" data-layer="table" inkscape:groupmode="layer" inkscape:label="Table">
+    <rect x="${pathNum(tableSVG.x)}" y="${pathNum(tableSVG.y)}" width="${pathNum(tableSVG.width)}" height="${pathNum(tableSVG.height)}" fill="none" stroke="#91a0ae" stroke-width="0.2" stroke-opacity="0.8" data-units="mm" data-x-min-mm="${pathNum(table.x_min)}" data-x-max-mm="${pathNum(table.x_max)}" data-y-min-mm="${pathNum(table.y_min)}" data-y-max-mm="${pathNum(table.y_max)}"></rect>
   </g>
-  <g id="outline-layer" data-layer="outline" inkscape:groupmode="layer" inkscape:label="Outline" transform="scale(1 -1)" data-units="mm" data-closed="${state.outline.closed ? "true" : "false"}" data-curve-fit="${state.outline.curveFit ? "true" : "false"}">
-    <path id="outline-path" d="${escapeHtml(path)}" fill="none" stroke="#57a6d6" stroke-width="0.25" vector-effect="non-scaling-stroke"></path>
+  <g id="outline-layer" data-layer="outline" inkscape:groupmode="layer" inkscape:label="Outline" data-units="mm" data-closed="${state.outline.closed ? "true" : "false"}" data-curve-fit="${state.outline.curveFit ? "true" : "false"}">
+    <path id="outline-path" d="${escapeHtml(path)}" fill="none" stroke="#147eb3" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"></path>
     <g id="outline-points" display="none">
       ${pointMeta}
     </g>
   </g>
-  <g id="field-probe-layer" data-layer="field-probe" inkscape:groupmode="layer" inkscape:label="Field Z Probe" transform="scale(1 -1)" data-units="mm" display="none">
+  <g id="field-probe-layer" data-layer="field-probe" inkscape:groupmode="layer" inkscape:label="Field Z Probe" data-units="mm" display="none">
     ${fieldMeta}
   </g>
 </svg>
@@ -2127,6 +2793,13 @@ function outlineExportPoints(origin) {
       probed: !!p.probed,
     };
   });
+}
+
+function outlineEffectiveExportPoints(origin) {
+  const raw = outlineExportPoints(origin);
+  const geometry = effectiveOutlineGeometry(raw, state.outline.closed, state.outline.curveFit);
+  if (geometry.limited) throw new Error("curve fit generated too many outline points");
+  return geometry.points;
 }
 
 function fieldProbeExportPoints(origin) {
@@ -2265,9 +2938,10 @@ function exportHeightImage() {
 }
 
 function buildInterpolatedHeightGrid(origin) {
-  const outline = outlineExportPoints(origin);
+  const rawOutline = outlineExportPoints(origin);
+  const outline = outlineEffectiveExportPoints(origin);
   const samples = fieldProbeExportPoints(origin);
-  if (outline.length < 3) throw new Error("closed outline needs at least three points");
+  if (rawOutline.length < 3 || outline.length < 3) throw new Error("closed outline needs at least three points");
   if (samples.length < 3) throw new Error("field probe needs at least three samples");
   const ext = exportExtents({ x_min: Infinity, x_max: -Infinity, y_min: Infinity, y_max: -Infinity }, outline);
   const spacing = fieldProbeCenterSpacing();
@@ -2849,7 +3523,6 @@ function renderActiveGcode() {
   const title = document.getElementById("active-gcode-title");
   const meta = document.getElementById("active-gcode-meta");
   const run = document.getElementById("active-gcode-run");
-  const feedback = document.getElementById("active-gcode-feedback");
   if (!title || !meta || !run) return;
 
   if (!active.path) {
@@ -2858,10 +3531,7 @@ function renderActiveGcode() {
     run.disabled = false;
     setSoftDisabled(run, true);
     drawGcodePreview(null);
-    if (!state.activeGcodePending) {
-      feedback.textContent = "";
-      feedback.className = "action-feedback";
-    }
+    if (!state.activeGcodePending) clearNotice("active-gcode");
     return;
   }
 
@@ -2886,14 +3556,13 @@ function renderActiveGcode() {
   const machineReady = state.machine?.state === "Idle";
   run.disabled = !!state.activeGcodePending;
   setSoftDisabled(run, !state.activeGcodePending && (!active.runnable || !machineReady));
+  const idleRequiredText = "Machine must be Idle before starting the active gcode.";
   if (!state.activeGcodePending && active.message) {
-    feedback.textContent = active.message;
-    feedback.className = "action-feedback error";
+    setStatusMessage("active-gcode", active.message, "error");
   } else if (!state.activeGcodePending && !machineReady) {
-    feedback.textContent = "Machine must be Idle before starting the active gcode.";
-    feedback.className = "action-feedback";
-  } else if (!state.activeGcodePending && machineReady && feedback.className === "action-feedback") {
-    feedback.textContent = "";
+    setStatusMessage("active-gcode", idleRequiredText, "");
+  } else if (!state.activeGcodePending && machineReady && state.notices.get("active-gcode")?.text === idleRequiredText) {
+    clearNotice("active-gcode");
   }
   drawGcodePreview(preview);
 }
@@ -3287,7 +3956,6 @@ async function selectActiveGcode(path) {
     });
     state.activeGcode = await r.json();
     setActiveFeedback("Preview loaded for " + relPath(path) + ".", "ok");
-    clearNotice("active-gcode");
     showTab("active-job");
   } catch (e) {
     setActiveFeedback("Preview failed: " + e.message, "error");
@@ -3337,10 +4005,7 @@ async function runActiveGcode() {
 }
 
 function setActiveFeedback(text, kind) {
-  const el = document.getElementById("active-gcode-feedback");
-  if (!el) return;
-  el.textContent = text;
-  el.className = "action-feedback " + (kind || "");
+  setStatusMessage("active-gcode", text, kind, { force: true });
 }
 
 function customToolID(inputID) {
@@ -3405,14 +4070,12 @@ async function setCurrentTool(toolID = null) {
     });
     const result = await r.json();
     setToolFeedback(result.message || "Set-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    clearNotice("tool");
     resetToolSelects();
     pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Set-tool failed: " + e.message, "error");
-    setNotice("Set-tool failed: " + e.message, "error", "tool");
   } finally {
     state.toolPending = "";
     setToolButtonsPending(false);
@@ -3438,14 +4101,12 @@ async function changeTool(toolID = null) {
     });
     const result = await r.json();
     setToolFeedback(result.message || "Change-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    clearNotice("tool");
     resetToolSelects();
     pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Change-tool failed: " + e.message, "error");
-    setNotice("Change-tool failed: " + e.message, "error", "tool");
   } finally {
     state.toolPending = "";
     setToolButtonsPending(false);
@@ -3460,13 +4121,11 @@ async function calibrateCurrentTool() {
     const r = await request("/api/tool/calibrate", { method: "POST" });
     const result = await r.json();
     setToolFeedback(result.message || "Calibration command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    clearNotice("tool");
     pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Calibration failed: " + e.message, "error");
-    setNotice("Calibration failed: " + e.message, "error", "tool");
   } finally {
     state.toolPending = "";
     setToolButtonsPending(false);
@@ -3481,14 +4140,12 @@ async function dropCurrentTool() {
     const r = await request("/api/tool/drop", { method: "POST" });
     const result = await r.json();
     setToolFeedback(result.message || "Drop-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    clearNotice("tool");
     resetToolSelects();
     pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Drop-tool failed: " + e.message, "error");
-    setNotice("Drop-tool failed: " + e.message, "error", "tool");
   } finally {
     state.toolPending = "";
     setToolButtonsPending(false);
@@ -3523,10 +4180,7 @@ function setToolButtonsPending(pending) {
 }
 
 function setToolFeedback(text, kind) {
-  const el = document.getElementById("tool-feedback");
-  if (!el) return;
-  el.textContent = text;
-  el.className = "action-feedback " + (kind || "");
+  setStatusMessage("tool", text, kind, { force: true });
 }
 
 function appendGcodeLine(ln) {
@@ -3638,10 +4292,8 @@ async function exportBackup() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    document.getElementById("backup-status").textContent = "Backup exported.";
-    clearNotice("backup");
+    setStatusMessage("backup", "Backup exported.", "ok", { force: true });
   } catch (e) {
-    document.getElementById("backup-status").textContent = "Export failed: " + e.message;
     setNotice("Backup export failed: " + e.message, "error", "backup");
   }
 }
@@ -3656,11 +4308,9 @@ async function importBackupFile(file) {
       headers: { "Content-Type": "application/json" },
       body: text,
     });
-    document.getElementById("backup-status").textContent = "Backup imported; reloading...";
-    setNotice("Backup imported.", "ok", "backup");
+    setStatusMessage("backup", "Backup imported; reloading...", "ok", { force: true });
     setTimeout(() => location.reload(), 600);
   } catch (e) {
-    document.getElementById("backup-status").textContent = "Import failed: " + e.message;
     setNotice("Backup import failed: " + e.message, "error", "backup");
   }
 }
@@ -4211,10 +4861,10 @@ function connectJog() {
       state.jog.tapFeedback = "Z move failed: jog service disconnected.";
       state.jog.tapFeedbackKind = "error";
     }
-    if (state.jog.originPendingMode === "jog" && state.jog.originPendingAxis) {
-      const axis = state.jog.originPendingAxis.toUpperCase();
+    if (state.jog.originPendingMode === "jog" && hasPendingOriginOperation()) {
+      const label = originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets);
       clearOriginVerification();
-      state.jog.tapFeedback = "Set " + axis + " origin failed: jog service disconnected.";
+      state.jog.tapFeedback = "Set " + label + " failed: jog service disconnected.";
       state.jog.tapFeedbackKind = "error";
     }
     renderJog();
@@ -4277,6 +4927,7 @@ function sendJog(msg) {
 function setTapFeedback(text, kind = "") {
   state.jog.tapFeedback = text;
   state.jog.tapFeedbackKind = kind;
+  setStatusMessage("tap-move", text, kind, { force: true });
   renderJog();
 }
 
@@ -4315,7 +4966,7 @@ function flushQueuedTapMoveArm() {
 
 function toggleTapMoveArm() {
   if (state.jog.armPending || state.jog.armQueuedAction) return;
-  if (state.jog.originPendingAxis) {
+  if (hasPendingOriginOperation()) {
     setTapFeedback("Finish setting origin before changing tap move arm state.", "error");
     return;
   }
@@ -4342,9 +4993,133 @@ function toggleTapMoveArm() {
 }
 
 function currentTapFeed() {
-  const maxFeed = Number(state.jog.caps?.max_xy_mm_min) || 1200;
   const fallback = state.ui.machine?.tap_feed_mm_min || defaultMachineSettings().tap_feed_mm_min;
-  return Math.max(1, Math.min(maxFeed, finiteOr(document.getElementById("tap-feed-mm-min")?.value, fallback)));
+  const bounds = feedBoundsFor(state.ui.machine);
+  return clampNumber(finiteOr(document.getElementById("tap-feed-mm-min")?.value, fallback), bounds.min, bounds.max);
+}
+
+function workMoveInput(axis) {
+  return document.getElementById("work-move-" + axis);
+}
+
+function workMoveField(axis) {
+  return document.querySelector('[data-work-move-axis="' + axis + '"]');
+}
+
+function workMoveInputIsLive(input) {
+  return input?.dataset.dirty !== "1";
+}
+
+function renderWorkMoveFieldState(axis, input) {
+  const field = workMoveField(axis);
+  const reset = document.querySelector('[data-work-move-reset="' + axis + '"]');
+  const live = workMoveInputIsLive(input);
+  if (field) {
+    field.classList.toggle("is-live", live);
+    field.classList.toggle("is-stale", !live);
+    field.dataset.workMoveState = live ? "live" : "stale";
+    field.title = live
+      ? "Work " + axis.toUpperCase() + " follows the current coordinate."
+      : "Work " + axis.toUpperCase() + " is edited; reset to follow the current coordinate.";
+  }
+  if (reset) {
+    reset.disabled = live;
+    reset.title = "Reset Work " + axis.toUpperCase() + " to current coordinate";
+    reset.setAttribute("aria-label", reset.title);
+  }
+}
+
+function renderWorkMoveControls(originBusy = hasPendingOriginOperation()) {
+  const { wpos } = currentAxisValues();
+  const busy = !!state.jog.targetPending || !!state.jog.zStepPending || originBusy;
+  for (const axis of ["x", "y", "z"]) {
+    const input = workMoveInput(axis);
+    if (!input) continue;
+    const value = axisValue(wpos, axis);
+    if (workMoveInputIsLive(input)) {
+      input.value = value === null ? "" : formatOriginValue(value);
+    }
+    input.disabled = busy;
+    renderWorkMoveFieldState(axis, input);
+  }
+  const btn = document.getElementById("work-move-send");
+  if (!btn) return;
+  const ready = !!state.jog.caps?.enabled && state.jog.link === "online" && state.jog.armed && !busy;
+  btn.disabled = busy;
+  setSoftDisabled(btn, !busy && !ready);
+}
+
+function workMoveTargetLabel(workTargets) {
+  const parts = ["x", "y", "z"]
+    .filter((axis) => Number.isFinite(Number(workTargets?.[axis])))
+    .map((axis) => axis.toUpperCase() + " " + formatOriginValue(workTargets[axis]));
+  return "W " + parts.join(" ");
+}
+
+function resetWorkMoveInput(axis) {
+  const input = workMoveInput(axis);
+  if (!input) return;
+  input.dataset.dirty = "0";
+  renderWorkMoveControls();
+}
+
+function workMoveTargetsFromInputs() {
+  const origin = currentWorkOrigin();
+  if (!origin) throw new Error("Current work origin is unavailable.");
+  const machineTargets = {};
+  const workTargets = {};
+  for (const axis of ["x", "y", "z"]) {
+    const input = workMoveInput(axis);
+    const raw = String(input?.value || "").trim();
+    if (raw === "") continue;
+    const workValue = finiteOr(raw, NaN);
+    if (!Number.isFinite(workValue)) throw new Error("Work " + axis.toUpperCase() + " must be a number.");
+    const offset = axisValue(origin, axis);
+    if (offset === null) throw new Error("Current " + axis.toUpperCase() + " work origin is unavailable.");
+    machineTargets[axis] = workValue + offset;
+    workTargets[axis] = workValue;
+  }
+  if (!Object.keys(machineTargets).length) throw new Error("Enter at least one work coordinate.");
+  return { machineTargets, label: workMoveTargetLabel(workTargets) };
+}
+
+function sendWorkCoordinateMove() {
+  if (state.jog.caps && !state.jog.caps.enabled) {
+    setTapFeedback(jogErrorText("disabled"), "error");
+    return;
+  }
+  if (state.jog.link !== "online") {
+    setTapFeedback("Jog service is not connected.", "error");
+    connectJog();
+    return;
+  }
+  if (!state.jog.armed) {
+    setTapFeedback("Arm tap move before moving to work coordinates.", "error");
+    return;
+  }
+  if (state.jog.targetPending || state.jog.zStepPending || hasPendingOriginOperation()) return;
+  let move;
+  try {
+    move = workMoveTargetsFromInputs();
+  } catch (e) {
+    setTapFeedback(e.message, "error");
+    return;
+  }
+  const feed = currentTapFeed();
+  const machine = normalizeMachineSettings(state.ui.machine);
+  const safeZEnabled = !machine.safe_z_disabled;
+  const seq = sendJog({ type: "target", target: move.machineTargets, feed_mm_min: feed, safe_z_enabled: safeZEnabled, safe_z_mm: machine.safe_z_mm });
+  if (!seq) {
+    setTapFeedback("Jog service is not connected.", "error");
+    return;
+  }
+  const base = state.jog.target || state.jog.observed || state.jog.mpos || state.machine.mpos || {};
+  state.jog.target = { ...base, ...move.machineTargets };
+  state.jog.targetPending = seq;
+  state.jog.targetLabel = move.label;
+  state.jog.tapFeedback = "Sending move to " + move.label + "...";
+  state.jog.tapFeedbackKind = "";
+  renderJog();
 }
 
 function tapTargetLabel(target) {
@@ -4361,7 +5136,7 @@ function sendTapMove(target) {
     setTapFeedback("Arm tap move before selecting a target.", "error");
     return;
   }
-  if (state.jog.originPendingAxis) return;
+  if (hasPendingOriginOperation()) return;
   const feed = currentTapFeed();
   const machine = normalizeMachineSettings(state.ui.machine);
   const safeZEnabled = !machine.safe_z_disabled;
@@ -4406,7 +5181,7 @@ function stepZ(dir) {
     setTapFeedback("Arm tap move before moving Z.", "error");
     return;
   }
-  if (state.jog.targetPending || state.jog.zStepPending || state.jog.originPendingAxis) return;
+  if (state.jog.targetPending || state.jog.zStepPending || hasPendingOriginOperation()) return;
   const distance = currentZStepDistance() * dir;
   const label = zStepLabel(distance);
   const seq = sendJog({ type: "step", axis: "z", distance });
@@ -4421,8 +5196,67 @@ function stepZ(dir) {
   renderJog();
 }
 
-function originCommandLine(axis) {
-  return "G10L20P0" + axis.toUpperCase() + "0";
+function originCommandLine(axis, value = 0) {
+  return "G10L20P0" + axis.toUpperCase() + formatOriginValue(value);
+}
+
+function formatOriginValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  if (Math.abs(n) < 0.00005) return "0";
+  return n.toFixed(4).replace(/\.?0+$/, "");
+}
+
+function originTargetsFromAction() {
+  const action = document.getElementById("origin-action")?.value || "zero-x";
+  switch (action) {
+  case "zero-x":
+    return { targets: { x: 0 }, label: "X0" };
+  case "zero-y":
+    return { targets: { y: 0 }, label: "Y0" };
+  case "zero-xy":
+    return { targets: { x: 0, y: 0 }, label: "XY0" };
+  case "set-x": {
+    const value = finiteOr(document.getElementById("origin-value-x")?.value, NaN);
+    if (!Number.isFinite(value)) throw new Error("X value must be finite.");
+    return { targets: { x: value }, label: "X " + formatOriginValue(value) };
+  }
+  case "set-y": {
+    const value = finiteOr(document.getElementById("origin-value-y")?.value, NaN);
+    if (!Number.isFinite(value)) throw new Error("Y value must be finite.");
+    return { targets: { y: value }, label: "Y " + formatOriginValue(value) };
+  }
+  case "reset-xy": {
+    const { mpos } = currentAxisValues();
+    const x = axisValue(mpos, "x");
+    const y = axisValue(mpos, "y");
+    if (x === null || y === null) throw new Error("current machine XY position is unavailable.");
+    return { targets: { x, y }, label: "machine XY positioning" };
+  }
+  default:
+    throw new Error("unknown origin action.");
+  }
+}
+
+function originTargetsFromSaved(saved) {
+  if (!saved) throw new Error("select a saved zero to recall.");
+  const { mpos } = currentAxisValues();
+  const mx = axisValue(mpos, "x");
+  const my = axisValue(mpos, "y");
+  if (mx === null || my === null) throw new Error("current machine XY position is unavailable.");
+  return {
+    targets: { x: mx - saved.origin.x, y: my - saved.origin.y },
+    label: saved.label,
+  };
+}
+
+function originAxes(targets) {
+  return ["x", "y", "z"].filter((axis) => Number.isFinite(Number(targets?.[axis])));
+}
+
+function originTargetLabel(label, targets) {
+  const parts = originAxes(targets).map((axis) => axis.toUpperCase() + " " + formatOriginValue(targets[axis]));
+  return label || parts.join(" ");
 }
 
 function clearOriginVerification() {
@@ -4433,34 +5267,44 @@ function clearOriginVerification() {
   state.jog.originPending = 0;
   state.jog.originPendingAxis = "";
   state.jog.originPendingMode = "";
+  state.jog.originPendingAxes = [];
+  state.jog.originPendingIndex = 0;
+  state.jog.originPendingTargets = null;
+  state.jog.originPendingLabel = "";
   state.jog.originVerifyDeadline = 0;
 }
 
-function beginOriginVerification(axis) {
+function beginOriginVerification() {
   state.jog.originPending = 0;
-  state.jog.originPendingAxis = axis;
+  state.jog.originPendingAxis = "";
   state.jog.originVerifyDeadline = Date.now() + 5000;
-  state.jog.tapFeedback = "Verifying " + axis.toUpperCase() + "0...";
+  state.jog.tapFeedback = "Verifying " + originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets) + "...";
   state.jog.tapFeedbackKind = "";
   if (!checkOriginVerification()) scheduleOriginVerification();
 }
 
 function checkOriginVerification() {
-  const axis = String(state.jog.originPendingAxis || "").toLowerCase();
-  if (!axis || state.jog.originPending) return false;
-  const w = state.jog.originPendingMode === "jog"
-    ? (axisValue(state.jog.wpos, axis) ?? axisValue(state.machine.wpos, axis))
-    : (axisValue(state.machine.wpos, axis) ?? axisValue(state.jog.wpos, axis));
-  if (w !== null && Math.abs(w) <= 0.01) {
+  const targets = state.jog.originPendingTargets;
+  const axes = originAxes(targets);
+  if (!axes.length || state.jog.originPending) return false;
+  const values = axes.map((axis) => {
+    const w = state.jog.originPendingMode === "jog"
+      ? (axisValue(state.jog.wpos, axis) ?? axisValue(state.machine.wpos, axis))
+      : (axisValue(state.machine.wpos, axis) ?? axisValue(state.jog.wpos, axis));
+    return { axis, w, target: Number(targets[axis]) };
+  });
+  if (values.every((v) => v.w !== null && Math.abs(v.w - v.target) <= 0.01)) {
+    const label = originTargetLabel(state.jog.originPendingLabel, targets);
     clearOriginVerification();
-    state.jog.tapFeedback = axis.toUpperCase() + " origin set.";
+    state.jog.tapFeedback = label + " set.";
     state.jog.tapFeedbackKind = "ok";
     return true;
   }
   if (Date.now() > state.jog.originVerifyDeadline) {
-    const seen = w === null ? "no WPos" : axis.toUpperCase() + " " + w.toFixed(3);
+    const seen = values.map((v) => v.w === null ? v.axis.toUpperCase() + " no WPos" : v.axis.toUpperCase() + " " + v.w.toFixed(3)).join(", ");
+    const label = originTargetLabel(state.jog.originPendingLabel, targets);
     clearOriginVerification();
-    state.jog.tapFeedback = "Set " + axis.toUpperCase() + " origin could not be verified (" + seen + ").";
+    state.jog.tapFeedback = "Set " + label + " could not be verified (" + seen + ").";
     state.jog.tapFeedbackKind = "error";
     return true;
   }
@@ -4469,39 +5313,47 @@ function checkOriginVerification() {
 
 function scheduleOriginVerification() {
   if (state.jog.originVerifyTimer) clearTimeout(state.jog.originVerifyTimer);
-  if (!state.jog.originPendingAxis || state.jog.originPending) return;
+  if (!state.jog.originPendingTargets || state.jog.originPending) return;
   state.jog.originVerifyTimer = setTimeout(async () => {
     state.jog.originVerifyTimer = null;
-    if (!state.jog.originPendingAxis || state.jog.originPending) return;
+    if (!state.jog.originPendingTargets || state.jog.originPending) return;
     if (checkOriginVerification()) {
       renderJog();
       return;
     }
     await pollMachine();
-    if (!state.jog.originPendingAxis || state.jog.originPending) return;
+    if (!state.jog.originPendingTargets || state.jog.originPending) return;
     if (checkOriginVerification()) renderJog();
     else scheduleOriginVerification();
   }, 350);
 }
 
-async function setOriginViaGcode(axis) {
-  const label = axis.toUpperCase();
+async function setOriginViaGcode(targets, label) {
+  const axes = originAxes(targets);
   state.jog.originPending = -1;
-  state.jog.originPendingAxis = axis;
+  state.jog.originPendingAxis = axes[0] || "";
   state.jog.originPendingMode = "api";
-  state.jog.tapFeedback = "Setting " + label + "0...";
+  state.jog.originPendingAxes = axes;
+  state.jog.originPendingIndex = 0;
+  state.jog.originPendingTargets = { ...targets };
+  state.jog.originPendingLabel = label;
+  state.jog.tapFeedback = "Setting " + originTargetLabel(label, targets) + "...";
   state.jog.tapFeedbackKind = "";
   renderJog();
   try {
-    await request("/api/gcode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ line: originCommandLine(axis) }),
-    });
-    beginOriginVerification(axis);
+    for (const axis of axes) {
+      state.jog.originPendingAxis = axis;
+      await request("/api/gcode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ line: originCommandLine(axis, targets[axis]) }),
+      });
+    }
+    beginOriginVerification();
   } catch (e) {
+    const pendingLabel = originTargetLabel(label, targets);
     clearOriginVerification();
-    state.jog.tapFeedback = "Set " + label + " origin failed: " + e.message;
+    state.jog.tapFeedback = "Set " + pendingLabel + " failed: " + e.message;
     state.jog.tapFeedbackKind = "error";
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
   } finally {
@@ -4509,49 +5361,192 @@ async function setOriginViaGcode(axis) {
   }
 }
 
-function setOriginAxis(axis) {
-  axis = String(axis || "").toLowerCase();
-  if (!["x", "y", "z"].includes(axis)) return;
-  const label = axis.toUpperCase();
-  if (state.jog.originPendingAxis || state.jog.targetPending || state.jog.zStepPending) return;
+function sendNextJogOriginAxis() {
+  const axes = state.jog.originPendingAxes || [];
+  const axis = axes[state.jog.originPendingIndex] || "";
+  const targets = state.jog.originPendingTargets || {};
+  if (!axis) {
+    beginOriginVerification();
+    return true;
+  }
+  const seq = sendJog({ type: "origin", axis, value: Number(targets[axis]) || 0 });
+  if (!seq) {
+    const label = originTargetLabel(state.jog.originPendingLabel, targets);
+    clearOriginVerification();
+    setTapFeedback("Set " + label + " failed: jog service is not connected.", "error");
+    return false;
+  }
+  state.jog.originPending = seq;
+  state.jog.originPendingAxis = axis;
+  state.jog.tapFeedback = "Setting " + originTargetLabel(state.jog.originPendingLabel, targets) + "...";
+  state.jog.tapFeedbackKind = "";
+  renderJog();
+  return true;
+}
+
+function handleOriginAck() {
+  state.jog.originPending = 0;
+  state.jog.originPendingIndex += 1;
+  if (state.jog.originPendingIndex < state.jog.originPendingAxes.length) {
+    sendNextJogOriginAxis();
+    return;
+  }
+  beginOriginVerification();
+}
+
+function applyOriginTargets(targets, label) {
+  const axes = originAxes(targets);
+  if (!axes.length) return;
+  if (hasPendingOriginOperation() || state.jog.targetPending || state.jog.zStepPending) return;
   if (state.jog.armed) {
     if (state.jog.link !== "online") {
       setTapFeedback("Jog service is not connected.", "error");
       connectJog();
       return;
     }
-    const seq = sendJog({ type: "origin", axis });
-    if (!seq) {
-      setTapFeedback("Jog service is not connected.", "error");
-      return;
-    }
-    state.jog.originPending = seq;
-    state.jog.originPendingAxis = axis;
     state.jog.originPendingMode = "jog";
-    state.jog.tapFeedback = "Setting " + label + "0...";
-    state.jog.tapFeedbackKind = "";
-    renderJog();
+    state.jog.originPendingAxes = axes;
+    state.jog.originPendingIndex = 0;
+    state.jog.originPendingTargets = { ...targets };
+    state.jog.originPendingLabel = label;
+    sendNextJogOriginAxis();
     return;
   }
   if (!machineReadyForOriginSet()) {
     setTapFeedback("Machine must be connected and Idle to set origin.", "error");
     return;
   }
-  setOriginViaGcode(axis);
+  setOriginViaGcode(targets, label);
 }
 
-function handleWorkAreaClick(e) {
-  const svg = document.getElementById("workarea-plot");
-  if (!svg) return;
-  const ctm = svg.getScreenCTM();
-  if (!ctm) return;
-  const pt = svg.createSVGPoint();
-  pt.x = e.clientX;
-  pt.y = e.clientY;
-  const local = pt.matrixTransform(ctm.inverse());
-  const target = workAreaToMachinePoint(local);
+function setOriginAxis(axis) {
+  axis = String(axis || "").toLowerCase();
+  if (!["x", "y", "z"].includes(axis)) return;
+  applyOriginTargets({ [axis]: 0 }, axis.toUpperCase() + "0");
+}
+
+function applyOriginAction() {
+  try {
+    const { targets, label } = originTargetsFromAction();
+    applyOriginTargets(targets, label);
+  } catch (e) {
+    setTapFeedback(e.message, "error");
+  }
+}
+
+function recallSelectedOrigin() {
+  try {
+    const { targets, label } = originTargetsFromSaved(selectedSavedOrigin());
+    applyOriginTargets(targets, label);
+  } catch (e) {
+    setTapFeedback(e.message, "error");
+  }
+}
+
+function handleWorkAreaTap(local) {
+  const target = workAreaToMachinePoint(workAreaLocalToContentPoint(local));
   if (!target) return;
   sendTapMove(target);
+}
+
+function handleWorkAreaPointerDown(e) {
+  if (typeof e.button === "number" && e.button !== 0) return;
+  const svg = document.getElementById("workarea-plot");
+  const local = workAreaSVGPointFromClient(e);
+  if (!svg || !local) return;
+  updateWorkAreaHoverPosition(local);
+  const v = normalizeWorkAreaView();
+  v.pointerId = e.pointerId;
+  v.pointerStartX = local.x;
+  v.pointerStartY = local.y;
+  v.pointerLastX = local.x;
+  v.pointerLastY = local.y;
+  v.clientStartX = e.clientX;
+  v.clientStartY = e.clientY;
+  v.dragging = false;
+  try {
+    svg.setPointerCapture(e.pointerId);
+  } catch {
+    // Pointer capture is best-effort; pointerup still handles ordinary clicks.
+  }
+  e.preventDefault();
+}
+
+function handleWorkAreaPointerMove(e) {
+  const v = state.workarea;
+  const svg = document.getElementById("workarea-plot");
+  const local = workAreaSVGPointFromClient(e);
+  if (!svg || !local) return;
+  if (!v || v.pointerId !== e.pointerId) {
+    updateWorkAreaHoverPosition(local);
+    return;
+  }
+  const moved = Math.hypot(e.clientX - v.clientStartX, e.clientY - v.clientStartY);
+  if (!v.dragging && moved > WORKAREA_PAN_THRESHOLD_PX) {
+    v.dragging = true;
+    svg.classList.add("panning");
+  }
+  if (v.dragging) {
+    panWorkArea(local.x - v.pointerLastX, local.y - v.pointerLastY);
+    v.pointerLastX = local.x;
+    v.pointerLastY = local.y;
+    updateWorkAreaHoverPosition(local);
+    e.preventDefault();
+  } else {
+    updateWorkAreaHoverPosition(local);
+  }
+}
+
+function clearWorkAreaPointer(e) {
+  const v = state.workarea;
+  if (!v || (e && v.pointerId !== e.pointerId)) return;
+  const svg = document.getElementById("workarea-plot");
+  if (svg) {
+    svg.classList.remove("panning");
+    if (e) {
+      try {
+        svg.releasePointerCapture(e.pointerId);
+      } catch {
+        // The browser may already have released capture.
+      }
+    }
+  }
+  v.pointerId = null;
+  v.dragging = false;
+}
+
+function handleWorkAreaPointerUp(e) {
+  const v = state.workarea;
+  if (!v || v.pointerId !== e.pointerId) return;
+  const wasDragging = !!v.dragging;
+  const local = workAreaSVGPointFromClient(e);
+  clearWorkAreaPointer(e);
+  updateWorkAreaHoverPosition(local);
+  e.preventDefault();
+  if (!wasDragging && local) handleWorkAreaTap(local);
+}
+
+function handleWorkAreaWheel(e) {
+  const local = workAreaSVGPointFromClient(e);
+  if (!local) return;
+  e.preventDefault();
+  const multiplier = e.deltaY < 0 ? WORKAREA_ZOOM_STEP : 1 / WORKAREA_ZOOM_STEP;
+  zoomWorkArea(multiplier, local);
+}
+
+function bindWorkAreaInteractions() {
+  const svg = document.getElementById("workarea-plot");
+  if (!svg || svg.dataset.workareaBound === "true") return;
+  svg.dataset.workareaBound = "true";
+  svg.addEventListener("pointerdown", handleWorkAreaPointerDown);
+  svg.addEventListener("pointermove", handleWorkAreaPointerMove);
+  svg.addEventListener("pointerup", handleWorkAreaPointerUp);
+  svg.addEventListener("pointerleave", hideWorkAreaHoverPosition);
+  svg.addEventListener("pointercancel", (e) => {
+    clearWorkAreaPointer(e);
+    hideWorkAreaHoverPosition();
+  });
+  svg.addEventListener("wheel", handleWorkAreaWheel, { passive: false });
 }
 
 function applyJogEvent(ev) {
@@ -4656,7 +5651,7 @@ function applyJogEvent(ev) {
       state.jog.tapFeedbackKind = "";
     }
     if (ev.seq && ev.seq === state.jog.originPending) {
-      beginOriginVerification(state.jog.originPendingAxis);
+      handleOriginAck();
     }
     state.jog.error = "";
     state.jog.errorCode = "";
@@ -4685,9 +5680,9 @@ function applyJogEvent(ev) {
       state.jog.tapFeedbackKind = "error";
     }
     if (ev.seq && ev.seq === state.jog.originPending) {
-      const axis = state.jog.originPendingAxis.toUpperCase();
+      const label = originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets);
       clearOriginVerification();
-      state.jog.tapFeedback = "Set " + axis + " origin failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedback = "Set " + label + " failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
     if (!ev.seq && state.jog.targetPending) {
@@ -4700,10 +5695,10 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = "Z move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
-    if (!ev.seq && state.jog.originPendingMode === "jog" && state.jog.originPendingAxis) {
-      const axis = state.jog.originPendingAxis.toUpperCase();
+    if (!ev.seq && state.jog.originPendingMode === "jog" && hasPendingOriginOperation()) {
+      const label = originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets);
       clearOriginVerification();
-      state.jog.tapFeedback = "Set " + axis + " origin failed: " + (ev.message || jogErrorText(ev.code));
+      state.jog.tapFeedback = "Set " + label + " failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
     if (!ev.seq && state.jog.armPending) {
@@ -4934,6 +5929,8 @@ function showTab(name) {
   }
   if (name === "files") connectFilesSSE();
   if (name === "active-job") scheduleGcodeRender();
+  if (name === "control") renderJog();
+  else clearNotice("jog-availability");
 }
 
 async function pollMachine() {
@@ -5076,20 +6073,50 @@ function init() {
   document.getElementById("gamepad-slow-button-0").onchange = updateGamepadButtons;
   document.getElementById("gamepad-slow-button-1").onchange = updateGamepadButtons;
   document.getElementById("gamepad-add-macro").onclick = addGamepadMacroBinding;
-  for (const id of ["machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max", "machine-origin-x", "machine-origin-y", "tap-feed-mm-min", "machine-safe-z"]) {
+  for (const id of ["machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max", "machine-origin-x", "machine-origin-y", "machine-feed-min", "machine-feed-max", "tap-feed-mm-min", "machine-safe-z"]) {
     document.getElementById(id).onchange = updateMachineSettings;
   }
+  for (const btn of document.querySelectorAll("[data-feed-step]")) {
+    btn.onclick = () => stepTapFeed(Number(btn.dataset.feedStep) || 0);
+  }
+  for (const axis of ["x", "y", "z"]) {
+    const input = workMoveInput(axis);
+    input.oninput = () => {
+      input.dataset.dirty = "1";
+      renderWorkMoveControls();
+    };
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        sendWorkCoordinateMove();
+      }
+    };
+  }
+  for (const btn of document.querySelectorAll("[data-work-move-reset]")) {
+    bindButtonAction(btn, (e) => {
+      e.preventDefault();
+      resetWorkMoveInput(btn.dataset.workMoveReset);
+    });
+  }
+  bindButtonAction(document.getElementById("work-move-send"), sendWorkCoordinateMove);
   document.getElementById("tap-safe-z-enabled").onchange = updateSafeZToggle;
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
     bindButtonAction(btn, () => stepZ(Number(btn.dataset.zStepDir) || 1));
   }
-  for (const btn of document.querySelectorAll("[data-origin-axis]")) {
-    bindButtonAction(btn, () => setOriginAxis(btn.dataset.originAxis));
-  }
-  document.getElementById("workarea-plot").onclick = handleWorkAreaClick;
+  document.getElementById("origin-action").onchange = renderJog;
+  document.getElementById("saved-origin-select").onchange = renderJog;
+  bindButtonAction(document.getElementById("origin-apply"), applyOriginAction);
+  bindButtonAction(document.getElementById("saved-origin-recall"), recallSelectedOrigin);
+  bindButtonAction(document.getElementById("saved-origin-save"), saveCurrentOrigin);
+  bindButtonAction(document.getElementById("saved-origin-delete"), deleteSelectedOrigin);
+  bindWorkAreaInteractions();
+  bindButtonAction(document.getElementById("workarea-zoom-out"), () => zoomWorkArea(1 / WORKAREA_ZOOM_STEP));
+  bindButtonAction(document.getElementById("workarea-zoom-reset"), resetWorkAreaView);
+  bindButtonAction(document.getElementById("workarea-zoom-in"), () => zoomWorkArea(WORKAREA_ZOOM_STEP));
   bindButtonAction(document.getElementById("outline-start"), startOutlineCapture);
   bindButtonAction(document.getElementById("outline-end"), endOutlineCapture);
   bindButtonAction(document.getElementById("outline-add-point"), addOutlinePoint);
+  bindButtonAction(document.getElementById("outline-trace"), traceOutline);
   bindButtonAction(document.getElementById("outline-undo"), undoOutline);
   bindButtonAction(document.getElementById("outline-redo"), redoOutline);
   bindButtonAction(document.getElementById("outline-close"), closeOutline);
@@ -5100,6 +6127,7 @@ function init() {
   bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);
+  bindButtonAction(document.getElementById("machine-learn"), learnMachineParameters);
 
   bindButtonAction(document.getElementById("ctl-hold"), () => sendControl("hold"));
   bindButtonAction(document.getElementById("ctl-resume"), () => sendControl("resume"));

@@ -85,10 +85,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tool/drop", s.dropCurrentTool)           // runs M6T-1
 	mux.HandleFunc("POST /api/tool/calibrate", s.calibrateCurrentTool) // starts M491
 	mux.HandleFunc("POST /api/probe/z", s.probeZ)                      // one serialized Z probe
+	mux.HandleFunc("POST /api/outline/trace", s.traceOutline)          // serialized probe-laser outline trace
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
 	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
 	mux.HandleFunc("PUT /api/ui/settings", s.putUISettings)
+	mux.HandleFunc("POST /api/machine/learn", s.learnMachineParameters)
 	mux.HandleFunc("GET /api/backup", s.getBackup)
 	mux.HandleFunc("POST /api/backup/import", s.postBackupImport)
 	mux.HandleFunc("GET /api/jog/capabilities", s.getJogCapabilities)
@@ -350,6 +352,19 @@ func (s *Server) probeZ(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) traceOutline(w http.ResponseWriter, r *http.Request) {
+	var body service.TraceOutlineRequest
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	res, err := s.svc.TraceOutline(body)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *Server) getActiveGcode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.ActiveGcode())
 }
@@ -469,6 +484,15 @@ func (s *Server) putUISettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ui)
+}
+
+func (s *Server) learnMachineParameters(w http.ResponseWriter, r *http.Request) {
+	res, err := s.svc.LearnMachineParameters()
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // postControl injects a realtime control action, or runs an explicit alarm

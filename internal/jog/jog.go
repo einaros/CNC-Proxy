@@ -52,6 +52,7 @@ const (
 	motionEventGap     = 33 * time.Millisecond
 	statusWaitGap      = 500 * time.Millisecond
 	maxManualStepMM    = 50.0
+	maxTargetFeedMMMin = 10000.0
 )
 
 // Config controls the jog engine.
@@ -89,7 +90,7 @@ type Logger interface {
 func DefaultConfig() Config {
 	return Config{
 		Enabled:         true,
-		MaxXYMMMin:      1200,
+		MaxXYMMMin:      firmwareMaxXYMMMin,
 		MaxZMMMin:       300,
 		Tick:            20 * time.Millisecond,
 		StatusInterval:  100 * time.Millisecond,
@@ -213,6 +214,7 @@ type command struct {
 	action   string
 	axis     string
 	distance float64
+	value    float64
 	target   machine.AxisValues
 	feed     float64
 	safeZOn  bool
@@ -411,9 +413,9 @@ func (s *Session) Step(seq int64, axis string, distance float64) {
 	s.enqueue(command{typ: "step", seq: seq, axis: axis, distance: distance})
 }
 
-// SetOrigin sets one work-coordinate axis origin to the current position.
-func (s *Session) SetOrigin(seq int64, axis string) {
-	s.enqueue(command{typ: "origin", seq: seq, axis: axis})
+// SetOrigin sets the current work-coordinate axis value.
+func (s *Session) SetOrigin(seq int64, axis string, value float64) {
+	s.enqueue(command{typ: "origin", seq: seq, axis: axis, value: value})
 }
 
 // Target requests one explicit XY move from an armed session.
@@ -512,7 +514,7 @@ func (s *Session) handleCommand(cmd command) {
 	case "step":
 		s.handleStep(cmd.seq, cmd.axis, cmd.distance)
 	case "origin":
-		s.handleOrigin(cmd.seq, cmd.axis)
+		s.handleOrigin(cmd.seq, cmd.axis, cmd.value)
 	case "target":
 		s.handleTarget(cmd.seq, cmd.target, cmd.feed, cmd.safeZOn, cmd.safeZ)
 	}
@@ -598,8 +600,8 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	s.emit(Event{Type: "ack", Seq: seq})
 }
 
-func (s *Session) handleOrigin(seq int64, axis string) {
-	cmd, err := originCommand(axis)
+func (s *Session) handleOrigin(seq int64, axis string, value float64) {
+	cmd, err := originCommand(axis, value)
 	if err != nil {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: err.Error()})
 		return
@@ -652,20 +654,32 @@ func (s *Session) handleOrigin(seq int64, axis string) {
 	s.requestStatus()
 }
 
-func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float64, safeZEnabled bool, safeZMM float64) {
-	x, okX := xy["x"]
-	y, okY := xy["y"]
-	if !okX || !okY || math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) {
-		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target requires finite x and y"})
+func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMMin float64, safeZEnabled bool, safeZMM float64) {
+	if len(targetAxes) == 0 {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target requires at least one axis"})
 		return
+	}
+	hasXYTarget := false
+	for axis, value := range targetAxes {
+		if axis != "x" && axis != "y" && axis != "z" {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target axis must be one of: x, y, z"})
+			return
+		}
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target requires finite coordinates"})
+			return
+		}
+		if axis == "x" || axis == "y" {
+			hasXYTarget = true
+		}
 	}
 	if safeZEnabled && (math.IsNaN(safeZMM) || math.IsInf(safeZMM, 0)) {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "safe Z must be finite"})
 		return
 	}
 	cfg := s.mgr.cfg.normalize()
-	if math.IsNaN(feedMMMin) || math.IsInf(feedMMMin, 0) || feedMMMin <= 0 || feedMMMin > cfg.MaxXYMMMin {
-		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: fmt.Sprintf("feed must be between 1 and %.0f mm/min", cfg.MaxXYMMMin)})
+	if math.IsNaN(feedMMMin) || math.IsInf(feedMMMin, 0) || feedMMMin <= 0 || feedMMMin > maxTargetFeedMMMin {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: fmt.Sprintf("feed must be between 1 and %.0f mm/min", maxTargetFeedMMMin)})
 		return
 	}
 	now := s.mgr.now()
@@ -712,19 +726,26 @@ func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine position is unavailable"})
 		return
 	}
+	for axis := range targetAxes {
+		if _, ok := planned[axis]; !ok {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine " + strings.ToUpper(axis) + " position is unavailable"})
+			return
+		}
+	}
 
-	xyTarget := copyAxes(planned)
-	xyTarget["x"] = x
-	xyTarget["y"] = y
-	xyDelta := Axes{X: xyTarget["x"] - planned["x"], Y: xyTarget["y"] - planned["y"]}
-	if xyDelta.X == 0 && xyDelta.Y == 0 {
-		s.emitMotionEstimate(now, st, xyTarget, xyDelta, "", queuedLead)
+	finalTarget := copyAxes(planned)
+	for axis, value := range targetAxes {
+		finalTarget[axis] = value
+	}
+	fullDelta := axesDelta(planned, finalTarget)
+	if fullDelta.X == 0 && fullDelta.Y == 0 && fullDelta.Z == 0 {
+		s.emitMotionEstimate(now, st, finalTarget, fullDelta, "", queuedLead)
 		s.emit(Event{Type: "ack", Seq: seq})
 		return
 	}
 
 	lastCmd := ""
-	if safeZEnabled {
+	if safeZEnabled && hasXYTarget {
 		plannedZ, ok := planned["z"]
 		if !ok || math.IsNaN(plannedZ) || math.IsInf(plannedZ, 0) {
 			s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine Z position is unavailable for safe tap move"})
@@ -742,16 +763,37 @@ func (s *Session) handleTarget(seq int64, xy machine.AxisValues, feedMMMin float
 			}
 		}
 	}
+	if safeZEnabled && hasXYTarget {
+		xyTarget := copyAxes(planned)
+		if x, ok := targetAxes["x"]; ok {
+			xyTarget["x"] = x
+		}
+		if y, ok := targetAxes["y"]; ok {
+			xyTarget["y"] = y
+		}
+		xyDelta := axesDelta(planned, xyTarget)
+		if xyDelta.X != 0 || xyDelta.Y != 0 {
+			var err error
+			planned, queuedUntil, queuedLead, lastCmd, err = s.writePlannedJogSegment(now, lease, planned, xyTarget, xyDelta, targetMoveDuration(xyDelta, feedMMMin, cfg), queuedUntil, cfg)
+			if err != nil {
+				s.failLease(CodeMachineError, err)
+				return
+			}
+		}
+	}
 
 	target := copyAxes(planned)
-	target["x"] = x
-	target["y"] = y
-	delta := Axes{X: target["x"] - planned["x"], Y: target["y"] - planned["y"]}
-	var err error
-	_, queuedUntil, queuedLead, lastCmd, err = s.writePlannedJogSegment(now, lease, planned, target, delta, targetJogDuration(delta, feedMMMin), queuedUntil, cfg)
-	if err != nil {
-		s.failLease(CodeMachineError, err)
-		return
+	for axis, value := range targetAxes {
+		target[axis] = value
+	}
+	delta := axesDelta(planned, target)
+	if delta.X != 0 || delta.Y != 0 || delta.Z != 0 {
+		var err error
+		_, queuedUntil, queuedLead, lastCmd, err = s.writePlannedJogSegment(now, lease, planned, target, delta, targetMoveDuration(delta, feedMMMin, cfg), queuedUntil, cfg)
+		if err != nil {
+			s.failLease(CodeMachineError, err)
+			return
+		}
 	}
 	s.emitMotionEstimate(now, st, target, delta, lastCmd, queuedLead)
 	s.emit(Event{Type: "ack", Seq: seq})
@@ -1110,11 +1152,14 @@ func stepDelta(axis string, distance float64) (Axes, error) {
 	}
 }
 
-func originCommand(axis string) (string, error) {
+func originCommand(axis string, value float64) (string, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return "", fmt.Errorf("origin value must be finite")
+	}
 	axis = strings.ToLower(strings.TrimSpace(axis))
 	switch axis {
 	case "x", "y", "z":
-		return "G10L20P0" + strings.ToUpper(axis) + "0", nil
+		return fmt.Sprintf("G10L20P0%s%.4f", strings.ToUpper(axis), value), nil
 	default:
 		return "", fmt.Errorf("axis must be one of: x, y, z")
 	}
@@ -1141,12 +1186,32 @@ func stepJogDuration(delta Axes, cfg Config) time.Duration {
 	return d
 }
 
-func targetJogDuration(delta Axes, feedMMMin float64) time.Duration {
+func axesDelta(from, target machine.AxisValues) Axes {
+	return Axes{
+		X: target["x"] - from["x"],
+		Y: target["y"] - from["y"],
+		Z: target["z"] - from["z"],
+	}
+}
+
+func targetMoveDuration(delta Axes, feedMMMin float64, cfg Config) time.Duration {
+	cfg = cfg.normalize()
 	xyDist := math.Hypot(delta.X, delta.Y)
-	if xyDist == 0 || feedMMMin <= 0 {
+	zDist := math.Abs(delta.Z)
+	mins := 0.0
+	if xyDist > 0 && feedMMMin > 0 {
+		mins = xyDist / feedMMMin
+	}
+	if zDist > 0 && cfg.MaxZMMMin > 0 {
+		zMins := zDist / cfg.MaxZMMMin
+		if zMins > mins {
+			mins = zMins
+		}
+	}
+	if mins <= 0 {
 		return minJogSegment
 	}
-	d := time.Duration((xyDist / feedMMMin) * float64(time.Minute))
+	d := time.Duration(mins * float64(time.Minute))
 	if d < minJogSegment {
 		return minJogSegment
 	}

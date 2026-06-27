@@ -378,6 +378,80 @@ func TestJogTargetMovesToSafeZBeforeXY(t *testing.T) {
 	t.Fatalf("safe Z target did not emit two jog commands: %v", fm.Gcodes())
 }
 
+func TestJogTargetFeedIsNotCappedByContinuousJogLimit(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.MaxXYMMMin = 1200
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Target(2, machine.AxisValues{"x": 10}, 3000, false, 0)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range fm.Gcodes() {
+			if strings.Contains(line, "X10.0000") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("high-feed target did not reach fake machine: %v", fm.Gcodes())
+}
+
+func TestJogTargetMovesXYZWithSafeZSequence(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	status := "<Idle|MPos:0,0,-5|WPos:0,0,-5>"
+	fm.SetStatus(status)
+	if !mgr.arb.Tracker().ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Target(2, machine.AxisValues{"x": 10, "y": -5, "z": -2}, 600, true, 0)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		gcodes := fm.Gcodes()
+		if len(gcodes) >= 3 {
+			if !strings.Contains(gcodes[0], "Z5.0000") {
+				t.Fatalf("first target command = %q, want safe Z lift; all=%v", gcodes[0], gcodes)
+			}
+			if !strings.Contains(gcodes[1], "X10.0000") || !strings.Contains(gcodes[1], "Y-5.0000") || strings.Contains(gcodes[1], "Z") {
+				t.Fatalf("second target command = %q, want XY only; all=%v", gcodes[1], gcodes)
+			}
+			if !strings.Contains(gcodes[2], "Z-2.0000") {
+				t.Fatalf("third target command = %q, want final Z; all=%v", gcodes[2], gcodes)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("safe XYZ target did not emit three jog commands: %v", fm.Gcodes())
+}
+
 func TestJogSetOriginSendsControllerCommand(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
@@ -391,7 +465,7 @@ func TestJogSetOriginSendsControllerCommand(t *testing.T) {
 	s.Arm(1)
 	drainUntil(t, s, "ack")
 
-	s.SetOrigin(2, "z")
+	s.SetOrigin(2, "z", 0)
 	ack := drainUntil(t, s, "ack")
 	if ack.Seq != 2 {
 		t.Fatalf("origin ack = %+v, want seq 2", ack)
@@ -399,7 +473,7 @@ func TestJogSetOriginSendsControllerCommand(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range fm.Gcodes() {
-			if line == "G10L20P0Z0" {
+			if line == "G10L20P0Z0.0000" {
 				return
 			}
 		}

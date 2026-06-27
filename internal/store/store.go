@@ -931,7 +931,7 @@ func normalizeUISettings(in UISettings, now time.Time) UISettings {
 	if out.Log.Filter == "" {
 		out.Log.Filter = "all"
 	}
-	out.Machine = normalizeMachineUI(in.Machine)
+	out.Machine = normalizeMachineUI(in.Machine, now)
 	seenMacros := map[string]bool{}
 	for i, m := range in.Macros {
 		if m.ID == "" {
@@ -1001,15 +1001,25 @@ func defaultMachineUI() MachineUI {
 			YMax: 0,
 		},
 		Origin:       XYPoint{X: 0, Y: 0},
+		SavedOrigins: []SavedOrigin{},
+		FeedMinMMMin: 1,
+		FeedMaxMMMin: 3000,
 		TapFeedMMMin: 600,
 		SafeZMM:      0,
 	}
 }
 
-func normalizeMachineUI(in MachineUI) MachineUI {
+func normalizeMachineUI(in MachineUI, now time.Time) MachineUI {
 	d := defaultMachineUI()
+	learned := normalizeMachineLearned(in.Learned)
+	hasLearnedWorkArea := learned.WorkArea.XMin < learned.WorkArea.XMax && learned.WorkArea.YMin < learned.WorkArea.YMax
 	if in.WorkArea.XMin == -302 && in.WorkArea.XMax == 0 && in.WorkArea.YMin == -212 && in.WorkArea.YMax == 0 && in.Origin.X == 0 && in.Origin.Y == 0 {
-		in.WorkArea = d.WorkArea
+		if !hasLearnedWorkArea {
+			in.WorkArea = d.WorkArea
+		}
+	}
+	if in.FeedMinMMMin == 1 && in.FeedMaxMMMin == 1200 && in.TapFeedMMMin == 600 {
+		in.FeedMaxMMMin = d.FeedMaxMMMin
 	}
 	out := MachineUI{
 		WorkArea: WorkArea{
@@ -1022,9 +1032,13 @@ func normalizeMachineUI(in MachineUI) MachineUI {
 			X: normalizeFinite(in.Origin.X, d.Origin.X),
 			Y: normalizeFinite(in.Origin.Y, d.Origin.Y),
 		},
+		FeedMinMMMin:  normalizeFinite(in.FeedMinMMMin, d.FeedMinMMMin),
+		FeedMaxMMMin:  normalizeFinite(in.FeedMaxMMMin, d.FeedMaxMMMin),
 		TapFeedMMMin:  normalizeFinite(in.TapFeedMMMin, d.TapFeedMMMin),
 		SafeZMM:       normalizeFinite(in.SafeZMM, d.SafeZMM),
 		SafeZDisabled: in.SafeZDisabled,
+		SavedOrigins:  normalizeSavedOrigins(in.SavedOrigins, now),
+		Learned:       learned,
 	}
 	if out.WorkArea.XMin >= out.WorkArea.XMax {
 		out.WorkArea.XMin = d.WorkArea.XMin
@@ -1034,8 +1048,249 @@ func normalizeMachineUI(in MachineUI) MachineUI {
 		out.WorkArea.YMin = d.WorkArea.YMin
 		out.WorkArea.YMax = d.WorkArea.YMax
 	}
+	if out.FeedMinMMMin <= 0 {
+		out.FeedMinMMMin = d.FeedMinMMMin
+	}
+	if out.FeedMaxMMMin <= 0 {
+		out.FeedMaxMMMin = d.FeedMaxMMMin
+	}
+	if out.FeedMinMMMin > out.FeedMaxMMMin {
+		out.FeedMinMMMin = d.FeedMinMMMin
+		out.FeedMaxMMMin = d.FeedMaxMMMin
+	}
 	if out.TapFeedMMMin <= 0 {
 		out.TapFeedMMMin = d.TapFeedMMMin
+	}
+	if out.TapFeedMMMin < out.FeedMinMMMin {
+		out.TapFeedMMMin = out.FeedMinMMMin
+	}
+	if out.TapFeedMMMin > out.FeedMaxMMMin {
+		out.TapFeedMMMin = out.FeedMaxMMMin
+	}
+	return out
+}
+
+func normalizeMachineLearned(in MachineLearned) MachineLearned {
+	out := MachineLearned{
+		LearnedAt:   in.LearnedAt,
+		Source:      strings.TrimSpace(in.Source),
+		Identity:    in.Identity,
+		WorkArea:    normalizeLearnedWorkArea(in.WorkArea),
+		ZMinMM:      normalizeFinite(in.ZMinMM, 0),
+		ZMaxMM:      normalizeFinite(in.ZMaxMM, 0),
+		AMin:        normalizeFinite(in.AMin, 0),
+		AMax:        normalizeFinite(in.AMax, 0),
+		CMin:        normalizeFinite(in.CMin, 0),
+		CMax:        normalizeFinite(in.CMax, 0),
+		Feed:        normalizeMachineFeedProfile(in.Feed),
+		SoftEndstop: normalizeMachineSoftEndstopProfile(in.SoftEndstop),
+		Clearance:   normalizeMachineClearanceProfile(in.Clearance),
+		Probe:       normalizeMachineProbeProfile(in.Probe),
+		RawDiagnose: strings.TrimSpace(in.RawDiagnose),
+	}
+	out.Identity.Model = strings.TrimSpace(out.Identity.Model)
+	out.Identity.Version = strings.TrimSpace(out.Identity.Version)
+	out.Identity.FileType = strings.TrimSpace(out.Identity.FileType)
+	out.Config = normalizeMachineConfigMap(in.Config)
+	out.ConfigNumbers = normalizeMachineNumberMap(in.ConfigNumbers)
+	out.ConfigBools = normalizeMachineBoolMap(in.ConfigBools)
+	out.Diagnostics = normalizeMachineDiagnostics(in.Diagnostics)
+	if out.RawDiagnose != "" && len(out.RawDiagnose) > 2000 {
+		out.RawDiagnose = out.RawDiagnose[:2000]
+	}
+	return out
+}
+
+func normalizeLearnedWorkArea(in WorkArea) WorkArea {
+	out := WorkArea{
+		XMin: normalizeFinite(in.XMin, 0),
+		XMax: normalizeFinite(in.XMax, 0),
+		YMin: normalizeFinite(in.YMin, 0),
+		YMax: normalizeFinite(in.YMax, 0),
+	}
+	if out.XMin >= out.XMax || out.YMin >= out.YMax {
+		return WorkArea{}
+	}
+	return out
+}
+
+func normalizeMachineFeedProfile(in MachineFeedProfile) MachineFeedProfile {
+	return MachineFeedProfile{
+		DefaultMMMin: normalizeFinite(in.DefaultMMMin, 0),
+		SeekMMMin:    normalizeFinite(in.SeekMMMin, 0),
+		XMaxMMMin:    normalizeFinite(in.XMaxMMMin, 0),
+		YMaxMMMin:    normalizeFinite(in.YMaxMMMin, 0),
+		ZMaxMMMin:    normalizeFinite(in.ZMaxMMMin, 0),
+		AMax:         normalizeFinite(in.AMax, 0),
+		ATCMaxMMMin:  normalizeFinite(in.ATCMaxMMMin, 0),
+		MaxXYMMMin:   normalizeFinite(in.MaxXYMMMin, 0),
+	}
+}
+
+func normalizeMachineSoftEndstopProfile(in MachineSoftEndstopProfile) MachineSoftEndstopProfile {
+	return MachineSoftEndstopProfile{
+		Enabled: in.Enabled,
+		XMin:    normalizeFinite(in.XMin, 0),
+		YMin:    normalizeFinite(in.YMin, 0),
+		ZMin:    normalizeFinite(in.ZMin, 0),
+	}
+}
+
+func normalizeMachineClearanceProfile(in MachineClearanceProfile) MachineClearanceProfile {
+	return MachineClearanceProfile{
+		X: normalizeFinite(in.X, 0),
+		Y: normalizeFinite(in.Y, 0),
+		Z: normalizeFinite(in.Z, 0),
+	}
+}
+
+func normalizeMachineProbeProfile(in MachineProbeProfile) MachineProbeProfile {
+	return MachineProbeProfile{
+		FastRateMMMin: normalizeFinite(in.FastRateMMMin, 0),
+		SlowRateMMMin: normalizeFinite(in.SlowRateMMMin, 0),
+		RetractMM:     normalizeFinite(in.RetractMM, 0),
+	}
+}
+
+func normalizeMachineConfigMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	keys := sortedMapKeys(in)
+	out := make(map[string]string, min(len(keys), 512))
+	for _, key := range keys {
+		if len(out) >= 512 {
+			break
+		}
+		k := strings.TrimSpace(key)
+		if k == "" || len(k) > 160 {
+			continue
+		}
+		v := strings.TrimSpace(in[key])
+		if len(v) > 1000 {
+			v = v[:1000]
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeMachineNumberMap(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	keys := sortedMapKeys(in)
+	out := make(map[string]float64, min(len(keys), 512))
+	for _, key := range keys {
+		if len(out) >= 512 {
+			break
+		}
+		k := strings.TrimSpace(key)
+		if k == "" || len(k) > 160 {
+			continue
+		}
+		v := in[key]
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeMachineBoolMap(in map[string]bool) map[string]bool {
+	if len(in) == 0 {
+		return nil
+	}
+	keys := sortedMapKeys(in)
+	out := make(map[string]bool, min(len(keys), 512))
+	for _, key := range keys {
+		if len(out) >= 512 {
+			break
+		}
+		k := strings.TrimSpace(key)
+		if k == "" || len(k) > 160 {
+			continue
+		}
+		out[k] = in[key]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeMachineDiagnostics(in map[string][]float64) map[string][]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	keys := sortedMapKeys(in)
+	out := make(map[string][]float64, min(len(keys), 128))
+	for _, key := range keys {
+		if len(out) >= 128 {
+			break
+		}
+		k := strings.TrimSpace(key)
+		if k == "" || len(k) > 32 {
+			continue
+		}
+		vals := make([]float64, 0, min(len(in[key]), 32))
+		for _, v := range in[key] {
+			if len(vals) >= 32 {
+				break
+			}
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				continue
+			}
+			vals = append(vals, v)
+		}
+		if len(vals) > 0 {
+			out[k] = vals
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sortedMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func normalizeSavedOrigins(in []SavedOrigin, now time.Time) []SavedOrigin {
+	out := []SavedOrigin{}
+	seen := map[string]bool{}
+	for i, origin := range in {
+		if origin.ID == "" {
+			origin.ID = fmt.Sprintf("origin-%d", i+1)
+		}
+		if seen[origin.ID] {
+			continue
+		}
+		origin.Label = strings.TrimSpace(origin.Label)
+		if origin.Label == "" {
+			continue
+		}
+		if math.IsNaN(origin.Origin.X) || math.IsInf(origin.Origin.X, 0) || math.IsNaN(origin.Origin.Y) || math.IsInf(origin.Origin.Y, 0) {
+			continue
+		}
+		if origin.CreatedAt.IsZero() {
+			origin.CreatedAt = now
+		}
+		seen[origin.ID] = true
+		out = append(out, origin)
 	}
 	return out
 }
@@ -1152,6 +1407,11 @@ func copyUISettings(in UISettings) UISettings {
 	if out.MacroButtons == nil {
 		out.MacroButtons = []MacroSlot{}
 	}
+	out.Machine.SavedOrigins = append([]SavedOrigin(nil), in.Machine.SavedOrigins...)
+	if out.Machine.SavedOrigins == nil {
+		out.Machine.SavedOrigins = []SavedOrigin{}
+	}
+	out.Machine.Learned = copyMachineLearned(in.Machine.Learned)
 	out.Gamepad.SlowButtons = append([]int(nil), in.Gamepad.SlowButtons...)
 	if out.Gamepad.SlowButtons == nil {
 		out.Gamepad.SlowButtons = []int{}
@@ -1159,6 +1419,59 @@ func copyUISettings(in UISettings) UISettings {
 	out.Gamepad.MacroButtons = append([]GamepadMacroButton(nil), in.Gamepad.MacroButtons...)
 	if out.Gamepad.MacroButtons == nil {
 		out.Gamepad.MacroButtons = []GamepadMacroButton{}
+	}
+	return out
+}
+
+func copyMachineLearned(in MachineLearned) MachineLearned {
+	out := in
+	out.Config = copyStringMap(in.Config)
+	out.ConfigNumbers = copyFloatMap(in.ConfigNumbers)
+	out.ConfigBools = copyBoolMap(in.ConfigBools)
+	out.Diagnostics = copyFloatSliceMap(in.Diagnostics)
+	return out
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func copyFloatMap(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func copyBoolMap(in map[string]bool) map[string]bool {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func copyFloatSliceMap(in map[string][]float64) map[string][]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]float64, len(in))
+	for k, v := range in {
+		out[k] = append([]float64(nil), v...)
 	}
 	return out
 }
