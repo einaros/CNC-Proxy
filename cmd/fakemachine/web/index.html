@@ -59,6 +59,10 @@
   #view-controls #model-button { min-width: 118px; border-color: rgba(88,184,216,.55); background: rgba(88,184,216,.13); font-weight: 650; }
   #view-controls #laser-toggle { min-width: 58px; }
   #view-controls #laser-toggle[aria-pressed="true"] { border-color: rgba(228,100,95,.62); background: rgba(228,100,95,.16); color: #fff; }
+  #view-controls #laser-toggle[data-source="controller"] { border-color: rgba(228,100,95,.82); box-shadow: inset 0 0 0 1px rgba(228,100,95,.26); }
+  #laser-status { flex: 0 0 74px; width: 74px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  #laser-status[data-kind="on"] { color: var(--red); }
+  #laser-status[data-kind="controller"] { color: var(--orange); }
   #view-controls button:disabled, #tool-panel button:disabled, #tool-panel select:disabled, #tool-panel input:disabled { opacity: .52; cursor: not-allowed; }
   #view-controls [aria-busy="true"], #tool-panel [aria-busy="true"] { cursor: progress; }
   #view-controls button:hover, #tool-panel button:hover { border-color: var(--cyan); }
@@ -67,6 +71,7 @@
   #insert-tool-status, #tool-calibration-status { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   #tool-calibration-status.calibrated { color: var(--green); }
   #tool-calibration-status.uncalibrated { color: var(--orange); }
+  #tool-calibration-status.mismatch { color: var(--red); }
   #tool-panel { left: 12px; top: 76px; width: 360px; display: grid; gap: 8px; padding: 10px; pointer-events: auto; }
   .tool-title { color: var(--muted); font-size: 11px; line-height: 1.2; text-transform: uppercase; letter-spacing: .04em; }
   .tool-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; min-width: 0; }
@@ -142,6 +147,7 @@
       <button id="model-button" type="button">Upload model</button>
       <span id="model-status" aria-live="polite">no model</span>
       <button id="laser-toggle" type="button" aria-pressed="false">Laser</button>
+      <span id="laser-status" data-kind="off" aria-live="polite">off</span>
       <button id="view-iso" type="button">ISO</button>
       <button id="view-top" type="button">TOP</button>
       <button id="view-front" type="button">FRONT</button>
@@ -203,7 +209,7 @@
     <span class="key"><span class="swatch xstage"></span>X carriage</span>
     <span class="key"><span class="swatch green"></span>X/Z spindle</span>
     <span class="key"><span class="swatch"></span>path</span>
-    <span class="key"><span class="swatch blue"></span>tool Z0</span>
+    <span class="key"><span class="swatch blue"></span>tool contact plane</span>
     <span class="key"><span class="swatch orange"></span>queued motion</span>
     <span class="key"><span class="swatch magenta"></span>control</span>
     <span class="key"><span class="swatch red"></span>tool laser</span>

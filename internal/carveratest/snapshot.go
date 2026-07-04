@@ -92,20 +92,23 @@ type SnapshotProbeResult struct {
 }
 
 type SnapshotInsertedTool struct {
-	Kind               string     `json:"kind"`
-	Label              string     `json:"label"`
-	ToolID             int        `json:"tool_id"`
-	DiameterMM         float64    `json:"diameter_mm"`
-	StickoutMM         float64    `json:"stickout_mm"`
-	MinStickoutMM      float64    `json:"min_stickout_mm"`
-	MaxStickoutMM      float64    `json:"max_stickout_mm"`
-	CalibrationMZ      float64    `json:"calibration_mz"`
-	Probe              bool       `json:"probe"`
-	SpindleLocked      bool       `json:"spindle_locked"`
-	Calibrated         bool       `json:"calibrated"`
-	CalibratedAt       *time.Time `json:"calibrated_at,omitempty"`
-	CalibratedMZ       float64    `json:"calibrated_mz"`
-	CalibratedOffsetMM float64    `json:"calibrated_offset_mm"`
+	Kind                 string     `json:"kind"`
+	Label                string     `json:"label"`
+	ToolID               int        `json:"tool_id"`
+	FirmwareToolID       int        `json:"firmware_tool_id"`
+	FirmwareTargetToolID *int       `json:"firmware_target_tool_id,omitempty"`
+	MatchesFirmwareTool  bool       `json:"matches_firmware_tool"`
+	DiameterMM           float64    `json:"diameter_mm"`
+	StickoutMM           float64    `json:"stickout_mm"`
+	MinStickoutMM        float64    `json:"min_stickout_mm"`
+	MaxStickoutMM        float64    `json:"max_stickout_mm"`
+	CalibrationMZ        float64    `json:"calibration_mz"`
+	Probe                bool       `json:"probe"`
+	SpindleLocked        bool       `json:"spindle_locked"`
+	Calibrated           bool       `json:"calibrated"`
+	CalibratedAt         *time.Time `json:"calibrated_at,omitempty"`
+	CalibratedMZ         float64    `json:"calibrated_mz"`
+	CalibratedOffsetMM   float64    `json:"calibrated_offset_mm"`
 }
 
 type SnapshotMachineProfile struct {

@@ -1,5 +1,17 @@
 import * as THREE from "/three.module.min.js";
 import { GLTFLoader } from "/loaders/GLTFLoader.js";
+import {
+  carriageXTranslation,
+  hasToolTip,
+  sceneYCoord as geometrySceneYCoord,
+  spindleZTranslation,
+  tableScenePoint,
+  tableYTranslation,
+  toolLaserGeometry,
+  toolStickout as geometryToolStickout,
+  toolTipTableY,
+  workOriginMachinePoint,
+} from "/geometry.mjs";
 
 const AXIS = ["x", "y", "z", "a", "b", "c"];
 const stateEl = document.getElementById("state");
@@ -28,6 +40,7 @@ const modelFileEl = document.getElementById("model-file");
 const modelButtonEl = document.getElementById("model-button");
 const modelStatusEl = document.getElementById("model-status");
 const laserToggleButtonEl = document.getElementById("laser-toggle");
+const laserStatusEl = document.getElementById("laser-status");
 const canvas = document.getElementById("scene");
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
@@ -279,14 +292,12 @@ function roundGridValue(v) {
 }
 
 function tableVec(vals, profile = currentProfile) {
-  const x = number(vals?.x);
-  const y = number(vals?.y);
-  const z = number(vals?.z);
-  return new THREE.Vector3(x, z - profile.zMin, sceneYCoord(y));
+  const p = tableScenePoint(vals, profile);
+  return new THREE.Vector3(p.x, p.y, p.z);
 }
 
 function sceneYCoord(machineY) {
-  return -machineY;
+  return geometrySceneYCoord(machineY);
 }
 
 function machinePoint(vals) {
@@ -294,14 +305,6 @@ function machinePoint(vals) {
     x: number(vals?.x),
     y: number(vals?.y),
     z: number(vals?.z),
-  };
-}
-
-function visualWorkOffset(point, wpos, tool) {
-  return {
-    x: point.x - number(wpos.x),
-    y: point.y - number(wpos.y),
-    z: point.z - number(wpos.z) - toolStickout(tool),
   };
 }
 
@@ -344,7 +347,7 @@ function updateSnapshot(snap) {
   }
   updateHUD(snap);
   updateInsertedTool(snap.inserted_tool);
-  updateLaserToggle();
+  updateLaserToggle(snap);
   updateMachine(snap);
   updateProbeModel(snap);
 }
@@ -395,7 +398,7 @@ function updateHUD(snap) {
 function updateToolControls(tool, preserveStatus = false) {
   const hasTool = Boolean(tool);
   if (!preserveStatus) {
-    insertToolStatusEl.textContent = tool ? `${tool.label} / ${fmt1(tool.stickout_mm)} mm` : "no tool inserted";
+    insertToolStatusEl.textContent = tool ? insertedToolLabel(tool) : "no tool inserted";
   }
 
   toolLockButtonEl.disabled = !hasTool;
@@ -420,15 +423,26 @@ function updateToolControls(tool, preserveStatus = false) {
     toolDepthValueEl.value = String(val);
   }
 
-  toolCalibrationStatusEl.classList.toggle("calibrated", Boolean(tool?.calibrated));
-  toolCalibrationStatusEl.classList.toggle("uncalibrated", !tool?.calibrated);
+  const mismatched = hasTool && tool.matches_firmware_tool === false;
+  toolCalibrationStatusEl.classList.toggle("calibrated", Boolean(tool?.calibrated) && !mismatched);
+  toolCalibrationStatusEl.classList.toggle("uncalibrated", !tool?.calibrated && !mismatched);
+  toolCalibrationStatusEl.classList.toggle("mismatch", mismatched);
   if (!hasTool) {
     toolCalibrationStatusEl.textContent = "-";
+  } else if (mismatched) {
+    const requested = Number.isFinite(tool.firmware_target_tool_id) ? tool.firmware_target_tool_id : tool.firmware_tool_id;
+    toolCalibrationStatusEl.textContent = `wrong tool / T${requested}`;
   } else if (tool.calibrated) {
     toolCalibrationStatusEl.textContent = `calibrated / TLO ${fmt(tool.calibrated_offset_mm)}`;
   } else {
     toolCalibrationStatusEl.textContent = "uncalibrated";
   }
+}
+
+function insertedToolLabel(tool) {
+  const mismatch = tool?.matches_firmware_tool === false;
+  const suffix = mismatch ? " / mismatch" : "";
+  return `${tool.label} / ${fmt1(tool.stickout_mm)} mm${suffix}`;
 }
 
 function item(name, sub) {
@@ -473,14 +487,17 @@ function updateMachine(snap) {
   const wpos = status.wpos || {};
   const point = machinePoint(mpos);
 
-  parts.tableStage.position.z = point.y;
-  parts.xCarriage.position.x = point.x;
-  parts.zAssembly.position.y = point.z;
+  parts.tableStage.position.z = tableYTranslation(point);
+  parts.xCarriage.position.x = carriageXTranslation(point);
+  parts.zAssembly.position.y = spindleZTranslation(point);
   updateToolLaser(snap, point);
 
-  const wco = visualWorkOffset(point, wpos, snap.inserted_tool);
+  const wco = workOriginMachinePoint(point, wpos);
   parts.workOrigin.position.copy(tableVec(wco));
-  parts.workPlane.position.y = wco.z - currentProfile.zMin;
+  parts.workPlane.visible = hasToolTip(snap.inserted_tool);
+  if (parts.workPlane.visible) {
+    parts.workPlane.position.y = toolTipTableY(point, snap.inserted_tool, currentProfile);
+  }
 
   if (!lastTrailPoint || distanceMachinePoint(lastTrailPoint, point) > 0.08) {
     trail.push({ ...point });
@@ -493,19 +510,11 @@ function updateMachine(snap) {
 
 function updateToolLaser(snap, point) {
   if (!parts?.laserBeam) return;
-  const active = toolLaserEnabled || Boolean(snap.probe_laser_active);
-  parts.laserBeam.visible = active;
-  if (!active) return;
-  const startY = toolLaserTipY(snap.inserted_tool);
-  let endY = currentProfile.zMin - point.z;
-  if (endY >= startY) endY = startY - 1;
-  const length = Math.max(1, startY - endY);
-  parts.laserBeam.position.y = (startY + endY) / 2;
-  parts.laserBeam.scale.set(1, length, 1);
-}
-
-function toolLaserTipY(tool) {
-  return tool ? -toolStickout(tool) : 0;
+  const geometry = toolLaserGeometry(point, snap.inserted_tool, currentProfile, toolLaserEnabled, snap.probe_laser_active);
+  parts.laserBeam.visible = geometry.visible;
+  if (!geometry.visible) return;
+  parts.laserBeam.position.y = geometry.positionY;
+  parts.laserBeam.scale.set(1, geometry.scaleY, 1);
 }
 
 async function updateProbeModel(snap) {
@@ -597,7 +606,7 @@ function updateInsertedTool(tool) {
 }
 
 function toolStickout(tool) {
-  return tool ? Math.max(6, positive(tool.stickout_mm, 24)) : 0;
+  return geometryToolStickout(tool);
 }
 
 function loadSpindleModel(root) {
@@ -771,13 +780,39 @@ canvas.addEventListener("wheel", (event) => {
 }, { passive: false });
 
 laserToggleButtonEl.addEventListener("click", () => {
+  if (laserToggleButtonEl.disabled) return;
   toolLaserEnabled = !toolLaserEnabled;
-  updateLaserToggle();
+  updateLaserToggle(latest);
   if (latest) updateMachine(latest);
 });
 
-function updateLaserToggle() {
-  laserToggleButtonEl.setAttribute("aria-pressed", toolLaserEnabled ? "true" : "false");
+function updateLaserToggle(snap = latest) {
+  const tool = snap?.inserted_tool;
+  const geometry = toolLaserGeometry(machinePoint(snap?.status?.mpos), tool, currentProfile, toolLaserEnabled, snap?.probe_laser_active);
+  if (!geometry.hasTip) {
+    toolLaserEnabled = false;
+    laserToggleButtonEl.disabled = true;
+    laserToggleButtonEl.setAttribute("aria-pressed", "false");
+    laserToggleButtonEl.dataset.source = "none";
+    laserToggleButtonEl.title = "Insert a tool to show the tool laser";
+    laserToggleButtonEl.setAttribute("aria-label", "Tool laser unavailable: no inserted tool");
+    updateLaserStatus("no tool", "off");
+    return;
+  }
+  laserToggleButtonEl.disabled = false;
+  laserToggleButtonEl.setAttribute("aria-pressed", geometry.visible ? "true" : "false");
+  laserToggleButtonEl.dataset.source = geometry.source;
+  const label = geometry.source === "controller" ? "Tool laser active from controller" :
+    geometry.source === "local" ? "Tool laser on" : "Tool laser off";
+  laserToggleButtonEl.title = label;
+  laserToggleButtonEl.setAttribute("aria-label", label);
+  updateLaserStatus(geometry.source === "controller" ? "controller" : (geometry.source === "local" ? "on" : "off"), geometry.source);
+}
+
+function updateLaserStatus(text, kind) {
+  if (!laserStatusEl) return;
+  laserStatusEl.textContent = text;
+  laserStatusEl.dataset.kind = kind || "off";
 }
 
 insertToolButtonEl.addEventListener("click", async () => {

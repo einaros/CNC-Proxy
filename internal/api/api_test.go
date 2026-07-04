@@ -738,10 +738,13 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing %s", want)
 		}
 	}
-	for _, want := range []string{`const waitingForTool = state.machine?.state === "Tool"`, `tool-wait-row`, `tool-wait-status`, `cal.disabled = pending || waitingForTool`, `change.disabled = pending || waitingForTool`, `set.disabled = pending || waitingForTool`, `cont.disabled = pending || !waitingForTool`} {
+	for _, want := range []string{`function renderToolActions`, `const waitingForTool = m.state === "Tool"`, `tool-wait-row`, `tool-wait-status`, `cal.disabled = pending || waitingForTool`, `change.disabled = pending || waitingForTool`, `set.disabled = pending || waitingForTool`, `cont.disabled = pending || !waitingForTool`, `setElementBusy(cont, pendingAction === "continue")`} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing tool wait-state UI policy %s", want)
 		}
+	}
+	if strings.Contains(string(jsBody), "function setToolContinueAvailability") || strings.Contains(string(jsBody), "function setToolButtonsPending") {
+		t.Errorf("app.js still has split tool action state ownership")
 	}
 	if strings.Contains(string(jsBody), "renderStatusFields") {
 		t.Errorf("app.js still contains removed status details renderer")

@@ -925,7 +925,7 @@ function renderToolStatus(m) {
   setText("tool-active-status", active + target);
   setText("tool-tlo-status", tlo);
   setText("tool-wp-status", Number.isFinite(wp) ? wp.toFixed(2) + "v" : "-");
-  setToolContinueAvailability(m);
+  renderToolActions(m);
 }
 
 function renderAlarmPanel(m) {
@@ -4077,7 +4077,7 @@ async function setCurrentTool(toolID = null) {
     return;
   }
   state.toolPending = "set";
-  setToolButtonsPending(true);
+  renderToolActions();
   setToolFeedback("Sending set-tool command for " + toolDisplayName(toolID) + "...", "");
   try {
     const r = await request("/api/tool/current", {
@@ -4088,14 +4088,14 @@ async function setCurrentTool(toolID = null) {
     const result = await r.json();
     setToolFeedback(result.message || "Set-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
     resetToolSelects();
-    pollMachine();
+    await pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Set-tool failed: " + e.message, "error");
   } finally {
     state.toolPending = "";
-    setToolButtonsPending(false);
+    renderToolActions();
   }
 }
 
@@ -4108,7 +4108,7 @@ async function changeTool(toolID = null) {
     return;
   }
   state.toolPending = "change";
-  setToolButtonsPending(true);
+  renderToolActions();
   setToolFeedback("Sending change-tool command for " + toolDisplayName(toolID) + "...", "");
   try {
     const r = await request("/api/tool/change", {
@@ -4119,56 +4119,67 @@ async function changeTool(toolID = null) {
     const result = await r.json();
     setToolFeedback(result.message || "Change-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
     resetToolSelects();
-    pollMachine();
+    await pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Change-tool failed: " + e.message, "error");
   } finally {
     state.toolPending = "";
-    setToolButtonsPending(false);
+    renderToolActions();
   }
 }
 
 async function continueToolChange() {
+  if (state.machine?.state !== "Tool") {
+    setToolFeedback("Continue is only available while the machine is awaiting a tool.", "error");
+    renderToolActions();
+    return;
+  }
   state.toolPending = "continue";
-  setToolButtonsPending(true);
+  renderToolActions();
   setToolFeedback("Continuing tool change...", "");
   try {
     const r = await request("/api/tool/continue", { method: "POST" });
     const result = await r.json();
     setToolFeedback(result.message || "Tool-change continue command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    pollMachine();
+    await pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Continue failed: " + e.message, "error");
   } finally {
     state.toolPending = "";
-    setToolButtonsPending(false);
+    renderToolActions();
   }
 }
 
 async function calibrateCurrentTool() {
   state.toolPending = "calibrate";
-  setToolButtonsPending(true);
+  renderToolActions();
   setToolFeedback("Sending calibration command...", "");
   try {
     const r = await request("/api/tool/calibrate", { method: "POST" });
     const result = await r.json();
     setToolFeedback(result.message || "Calibration command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    pollMachine();
+    await pollMachine();
     setTimeout(pollMachine, 1200);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Calibration failed: " + e.message, "error");
   } finally {
     state.toolPending = "";
-    setToolButtonsPending(false);
+    renderToolActions();
   }
 }
 
-function setToolButtonsPending(pending) {
+function setElementBusy(el, busy) {
+  if (!el) return;
+  if (busy) el.setAttribute("aria-busy", "true");
+  else el.removeAttribute("aria-busy");
+}
+
+function renderToolActions(m = state.machine || {}) {
   const set = document.getElementById("tool-set");
   const change = document.getElementById("tool-change-set");
   const cont = document.getElementById("tool-continue");
@@ -4177,26 +4188,37 @@ function setToolButtonsPending(pending) {
   const changeSelect = document.getElementById("tool-change-select");
   const setInput = document.getElementById("tool-id");
   const changeInput = document.getElementById("tool-change-id");
-  const waitingForTool = state.machine?.state === "Tool";
+  const pendingAction = state.toolPending || "";
+  const pending = !!pendingAction;
+  const waitingForTool = m.state === "Tool";
+  const row = document.getElementById("tool-wait-row");
+  const label = document.getElementById("tool-wait-status");
+  if (row) row.classList.toggle("is-waiting", waitingForTool);
+  if (label) label.textContent = waitingForTool ? "Awaiting tool" : "Tool change";
+
   if (setSelect) setSelect.disabled = pending || waitingForTool;
   if (changeSelect) changeSelect.disabled = pending || waitingForTool;
   if (setInput) setInput.disabled = pending || waitingForTool;
   if (changeInput) changeInput.disabled = pending || waitingForTool;
   if (set) {
     set.disabled = pending || waitingForTool;
-    set.textContent = pending && state.toolPending === "set" ? "Setting..." : "Set";
+    set.textContent = pendingAction === "set" ? "Setting..." : "Set";
+    setElementBusy(set, pendingAction === "set");
   }
   if (change) {
     change.disabled = pending || waitingForTool;
-    change.textContent = pending && state.toolPending === "change" ? "Changing..." : "Change";
+    change.textContent = pendingAction === "change" ? "Changing..." : "Change";
+    setElementBusy(change, pendingAction === "change");
   }
   if (cont) {
-    cont.textContent = pending && state.toolPending === "continue" ? "Continuing..." : "Continue";
+    cont.textContent = pendingAction === "continue" ? "Continuing..." : "Continue";
     cont.disabled = pending || !waitingForTool;
+    setElementBusy(cont, pendingAction === "continue");
   }
   if (cal) {
     cal.disabled = pending || waitingForTool;
-    cal.textContent = pending && state.toolPending === "calibrate" ? "Calibrating..." : "Calibrate";
+    cal.textContent = pendingAction === "calibrate" ? "Calibrating..." : "Calibrate";
+    setElementBusy(cal, pendingAction === "calibrate");
   }
 }
 
@@ -4215,31 +4237,6 @@ function clearToolFeedback() {
     local.textContent = "";
     local.className = "tool-action-status";
   }
-}
-
-function setToolContinueAvailability(m = state.machine || {}) {
-  const cont = document.getElementById("tool-continue");
-  const row = document.getElementById("tool-wait-row");
-  const label = document.getElementById("tool-wait-status");
-  const waitingForTool = m.state === "Tool";
-  if (row) row.classList.toggle("is-waiting", waitingForTool);
-  if (label) label.textContent = waitingForTool ? "Awaiting tool" : "Tool change";
-  if (!cont || state.toolPending) return;
-  cont.disabled = !waitingForTool;
-  const set = document.getElementById("tool-set");
-  const change = document.getElementById("tool-change-set");
-  const cal = document.getElementById("tool-calibrate");
-  const setSelect = document.getElementById("tool-set-select");
-  const changeSelect = document.getElementById("tool-change-select");
-  const setInput = document.getElementById("tool-id");
-  const changeInput = document.getElementById("tool-change-id");
-  if (set) set.disabled = waitingForTool;
-  if (change) change.disabled = waitingForTool;
-  if (cal) cal.disabled = waitingForTool;
-  if (setSelect) setSelect.disabled = waitingForTool;
-  if (changeSelect) changeSelect.disabled = waitingForTool;
-  if (setInput) setInput.disabled = waitingForTool;
-  if (changeInput) changeInput.disabled = waitingForTool;
 }
 
 function appendGcodeLine(ln) {

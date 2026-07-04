@@ -487,6 +487,45 @@ func TestFakeMachineToolChangeWaitsForContinueAndUpdatesTLO(t *testing.T) {
 	}
 }
 
+func TestFakeMachineToolChangeWrongPhysicalToolIsExplicitInSnapshot(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+
+	writeCtrlMulti(t, c, "M6T1\n")
+	if st := queryFakeStatus(t, c); st.State != machine.Tool || st.Tool == nil || st.Tool.Target == nil || *st.Tool.Target != 1 {
+		t.Fatalf("state after M6T1 = %+v, want Tool target 1", st)
+	}
+
+	inserted, err := m.InsertTool("tool_6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted.ToolID != 2 || inserted.MatchesFirmwareTool {
+		t.Fatalf("inserted mismatch = %+v, want physical T2 against target T1", inserted)
+	}
+	if inserted.FirmwareTargetToolID == nil || *inserted.FirmwareTargetToolID != 1 {
+		t.Fatalf("inserted target = %+v, want T1", inserted.FirmwareTargetToolID)
+	}
+
+	writeCtrlMulti(t, c, "M490.2\n")
+	st := queryFakeStatus(t, c)
+	if st.State != machine.Idle || st.Tool == nil || st.Tool.Active != 1 || st.Tool.Target != nil {
+		t.Fatalf("state after mismatched continue = %+v, want firmware active T1", st)
+	}
+	snap := m.Snapshot()
+	if snap.InsertedTool == nil || snap.InsertedTool.ToolID != 2 || snap.InsertedTool.FirmwareToolID != 1 || snap.InsertedTool.MatchesFirmwareTool {
+		t.Fatalf("snapshot mismatch = %+v, want physical T2 with firmware T1 mismatch", snap.InsertedTool)
+	}
+	if !snap.InsertedTool.Calibrated || math.Abs(snap.InsertedTool.CalibratedOffsetMM-st.Tool.Offset) > 0.001 {
+		t.Fatalf("snapshot calibration = %+v, want explicit calibrated physical tool and firmware TLO %.3f", snap.InsertedTool, st.Tool.Offset)
+	}
+}
+
 func TestFakeMachineProbeToolChangeWaitsWhenNoToolIsInserted(t *testing.T) {
 	m, err := New()
 	if err != nil {
@@ -665,6 +704,92 @@ func TestFakeMachineProbeHitsLoadedSTLAndTracksLaser(t *testing.T) {
 	waitForProbeLaser(t, m, false)
 }
 
+func TestFakeMachineProbeNoHitLoadedModelOutsideXY(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.LoadProbeModel("plate.stl", []byte(testPlaneSTL(-5))); err != nil {
+		t.Fatal(err)
+	}
+	m.SetStatus("<Idle|MPos:20,20,2|WPos:20,20,2|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+
+	writeCtrlMulti(t, c, "G38.2 Z-20 F100\n")
+	f := readFakeFrame(t, c)
+	if got := string(f.Data); f.Cmd != protocol.CmdNormalInfo || !strings.Contains(got, "[PRB:20.0000,20.0000,-20.0000:0]") {
+		t.Fatalf("probe no-hit reply cmd=%s data=%q", protocol.CmdName(f.Cmd), got)
+	}
+	st := queryFakeStatus(t, c)
+	assertAxis(t, st.MPos, "z", -20)
+	snap := m.Snapshot()
+	if snap.LastProbe == nil || snap.LastProbe.Hit || snap.LastProbe.Source != "" || math.Abs(snap.LastProbe.Machine.Z+20) > 0.001 {
+		t.Fatalf("last no-hit probe = %+v", snap.LastProbe)
+	}
+}
+
+func TestFakeMachineProbeChoosesNearestLoadedModelHit(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.LoadProbeModel("stack.stl", []byte(testStackedPlaneSTL(-8, -3))); err != nil {
+		t.Fatal(err)
+	}
+	m.SetStatus("<Idle|MPos:5,5,2|WPos:5,5,2|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+
+	writeCtrlMulti(t, c, "G38.2 Z-20 F100\n")
+	f := readFakeFrame(t, c)
+	if got := string(f.Data); f.Cmd != protocol.CmdNormalInfo || !strings.Contains(got, "[PRB:5.0000,5.0000,-3.0000:1]") {
+		t.Fatalf("nearest probe reply cmd=%s data=%q", protocol.CmdName(f.Cmd), got)
+	}
+	st := queryFakeStatus(t, c)
+	assertAxis(t, st.MPos, "z", -3)
+	snap := m.Snapshot()
+	if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != "stack.stl" || math.Abs(snap.LastProbe.Machine.Z+3) > 0.001 {
+		t.Fatalf("last nearest probe = %+v", snap.LastProbe)
+	}
+}
+
+func TestFakeMachineProbeHitsLoadedGLTFAndGLB(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "tri.gltf", data: testTriangleGLTF(t)},
+		{name: "tri.glb", data: testTriangleGLB(t)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err := m.LoadProbeModel(tc.name, tc.data); err != nil {
+				t.Fatal(err)
+			}
+			m.SetStatus("<Idle|MPos:0.25,0.25,2|WPos:0.25,0.25,2|C:2,4,0,1|T:0,0.000>")
+			c := dialFakeMachine(t, m)
+			defer c.Close()
+
+			writeCtrlMulti(t, c, "G38.2 Z-10 F100\n")
+			f := readFakeFrame(t, c)
+			if got := string(f.Data); f.Cmd != protocol.CmdNormalInfo || !strings.Contains(got, "[PRB:0.2500,0.2500,-4.0000:1]") {
+				t.Fatalf("probe reply cmd=%s data=%q", protocol.CmdName(f.Cmd), got)
+			}
+			snap := m.Snapshot()
+			if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != tc.name || math.Abs(snap.LastProbe.Machine.Z+4) > 0.001 {
+				t.Fatalf("last probe = %+v", snap.LastProbe)
+			}
+		})
+	}
+}
+
 func TestProbeModelParsesGLTFAndGLB(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -821,6 +946,30 @@ func testPlaneSTL(z float64) string {
 		"endfacet",
 		"endsolid plate",
 	}, "\n")
+}
+
+func testStackedPlaneSTL(zs ...float64) string {
+	lines := []string{"solid stack"}
+	for _, z := range zs {
+		lines = append(lines,
+			"facet normal 0 0 1",
+			"outer loop",
+			"vertex 0 0 "+strconvFloat(z),
+			"vertex 10 0 "+strconvFloat(z),
+			"vertex 10 10 "+strconvFloat(z),
+			"endloop",
+			"endfacet",
+			"facet normal 0 0 1",
+			"outer loop",
+			"vertex 0 0 "+strconvFloat(z),
+			"vertex 10 10 "+strconvFloat(z),
+			"vertex 0 10 "+strconvFloat(z),
+			"endloop",
+			"endfacet",
+		)
+	}
+	lines = append(lines, "endsolid stack")
+	return strings.Join(lines, "\n")
 }
 
 func testTriangleGLTF(t *testing.T) []byte {

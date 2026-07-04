@@ -17,7 +17,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/carveratest"
 )
 
-//go:embed web/index.html web/app.js web/loaders/GLTFLoader.js web/three.module.min.js web/utils/BufferGeometryUtils.js
+//go:embed web/index.html web/app.js web/geometry.mjs web/loaders/GLTFLoader.js web/three.module.min.js web/utils/BufferGeometryUtils.js
 var sidecarWeb embed.FS
 
 func startSidecar(addr string, m *carveratest.FakeMachine) (*http.Server, net.Listener, error) {
@@ -192,6 +192,7 @@ func sidecarHandler(m *carveratest.FakeMachine) http.Handler {
 	})
 	mux.Handle("/assets/", noStoreHandler(http.StripPrefix("/assets/", http.FileServer(http.FS(staticassets.FS)))))
 	mux.Handle("/app.js", noStoreHandler(files))
+	mux.Handle("/geometry.mjs", noStoreHandler(files))
 	mux.Handle("/loaders/", noStoreHandler(files))
 	mux.Handle("/three.module.min.js", noStoreHandler(files))
 	mux.Handle("/utils/", noStoreHandler(files))

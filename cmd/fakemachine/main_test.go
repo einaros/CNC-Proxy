@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -58,12 +59,12 @@ func TestSidecarServesSnapshotAndAssets(t *testing.T) {
 		t.Fatalf("index status=%d body=%q", asset.StatusCode, string(body[:min(len(body), 80)]))
 	}
 	index := string(body)
-	for _, want := range []string{"tool Z0", `id="laser-toggle"`, `aria-pressed="false"`, "tool laser"} {
+	for _, want := range []string{"tool contact plane", `id="laser-toggle"`, `id="laser-status"`, `aria-pressed="false"`, "tool laser"} {
 		if !strings.Contains(index, want) {
 			t.Fatalf("sidecar index missing legend marker %q", want)
 		}
 	}
-	for _, gone := range []string{"work zero", "WCS Z0", "tool tip", ".swatch.tip", "--tip", "probe laser"} {
+	for _, gone := range []string{"work zero", "WCS Z0", ".swatch.tip", "--tip", "probe laser"} {
 		if strings.Contains(index, gone) {
 			t.Fatalf("sidecar index still contains obsolete legend marker %q", gone)
 		}
@@ -82,16 +83,21 @@ func TestSidecarServesSnapshotAndAssets(t *testing.T) {
 		"profile.workYMax, 1, 0.34, mat.tableGridMinor",
 		"profile.workYMax, 10, 0.38, mat.tableGridMajor",
 		"function steppedGridValues",
-		"function visualWorkOffset(point, wpos, tool)",
-		"z: point.z - number(wpos.z) - toolStickout(tool),",
+		`from "/geometry.mjs"`,
+		"workOriginMachinePoint(point, wpos)",
+		"parts.workPlane.visible = hasToolTip(snap.inserted_tool)",
+		"toolTipTableY(point, snap.inserted_tool, currentProfile)",
 		"let toolLaserEnabled = false",
 		"function updateToolLaser(snap, point)",
-		"const startY = toolLaserTipY(snap.inserted_tool)",
+		"const geometry = toolLaserGeometry(point, snap.inserted_tool, currentProfile, toolLaserEnabled, snap.probe_laser_active)",
 		"new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.7, 1",
 		"laserBeam.renderOrder = 20",
-		"const length = Math.max(1, startY - endY)",
-		"parts.laserBeam.scale.set(1, length, 1)",
+		"parts.laserBeam.scale.set(1, geometry.scaleY, 1)",
 		"laserToggleButtonEl.addEventListener(\"click\"",
+		"laserToggleButtonEl.dataset.source = geometry.source",
+		"updateLaserStatus",
+		"insertedToolLabel(tool)",
+		"tool.matches_firmware_tool === false",
 		"function panCamera(dx, dy)",
 		"event.button === 1 || event.button === 2 || event.shiftKey || event.altKey",
 		"mode: pan ? \"pan\" : \"orbit\"",
@@ -102,10 +108,28 @@ func TestSidecarServesSnapshotAndAssets(t *testing.T) {
 			t.Fatalf("sidecar app.js missing configured table/grid marker %q", want)
 		}
 	}
-	for _, gone := range []string{"profile.workX + 30", "profile.workY + 28", "profile.workYMax, 25,", "new THREE.Vector3(0, -16, 0), new THREE.Vector3(0, 16, 0)", "const toolOffsetZ", "visualWorkOffset(point, wpos);", "toolTip:", "toolTipCursor", "createToolTipCursor", "toolTipOffset", "cutCursor", "cutRing", "cutDot", "laserDot", "TorusGeometry", "const laserBeam = new THREE.Line"} {
+	for _, gone := range []string{"profile.workX + 30", "profile.workY + 28", "profile.workYMax, 25,", "new THREE.Vector3(0, -16, 0), new THREE.Vector3(0, 16, 0)", "const toolOffsetZ", "visualWorkOffset", "point.z - number(wpos.z) - toolStickout(tool)", "toolTip:", "toolTipCursor", "createToolTipCursor", "toolTipOffset", "cutCursor", "cutRing", "cutDot", "laserDot", "TorusGeometry", "const laserBeam = new THREE.Line"} {
 		if strings.Contains(js, gone) {
 			t.Fatalf("sidecar app.js still contains oversized/old grid marker %q", gone)
 		}
+	}
+
+	geom, err := http.Get(srv.URL + "/geometry.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer geom.Body.Close()
+	geomBody, _ := io.ReadAll(geom.Body)
+	if geom.StatusCode != http.StatusOK || !strings.Contains(string(geomBody), "function toolLaserGeometry") {
+		t.Fatalf("geometry module status=%d body=%q", geom.StatusCode, string(geomBody[:min(len(geomBody), 80)]))
+	}
+}
+
+func TestSidecarGeometryModule(t *testing.T) {
+	cmd := exec.Command("node", "--test", "web/geometry.test.mjs")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sidecar geometry tests failed: %v\n%s", err, out)
 	}
 }
 
@@ -136,7 +160,7 @@ func TestSidecarInsertsTool(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&tool); err != nil {
 		t.Fatal(err)
 	}
-	if tool.Kind != "tool_6_35" || tool.ToolID != 3 || tool.DiameterMM != 6.35 {
+	if tool.Kind != "tool_6_35" || tool.ToolID != 3 || tool.FirmwareToolID != 3 || !tool.MatchesFirmwareTool || tool.DiameterMM != 6.35 {
 		t.Fatalf("inserted tool = %+v", tool)
 	}
 	if !tool.SpindleLocked || tool.Calibrated {

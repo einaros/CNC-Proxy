@@ -383,26 +383,47 @@ func (m *FakeMachine) snapshotInsertedToolLocked() *SnapshotInsertedTool {
 		return nil
 	}
 	tool := *m.insertedTool
+	firmwareToolID, _, ok := m.currentToolStatusLocked()
+	if !ok {
+		firmwareToolID = tool.ToolID
+	}
+	var firmwareTargetToolID *int
+	matchID := firmwareToolID
+	if _, _, target, ok := m.currentToolTargetStatusLocked(); ok {
+		t := target
+		firmwareTargetToolID = &t
+		matchID = target
+	}
 	calibratedMZ := tool.CalibratedMZ
 	if !fakeFinite(calibratedMZ) {
 		calibratedMZ = 0
 	}
 	return &SnapshotInsertedTool{
-		Kind:               tool.Kind,
-		Label:              tool.Label,
-		ToolID:             tool.ToolID,
-		DiameterMM:         tool.DiameterMM,
-		StickoutMM:         tool.StickoutMM,
-		MinStickoutMM:      tool.MinStickoutMM,
-		MaxStickoutMM:      tool.MaxStickoutMM,
-		CalibrationMZ:      m.insertedToolCalibrationMZLocked(tool),
-		Probe:              tool.Probe,
-		SpindleLocked:      tool.SpindleLocked,
-		Calibrated:         tool.Calibrated,
-		CalibratedAt:       snapshotTimePtr(tool.CalibratedAt),
-		CalibratedMZ:       calibratedMZ,
-		CalibratedOffsetMM: tool.CalibratedOffsetMM,
+		Kind:                 tool.Kind,
+		Label:                tool.Label,
+		ToolID:               tool.ToolID,
+		FirmwareToolID:       firmwareToolID,
+		FirmwareTargetToolID: firmwareTargetToolID,
+		MatchesFirmwareTool:  insertedToolMatchesFirmwareTool(tool, matchID),
+		DiameterMM:           tool.DiameterMM,
+		StickoutMM:           tool.StickoutMM,
+		MinStickoutMM:        tool.MinStickoutMM,
+		MaxStickoutMM:        tool.MaxStickoutMM,
+		CalibrationMZ:        m.insertedToolCalibrationMZLocked(tool),
+		Probe:                tool.Probe,
+		SpindleLocked:        tool.SpindleLocked,
+		Calibrated:           tool.Calibrated,
+		CalibratedAt:         snapshotTimePtr(tool.CalibratedAt),
+		CalibratedMZ:         calibratedMZ,
+		CalibratedOffsetMM:   tool.CalibratedOffsetMM,
 	}
+}
+
+func insertedToolMatchesFirmwareTool(tool fakeInsertedTool, toolID int) bool {
+	if toolID == 0 {
+		return tool.Probe && tool.ToolID == 0
+	}
+	return tool.ToolID == toolID
 }
 
 func (m *FakeMachine) markInsertedToolCalibratedLocked(contact, offset float64) {
