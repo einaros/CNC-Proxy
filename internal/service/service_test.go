@@ -1021,6 +1021,7 @@ func TestRunActiveGcodeSendsPlayCommand(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	tr.Observe(machine.Idle)
 	putCachedEntry(t, svc, "my part.nc", []byte("G1 X1\n"), store.Synced)
+	m.PutFile("/sd/gcodes/my part.nc", []byte("G1 X1\n"))
 	if _, err := svc.SelectActiveGcode("my part.nc"); err != nil {
 		t.Fatalf("select: %v", err)
 	}
@@ -1084,21 +1085,73 @@ func TestToolActionsSendControllerCommands(t *testing.T) {
 	if res, err := svc.ChangeTool(4); err != nil || res.Command != "M6T4" {
 		t.Fatalf("ChangeTool result=%+v err=%v", res, err)
 	}
+	if res, err := svc.ContinueToolChange(); err != nil || res.Command != "M490.2" {
+		t.Fatalf("ContinueToolChange result=%+v err=%v", res, err)
+	}
 	if res, err := svc.DropCurrentTool(); err != nil || res.Command != "M6T-1" {
 		t.Fatalf("DropCurrentTool result=%+v err=%v", res, err)
 	}
 	if res, err := svc.CalibrateCurrentTool(); err != nil || res.Command != "M491" {
 		t.Fatalf("CalibrateCurrentTool result=%+v err=%v", res, err)
 	}
-	if g := m.Gcodes(); len(g) != 7 ||
+	if g := m.Gcodes(); len(g) != 8 ||
 		g[0] != "M493.2T3" ||
 		g[1] != "M493.2T0" ||
 		g[2] != "M493.2T-1" ||
 		g[3] != "M493.2T8888" ||
 		g[4] != "M6T4" ||
-		g[5] != "M6T-1" ||
-		g[6] != "M491" {
+		g[5] != "M490.2" ||
+		g[6] != "M6T-1" ||
+		g[7] != "M491" {
 		t.Fatalf("machine gcodes = %v, want vendor tool commands", g)
+	}
+}
+
+func TestContinueToolChangeRunsWhileAwaitingToolAndRefreshesTLO(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	if !tr.ObserveStatusPayload(m.Snapshot().Status.Raw) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	if res, err := svc.ChangeTool(2); err != nil || res.Command != "M6T2" {
+		t.Fatalf("ChangeTool result=%+v err=%v", res, err)
+	}
+	st, _ := tr.Current()
+	if st.State != machine.Tool || st.Tool == nil || st.Tool.Target == nil || *st.Tool.Target != 2 {
+		t.Fatalf("tracker after change = %+v, want Tool target 2", st)
+	}
+	if _, err := m.InsertTool("tool_6"); err != nil {
+		t.Fatal(err)
+	}
+	if snap := m.Snapshot(); snap.Status.State != machine.Tool || snap.Status.Tool == nil || snap.Status.Tool.Target == nil || *snap.Status.Tool.Target != 2 {
+		t.Fatalf("fake status after physical insert = %+v, want target preserved", snap.Status.Tool)
+	}
+
+	if res, err := svc.ContinueToolChange(); err != nil || res.Command != "M490.2" {
+		t.Fatalf("ContinueToolChange result=%+v err=%v", res, err)
+	}
+	st, _ = tr.Current()
+	if st.State != machine.Idle || st.Tool == nil || st.Tool.Active != 2 || st.Tool.Target != nil || math.Abs(st.Tool.Offset) < 0.001 {
+		t.Fatalf("tracker after continue = %+v, want Idle active tool 2 with non-zero TLO", st)
+	}
+	if snap := m.Snapshot(); snap.InsertedTool == nil || !snap.InsertedTool.Calibrated || math.Abs(snap.InsertedTool.CalibratedOffsetMM-st.Tool.Offset) > 0.001 {
+		t.Fatalf("inserted tool after continue = %+v, want calibrated to tracker TLO %.3f", snap.InsertedTool, st.Tool.Offset)
+	}
+}
+
+func TestContinueToolChangeRejectsNonToolState(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Run|MPos:0,0,0|WPos:0,0,0|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	if _, err := svc.ContinueToolChange(); !errors.Is(err, ErrToolChangeUnavailable) {
+		t.Fatalf("ContinueToolChange err = %v, want ErrToolChangeUnavailable", err)
+	}
+	if g := m.Gcodes(); len(g) != 0 {
+		t.Fatalf("continue command reached machine outside Tool state: %v", g)
 	}
 }
 

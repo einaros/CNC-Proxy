@@ -925,6 +925,7 @@ function renderToolStatus(m) {
   setText("tool-active-status", active + target);
   setText("tool-tlo-status", tlo);
   setText("tool-wp-status", Number.isFinite(wp) ? wp.toFixed(2) + "v" : "-");
+  setToolContinueAvailability(m);
 }
 
 function renderAlarmPanel(m) {
@@ -1373,6 +1374,18 @@ function setInputValue(id, value) {
   el.value = Number.isFinite(value) ? String(value) : "";
 }
 
+function setControlValueIfIdle(id, value) {
+  const el = document.getElementById(id);
+  if (!el || el === document.activeElement) return;
+  el.value = value == null ? "" : String(value);
+}
+
+function setCheckedIfIdle(id, checked) {
+  const el = document.getElementById(id);
+  if (!el || el === document.activeElement) return;
+  el.checked = !!checked;
+}
+
 function renderMachineLearnedSummary(learned) {
   const box = document.getElementById("machine-learned-summary");
   if (!box) return;
@@ -1451,11 +1464,11 @@ function updateMachineSettings() {
     saved_origins: current.saved_origins || [],
     feed_min_mm_min: read("machine-feed-min", current.feed_min_mm_min),
     feed_max_mm_min: read("machine-feed-max", current.feed_max_mm_min),
-	    tap_feed_mm_min: read("tap-feed-mm-min", current.tap_feed_mm_min),
-	    safe_z_mm: read("machine-safe-z", current.safe_z_mm),
-	    safe_z_disabled: !!current.safe_z_disabled,
-	    learned: current.learned || {},
-	  });
+    tap_feed_mm_min: read("tap-feed-mm-min", current.tap_feed_mm_min),
+    safe_z_mm: read("machine-safe-z", current.safe_z_mm),
+    safe_z_disabled: !!current.safe_z_disabled,
+    learned: current.learned || {},
+  });
   queueSaveUISettings();
   renderMachineSettings();
   renderWorkArea();
@@ -2986,14 +2999,15 @@ function renderGamepadSettings() {
   const gp = state.ui.gamepad || defaultGamepadSettings();
   for (const axis of ["x", "y", "z"]) {
     const cfg = gp.axes[axis];
-    document.getElementById("gamepad-axis-" + axis).value = cfg.axis;
-    document.getElementById("gamepad-invert-" + axis).checked = cfg.invert;
-    document.getElementById("gamepad-speed-" + axis).value = Math.round(cfg.scale * 100);
-    document.getElementById("gamepad-speed-" + axis + "-value").textContent = Math.round(cfg.scale * 100) + "%";
+    const pct = Math.round(cfg.scale * 100);
+    setControlValueIfIdle("gamepad-axis-" + axis, cfg.axis);
+    setCheckedIfIdle("gamepad-invert-" + axis, cfg.invert);
+    setControlValueIfIdle("gamepad-speed-" + axis, pct);
+    document.getElementById("gamepad-speed-" + axis + "-value").textContent = pct + "%";
   }
-  document.getElementById("gamepad-deadman-button").value = gp.deadman_button;
-  document.getElementById("gamepad-slow-button-0").value = gp.slow_buttons[0] ?? "";
-  document.getElementById("gamepad-slow-button-1").value = gp.slow_buttons[1] ?? "";
+  setControlValueIfIdle("gamepad-deadman-button", gp.deadman_button);
+  setControlValueIfIdle("gamepad-slow-button-0", gp.slow_buttons[0] ?? "");
+  setControlValueIfIdle("gamepad-slow-button-1", gp.slow_buttons[1] ?? "");
   renderGamepadMacroBindings();
 }
 
@@ -4022,41 +4036,44 @@ function resetToolSelects() {
   const set = document.getElementById("tool-set-select");
   if (change) change.value = "";
   if (set) set.value = "";
-  toggleToolCustomRow("change", false);
-  toggleToolCustomRow("set", false);
+  toggleToolCustomInput("change", false);
+  toggleToolCustomInput("set", false);
 }
 
-function toggleToolCustomRow(kind, show) {
-  const row = document.getElementById("tool-" + kind + "-custom-row");
-  if (!row) return;
-  row.hidden = !show;
+function toggleToolCustomInput(kind, show) {
+  const row = document.getElementById("tool-" + kind + "-row");
+  const input = document.getElementById(kind === "change" ? "tool-change-id" : "tool-id");
+  if (!row || !input) return;
+  row.classList.toggle("has-custom", show);
+  input.hidden = !show;
   if (show) {
-    const input = row.querySelector("input");
-    input?.focus();
-    input?.select();
+    input.focus();
+    input.select();
   }
 }
 
 function handleToolSelect(kind, value) {
-  if (value === "other") {
-    toggleToolCustomRow(kind, true);
-    return;
-  }
-  toggleToolCustomRow(kind, false);
+  toggleToolCustomInput(kind, value === "other");
+  clearToolFeedback();
+}
+
+function selectedToolID(kind, allowEmpty) {
   const select = document.getElementById("tool-" + kind + "-select");
-  if (select) select.value = "";
-  if (value === "") return;
+  const value = select?.value || "";
+  if (value === "other") {
+    return customToolID(kind === "change" ? "tool-change-id" : "tool-id");
+  }
+  if (value === "") return null;
   const toolID = Number(value);
-  if (kind === "change") changeTool(toolID);
-  else setCurrentTool(toolID);
+  return validToolID(toolID, allowEmpty) ? toolID : null;
 }
 
 async function setCurrentTool(toolID = null) {
   if (toolID == null) {
-    toolID = customToolID("tool-id");
+    toolID = selectedToolID("set", true);
   }
   if (!validToolID(toolID, true)) {
-    setToolFeedback("Tool number must be between 1 and 999.", "error");
+    setToolFeedback("Choose Empty, Probe, Laser, or tool 1-999.", "error");
     return;
   }
   state.toolPending = "set";
@@ -4084,10 +4101,10 @@ async function setCurrentTool(toolID = null) {
 
 async function changeTool(toolID = null) {
   if (toolID == null) {
-    toolID = customToolID("tool-change-id");
+    toolID = selectedToolID("change", false);
   }
   if (!validToolID(toolID, false)) {
-    setToolFeedback("Tool number must be between 1 and 999.", "error");
+    setToolFeedback("Choose Probe, Laser, or tool 1-999.", "error");
     return;
   }
   state.toolPending = "change";
@@ -4113,6 +4130,25 @@ async function changeTool(toolID = null) {
   }
 }
 
+async function continueToolChange() {
+  state.toolPending = "continue";
+  setToolButtonsPending(true);
+  setToolFeedback("Continuing tool change...", "");
+  try {
+    const r = await request("/api/tool/continue", { method: "POST" });
+    const result = await r.json();
+    setToolFeedback(result.message || "Tool-change continue command sent; machine confirmation was not available.", result.verified ? "ok" : "");
+    pollMachine();
+    setTimeout(pollMachine, 1200);
+  } catch (e) {
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+    setToolFeedback("Continue failed: " + e.message, "error");
+  } finally {
+    state.toolPending = "";
+    setToolButtonsPending(false);
+  }
+}
+
 async function calibrateCurrentTool() {
   state.toolPending = "calibrate";
   setToolButtonsPending(true);
@@ -4132,55 +4168,78 @@ async function calibrateCurrentTool() {
   }
 }
 
-async function dropCurrentTool() {
-  state.toolPending = "drop";
-  setToolButtonsPending(true);
-  setToolFeedback("Sending drop-tool command...", "");
-  try {
-    const r = await request("/api/tool/drop", { method: "POST" });
-    const result = await r.json();
-    setToolFeedback(result.message || "Drop-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    resetToolSelects();
-    pollMachine();
-    setTimeout(pollMachine, 1200);
-  } catch (e) {
-    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
-    setToolFeedback("Drop-tool failed: " + e.message, "error");
-  } finally {
-    state.toolPending = "";
-    setToolButtonsPending(false);
-  }
-}
-
 function setToolButtonsPending(pending) {
   const set = document.getElementById("tool-set");
   const change = document.getElementById("tool-change-set");
+  const cont = document.getElementById("tool-continue");
   const cal = document.getElementById("tool-calibrate");
-  const drop = document.getElementById("tool-drop");
   const setSelect = document.getElementById("tool-set-select");
   const changeSelect = document.getElementById("tool-change-select");
-  if (setSelect) setSelect.disabled = pending;
-  if (changeSelect) changeSelect.disabled = pending;
+  const setInput = document.getElementById("tool-id");
+  const changeInput = document.getElementById("tool-change-id");
+  const waitingForTool = state.machine?.state === "Tool";
+  if (setSelect) setSelect.disabled = pending || waitingForTool;
+  if (changeSelect) changeSelect.disabled = pending || waitingForTool;
+  if (setInput) setInput.disabled = pending || waitingForTool;
+  if (changeInput) changeInput.disabled = pending || waitingForTool;
   if (set) {
-    set.disabled = pending;
+    set.disabled = pending || waitingForTool;
     set.textContent = pending && state.toolPending === "set" ? "Setting..." : "Set";
   }
   if (change) {
-    change.disabled = pending;
+    change.disabled = pending || waitingForTool;
     change.textContent = pending && state.toolPending === "change" ? "Changing..." : "Change";
   }
-  if (cal) {
-    cal.disabled = pending;
-    cal.textContent = pending && state.toolPending === "calibrate" ? "Calibrating..." : "Calibrate";
+  if (cont) {
+    cont.textContent = pending && state.toolPending === "continue" ? "Continuing..." : "Continue";
+    cont.disabled = pending || !waitingForTool;
   }
-  if (drop) {
-    drop.disabled = pending;
-    drop.textContent = pending && state.toolPending === "drop" ? "Dropping..." : "Drop";
+  if (cal) {
+    cal.disabled = pending || waitingForTool;
+    cal.textContent = pending && state.toolPending === "calibrate" ? "Calibrating..." : "Calibrate";
   }
 }
 
 function setToolFeedback(text, kind) {
+  const local = document.getElementById("tool-action-status");
+  if (local) {
+    local.textContent = text || "";
+    local.className = "tool-action-status" + (kind ? " " + kind : "");
+  }
   setStatusMessage("tool", text, kind, { force: true });
+}
+
+function clearToolFeedback() {
+  const local = document.getElementById("tool-action-status");
+  if (local) {
+    local.textContent = "";
+    local.className = "tool-action-status";
+  }
+}
+
+function setToolContinueAvailability(m = state.machine || {}) {
+  const cont = document.getElementById("tool-continue");
+  const row = document.getElementById("tool-wait-row");
+  const label = document.getElementById("tool-wait-status");
+  const waitingForTool = m.state === "Tool";
+  if (row) row.classList.toggle("is-waiting", waitingForTool);
+  if (label) label.textContent = waitingForTool ? "Awaiting tool" : "Tool change";
+  if (!cont || state.toolPending) return;
+  cont.disabled = !waitingForTool;
+  const set = document.getElementById("tool-set");
+  const change = document.getElementById("tool-change-set");
+  const cal = document.getElementById("tool-calibrate");
+  const setSelect = document.getElementById("tool-set-select");
+  const changeSelect = document.getElementById("tool-change-select");
+  const setInput = document.getElementById("tool-id");
+  const changeInput = document.getElementById("tool-change-id");
+  if (set) set.disabled = waitingForTool;
+  if (change) change.disabled = waitingForTool;
+  if (cal) cal.disabled = waitingForTool;
+  if (setSelect) setSelect.disabled = waitingForTool;
+  if (changeSelect) changeSelect.disabled = waitingForTool;
+  if (setInput) setInput.disabled = waitingForTool;
+  if (changeInput) changeInput.disabled = waitingForTool;
 }
 
 function appendGcodeLine(ln) {
@@ -4458,11 +4517,11 @@ function renderMacroEditor() {
     list.appendChild(row);
   }
   const macro = macroByID(state.selectedMacroId);
-  document.getElementById("macro-name").value = macro?.name || "";
-  document.getElementById("macro-description").value = macro?.description || "";
-  document.getElementById("macro-color").value = macro?.color || "";
-  document.getElementById("macro-lines").value = macro ? macro.lines.join("\n") : "";
-  document.getElementById("macro-placement").value = macro ? (slotForMacro(macro.id)?.region || "none") : "none";
+  setControlValueIfIdle("macro-name", macro?.name || "");
+  setControlValueIfIdle("macro-description", macro?.description || "");
+  setControlValueIfIdle("macro-color", macro?.color || "");
+  setControlValueIfIdle("macro-lines", macro ? macro.lines.join("\n") : "");
+  setControlValueIfIdle("macro-placement", macro ? (slotForMacro(macro.id)?.region || "none") : "none");
   document.getElementById("macro-save").disabled = false;
   const run = document.getElementById("macro-run");
   run.disabled = false;
@@ -6134,8 +6193,8 @@ function init() {
   bindButtonAction(document.getElementById("ctl-halt"), () => sendControl("halt"));
   bindButtonAction(document.getElementById("tool-set"), () => setCurrentTool());
   bindButtonAction(document.getElementById("tool-change-set"), () => changeTool());
+  bindButtonAction(document.getElementById("tool-continue"), continueToolChange);
   bindButtonAction(document.getElementById("tool-calibrate"), calibrateCurrentTool);
-  bindButtonAction(document.getElementById("tool-drop"), dropCurrentTool);
   document.getElementById("tool-set-select").onchange = (e) => handleToolSelect("set", e.target.value);
   document.getElementById("tool-change-select").onchange = (e) => handleToolSelect("change", e.target.value);
   bindButtonAction(document.getElementById("active-gcode-run"), runActiveGcode);

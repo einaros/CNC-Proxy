@@ -159,6 +159,16 @@ Injection & control model (both modes — proxy alone OR with controller attache
   success/failure message at the control or panel where the operator clicked.
   When the machine can be observed afterward, verify and show the observed
   result; never leave the operator guessing whether a command was issued.
+- **Live UI updates must not break operator input.** SSE/poll snapshots are a
+  server-state stream, not permission to overwrite active local UI state. A
+  refresh must not replace DOM nodes that own event handlers, focus, selection,
+  pointer capture, dirty input values, expanded menus, active sliders, or
+  in-flight action state. If a live value is also editable, split it into
+  committed server state and local draft state: while the control is focused,
+  dirty, dragging, or request-busy, preserve the local value until blur,
+  explicit commit, cancel, or a verified terminal result. Never let a periodic
+  snapshot silently re-enable a busy machine-action control or erase a visible
+  success/failure message before the operator can read it.
 - **No invented UX, states, or success claims.** Before adding any visible text,
   UI element, notification, log entry, status, setting, fallback, or behavior,
   stop and weigh whether it is explicitly requested, required for correctness,
@@ -192,10 +202,31 @@ Injection & control model (both modes — proxy alone OR with controller attache
 
 ## UI/UX principles
 
+- **Use the production UI quality bar.** Before changing the web UI, tray UI,
+  fakemachine sidecar, or any operator-facing control surface, read
+  `docs/ui-ux-quality.md` and apply it as a hard acceptance contract. That doc
+  translates external UI/UX guidance into project-specific requirements for
+  layout stability, accessibility, density, feedback, and validation.
+- **Design is part of correctness.** A UI change is not production-ready if it
+  only works functionally while controls jump, wrap, resize unpredictably, lose
+  focus, break keyboard use, hide feedback, or become ambiguous under live
+  state changes. Treat those defects like behavioral bugs, not polish.
 - **Design around operator tasks, not implementation objects.** Group controls
   by what the operator is trying to do: primary machine action, motion/jog
   parameters, origin actions, saved presets, status/readout. Do not lay out a
   panel as a flat list of whichever fields happened to be added.
+- **Group actions by lifecycle and validity.** Controls are not peers merely
+  because they affect the same subsystem. A state-dependent confirmation such
+  as continuing a firmware tool-change wait must not sit beside a general
+  maintenance action such as calibration. When a modal machine state permits
+  only one next action, make that action the sole primary action in the local
+  group and disable, hide, or move incompatible actions out of the immediate
+  decision path until the state clears.
+- **Map UI to the real machine.** Motion direction, coordinate labels, origin
+  position, tool length, probe state, spindle state, and status wording must
+  match the operator's physical CNC mental model and observed firmware behavior.
+  Do not expose protocol internals as primary UI unless the surface is clearly
+  diagnostic.
 - **Make the primary action visually primary.** High-risk or session-defining
   controls such as arming tap move need a dedicated hit area, stronger visual
   weight, clear state, and nearby feedback. Secondary settings must not compete
@@ -215,6 +246,11 @@ Injection & control model (both modes — proxy alone OR with controller attache
   larger gaps or rules between groups, and stable vertical spacing regardless of
   how many controls a group contains. Avoid layouts where one group becomes tall
   only because it has more labels or actions than its neighbor.
+- **Use a deliberate spacing scale.** Dense operational UIs may be compact, but
+  margins, gaps, padding, and control heights must come from a small local scale
+  based on 4px/8px increments or an existing component token. Do not add
+  one-off spacing values to make a single screen "look okay"; that breaks
+  scanability and future maintenance.
 - **Keep status visually quieter than actions.** Coordinate readouts, machine
   state, and feedback should be close to the control they explain, but they
   should not steal focus from the active machine-action controls.
@@ -226,6 +262,53 @@ Injection & control model (both modes — proxy alone OR with controller attache
   machine, alter origin, run recovery, mutate files, or change durable machine
   UI state needs immediate visible feedback, a disabled/in-progress state while
   active, and a concrete terminal result when the effect can be verified.
+- **Accessibility is a baseline, not an optional pass.** Changed controls must
+  remain operable by keyboard, expose usable labels/names/states, show visible
+  focus, avoid hover-only or drag-only operation without an equivalent control,
+  and preserve pointer target sizes appropriate to dense desktop and touch
+  contexts. Do not trade away accessibility to gain density.
+- **Async action handlers need stable ownership.** Buttons, toggles, sliders,
+  and selects that trigger machine or fake-machine state changes must have a
+  single explicit lifecycle: local pending state, request, verification through
+  the observable state surface, then terminal result. Do not scatter ownership
+  across independent intervals/SSE handlers and click handlers. Do not rebuild
+  the action's DOM subtree on every snapshot; update text/state inside stable
+  nodes, or event handlers and pending state will drift out of sync.
+- **Toolbars are not dumping grounds.** A toolbar may contain global status,
+  view controls, and short commands, but task workflows belong in grouped
+  control clusters or panels. A tool workflow such as insert tool, spindle
+  lock, stickout adjustment, and calibration state must be laid out as one
+  coherent tool group with a shared sizing contract and local feedback, not as
+  unrelated controls appended to the global top bar.
+- **Control dimensions must be stable across state changes.** Toggle labels,
+  terminal messages, live values, translated strings, and validation text must
+  not resize peer controls, push actions to a new row, or make a toolbar jump.
+  Allocate fixed/min widths for controls whose labels change (`Lock` vs
+  `Unlock`, `Run` vs `Running`, numeric values, status badges), keep dynamic
+  feedback in reserved status slots, and prefer stateful classes/icons inside a
+  fixed button over changing the button's footprint.
+- **Toolbar row count is invariant at runtime.** A toolbar that is one row at
+  load must remain one row for the lifetime of that viewport. Operator actions,
+  async state, validation messages, inserted controls, changing labels, or
+  loaded content must never cause a toolbar/header/action strip to wrap,
+  increase height, push content down, or relocate controls. If the available
+  width is insufficient, move lower-priority actions into a stable overflow,
+  side panel, popover, drawer, or separate grouped control surface; do not let
+  flex-wrap, dynamic text, or opportunistic insertion decide layout. Multi-row
+  toolbars are allowed only when explicitly designed as multi-row from the
+  start, with fixed row heights and no runtime row creation.
+- **Changing values must not constantly rewrite controls.** Inputs, sliders,
+  steppers, segmented controls, and selects must not be assigned from live
+  state on every render while the operator is interacting with them. Only write
+  to form controls when initializing them, when the backing server value
+  changes and the control is not dirty/focused/dragging, or after a verified
+  commit/cancel. This applies especially to number inputs and range sliders,
+  where repeated assignment breaks dragging, keyboard edits, and click
+  handlers.
+- **Group feedback with the control that caused it.** Success/failure/pending
+  text belongs in the same local group as the action, with reserved space so it
+  does not disturb layout. Avoid global or constantly overwritten status text
+  for local machine actions unless it is a secondary copy of the local result.
 
 ## Layout
 

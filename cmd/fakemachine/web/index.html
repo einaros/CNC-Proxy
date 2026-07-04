@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fakemachine Sidecar</title>
+<style>
+  :root {
+    --bg: #101214;
+    --panel: rgba(20, 24, 27, .86);
+    --panel-strong: rgba(24, 29, 33, .94);
+    --border: rgba(137, 153, 167, .28);
+    --text: #e6edf2;
+    --muted: #9cabb8;
+    --cyan: #58b8d8;
+    --green: #4bc17d;
+    --orange: #d59b42;
+    --red: #e4645f;
+    --magenta: #c77be6;
+    --blue: #7098ff;
+    --control-h: 30px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+  button, input, select { box-sizing: border-box; font: inherit; margin: 0; }
+  #app { position: fixed; inset: 0; min-width: 0; min-height: 0; }
+  #scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; background: #101214; }
+  .hud { position: absolute; z-index: 4; pointer-events: none; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 18px 45px rgba(0,0,0,.32); backdrop-filter: blur(12px); }
+  #topbar { top: 12px; left: 12px; right: 12px; height: 48px; min-height: 48px; display: grid; grid-template-columns: minmax(170px, auto) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; overflow: hidden; pointer-events: auto; }
+  #brand { display: grid; gap: 2px; min-width: 0; }
+  #brand strong { font-size: 15px; line-height: 1.1; }
+  #addr { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #state-strip { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; min-width: 0; overflow: hidden; }
+  .badge { flex: 0 0 auto; min-height: 28px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; background: rgba(255,255,255,.04); white-space: nowrap; }
+  .badge b { font-weight: 700; }
+  .state-Idle { color: var(--green); border-color: rgba(75,193,125,.48); }
+  .state-Run, .state-Home, .state-Hold, .state-Wait, .state-Tool, .state-Pause { color: var(--orange); border-color: rgba(213,155,66,.52); }
+  .state-Alarm { color: var(--red); border-color: rgba(228,100,95,.56); }
+  .state-Unknown, .state- { color: var(--muted); }
+  #view-controls { display: inline-flex; gap: 6px; align-items: center; flex-wrap: nowrap; justify-content: flex-end; min-width: 0; overflow: hidden; }
+  #view-controls button,
+  #tool-panel button,
+  #tool-panel select,
+  #tool-panel input[type="number"],
+  #tool-panel input[type="range"] {
+    height: var(--control-h);
+    min-height: var(--control-h);
+    max-height: var(--control-h);
+    vertical-align: middle;
+  }
+  #view-controls button { flex: 0 0 auto; min-width: 34px; display: inline-flex; align-items: center; justify-content: center; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
+  #tool-panel button { min-width: 34px; display: inline-flex; align-items: center; justify-content: center; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
+  #tool-panel select { min-width: 0; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 28px 0 8px; line-height: var(--control-h); }
+  #tool-panel input[type="number"] { width: 74px; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; line-height: var(--control-h); }
+  #tool-panel input[type="range"] { width: 100%; padding: 0; accent-color: var(--green); }
+  #insert-tool-button { border-color: rgba(75,193,125,.52); background: rgba(75,193,125,.12); font-weight: 650; }
+  #tool-lock-button.unlocked { border-color: rgba(213,155,66,.62); background: rgba(213,155,66,.14); }
+  #view-controls #model-button { min-width: 118px; border-color: rgba(88,184,216,.55); background: rgba(88,184,216,.13); font-weight: 650; }
+  #view-controls #laser-toggle { min-width: 58px; }
+  #view-controls #laser-toggle[aria-pressed="true"] { border-color: rgba(228,100,95,.62); background: rgba(228,100,95,.16); color: #fff; }
+  #view-controls button:disabled, #tool-panel button:disabled, #tool-panel select:disabled, #tool-panel input:disabled { opacity: .52; cursor: not-allowed; }
+  #view-controls [aria-busy="true"], #tool-panel [aria-busy="true"] { cursor: progress; }
+  #view-controls button:hover, #tool-panel button:hover { border-color: var(--cyan); }
+  #view-controls button:focus-visible, #tool-panel button:focus-visible, #tool-panel select:focus-visible, #tool-panel input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  #model-status { flex: 0 0 150px; width: 150px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  #insert-tool-status, #tool-calibration-status { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  #tool-calibration-status.calibrated { color: var(--green); }
+  #tool-calibration-status.uncalibrated { color: var(--orange); }
+  #tool-panel { left: 12px; top: 76px; width: 360px; display: grid; gap: 8px; padding: 10px; pointer-events: auto; }
+  .tool-title { color: var(--muted); font-size: 11px; line-height: 1.2; text-transform: uppercase; letter-spacing: .04em; }
+  .tool-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; min-width: 0; }
+  .tool-row.depth { grid-template-columns: minmax(0, 1fr) 74px; }
+  .tool-row.lock { grid-template-columns: 136px; }
+  .tool-status-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(108px, auto); gap: 8px; align-items: center; min-width: 0; min-height: 18px; }
+  #readout { left: 12px; bottom: 12px; width: min(520px, calc(100vw - 24px)); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; background: var(--border); }
+  .metric { min-width: 0; display: grid; gap: 3px; padding: 8px 10px; background: var(--panel-strong); }
+  .metric .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+  .metric .value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #activity { top: 76px; right: 12px; width: min(420px, calc(100vw - 24px)); max-height: min(56vh, 560px); display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
+  .section-title { padding: 8px 10px; color: var(--muted); background: rgba(255,255,255,.035); border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  #program { display: grid; gap: 6px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  #program-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+  .progress { height: 7px; border-radius: 999px; background: rgba(255,255,255,.10); overflow: hidden; }
+  #program-bar { height: 100%; width: 0%; background: var(--green); }
+  #lists { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; overflow: hidden; }
+  .list { min-width: 0; min-height: 0; border-right: 1px solid var(--border); }
+  .list:last-child { border-right: 0; }
+  .items { max-height: 240px; overflow: auto; padding: 6px; display: grid; gap: 4px; scrollbar-width: thin; }
+  .item { min-width: 0; border: 1px solid rgba(137,153,167,.18); border-radius: 6px; padding: 5px 6px; background: rgba(255,255,255,.035); }
+  .item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .item .sub { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #timeline { left: 12px; top: 264px; width: min(360px, calc(100vw - 24px)); max-height: min(30vh, 320px); overflow: hidden; }
+  #history { max-height: 390px; overflow: auto; display: grid; gap: 4px; padding: 6px; scrollbar-width: thin; }
+  .history-line { min-width: 0; display: grid; gap: 2px; border-left: 3px solid var(--cyan); padding: 5px 6px; background: rgba(255,255,255,.035); border-radius: 4px; }
+  .history-line.control { border-left-color: var(--magenta); }
+  .history-line .cmd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .history-line .tag { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+  #legend { right: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: min(420px, calc(100vw - 24px)); padding: 7px; }
+  .key { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); white-space: nowrap; font-size: 11px; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; background: var(--cyan); }
+  .swatch.green { background: var(--green); }
+  .swatch.orange { background: var(--orange); }
+  .swatch.magenta { background: var(--magenta); }
+  .swatch.blue { background: var(--blue); }
+  .swatch.red { background: var(--red); }
+  .swatch.table { background: #275967; }
+  .swatch.xstage { background: #4f7fb8; }
+  @media (max-width: 860px) {
+    #topbar { height: auto; min-height: 48px; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+    #view-controls { justify-self: start; }
+    #tool-panel { top: auto; bottom: 176px; width: min(360px, calc(100vw - 24px)); }
+    #activity { display: none; }
+    #timeline { display: none; }
+    #readout { grid-template-columns: 1fr; bottom: 12px; width: min(420px, calc(100vw - 24px)); }
+    #legend { display: none; }
+  }
+  @media (max-width: 520px) {
+    #topbar { left: 8px; right: 8px; top: 8px; }
+    #timeline { left: 8px; width: calc(100vw - 16px); }
+    #readout { left: 8px; width: calc(100vw - 16px); }
+    .badge { max-width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="scene"></canvas>
+  <div id="topbar" class="hud panel">
+    <div id="brand">
+      <strong>Fakemachine</strong>
+      <span id="addr">offline</span>
+    </div>
+    <div id="state-strip">
+      <span id="state" class="badge state-Unknown"><b>Unknown</b></span>
+      <span id="transfer" class="badge">transfer idle</span>
+      <span id="hold" class="badge">hold off</span>
+      <span id="ftype" class="badge">ftype nc</span>
+    </div>
+    <div id="view-controls">
+      <input id="model-file" type="file" accept=".stl,.glb,.gltf,model/stl,model/gltf-binary,model/gltf+json" hidden>
+      <button id="model-button" type="button">Upload model</button>
+      <span id="model-status" aria-live="polite">no model</span>
+      <button id="laser-toggle" type="button" aria-pressed="false">Laser</button>
+      <button id="view-iso" type="button">ISO</button>
+      <button id="view-top" type="button">TOP</button>
+      <button id="view-front" type="button">FRONT</button>
+    </div>
+  </div>
+  <div id="tool-panel" class="hud panel">
+    <div class="tool-title">Tool</div>
+    <div class="tool-row">
+      <select id="insert-tool-kind" aria-label="Inserted tool">
+        <option value="probe">Probe</option>
+        <option value="tool_3_175">3.175 mm</option>
+        <option value="tool_6">6 mm</option>
+        <option value="tool_6_35">6.35 mm</option>
+      </select>
+      <button id="insert-tool-button" type="button">Insert</button>
+    </div>
+    <div class="tool-status-row">
+      <span id="insert-tool-status" aria-live="polite">no tool inserted</span>
+      <span id="tool-calibration-status" class="uncalibrated" aria-live="polite">uncalibrated</span>
+    </div>
+    <div class="tool-row lock">
+      <button id="tool-lock-button" type="button" disabled>Unlock Spindle</button>
+    </div>
+    <div class="tool-row depth">
+      <input id="tool-depth-slider" type="range" min="10" max="70" step="0.5" value="38" disabled aria-label="Tool stickout">
+      <input id="tool-depth-value" type="number" min="10" max="70" step="0.5" value="38" disabled aria-label="Tool stickout millimeters">
+    </div>
+  </div>
+  <div id="timeline" class="hud panel">
+    <div class="section-title">Recent machine I/O</div>
+    <div id="history"></div>
+  </div>
+  <div id="activity" class="hud panel">
+    <div class="section-title">Runtime catalog</div>
+    <div id="program">
+      <div id="program-name">no program</div>
+      <div class="progress"><div id="program-bar"></div></div>
+    </div>
+    <div id="lists">
+      <div class="list">
+        <div class="section-title">Files</div>
+        <div id="files" class="items"></div>
+      </div>
+      <div class="list">
+        <div class="section-title">Directories</div>
+        <div id="dirs" class="items"></div>
+      </div>
+    </div>
+  </div>
+  <div id="readout" class="hud panel">
+    <div class="metric"><span class="label">MPos</span><span id="mpos" class="value">0, 0, 0</span></div>
+    <div class="metric"><span class="label">WPos</span><span id="wpos" class="value">0, 0, 0</span></div>
+    <div class="metric"><span class="label">Modal</span><span id="modal" class="value">G0 G21 G90</span></div>
+    <div class="metric"><span class="label">Feed / spindle</span><span id="feed" class="value">0 / 0</span></div>
+    <div class="metric"><span class="label">Tool / TLO</span><span id="tool" class="value">-</span></div>
+  </div>
+  <div id="legend" class="hud panel">
+    <span class="key"><span class="swatch table"></span>Y table</span>
+    <span class="key"><span class="swatch xstage"></span>X carriage</span>
+    <span class="key"><span class="swatch green"></span>X/Z spindle</span>
+    <span class="key"><span class="swatch"></span>path</span>
+    <span class="key"><span class="swatch blue"></span>tool Z0</span>
+    <span class="key"><span class="swatch orange"></span>queued motion</span>
+    <span class="key"><span class="swatch magenta"></span>control</span>
+    <span class="key"><span class="swatch red"></span>tool laser</span>
+  </div>
+</div>
+<script type="importmap">
+{"imports":{"three":"/three.module.min.js"}}
+</script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

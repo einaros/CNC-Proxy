@@ -10,6 +10,7 @@
     --text: #dde4ec; --muted: #91a0ae; --accent: #57a6d6; --ok: #44c27b;
     --warn: #d99a3a; --err: #e86a5f; --pending: #b7c0ca; --radius: 6px;
     --gap-xs: 6px; --gap-sm: 8px; --gap-md: 12px; --gap-lg: 16px; --gap-xl: 22px;
+    --control-h: 34px;
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
@@ -51,7 +52,7 @@
   .command-panel-compact { --command-panel-pref-width: 360px; }
   .command-panel-tool { --command-panel-pref-width: 400px; }
   .command-panel-wide { --command-panel-pref-width: 760px; }
-  .command-group { display: flex; flex-wrap: wrap; gap: var(--gap-xs); align-items: center; }
+  .command-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: var(--gap-xs); align-items: center; min-width: 0; }
   .command-panel form { margin: 0; }
   #command-toolbar > #ctl-halt { min-width: 84px; font-weight: 650; }
   main { flex: 1 1 auto; width: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); padding: clamp(14px, 2vw, 22px) clamp(14px, 2vw, 22px) 76px; max-width: 1440px; margin: 0 auto; }
@@ -69,7 +70,7 @@
   #notice-clear { flex: 0 0 auto; }
   .tabs { display: flex; gap: 4px; margin: 0 0 var(--gap-md); padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
-  .tab { flex: 0 0 auto; min-height: 34px; border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
+  .tab { flex: 0 0 auto; min-height: var(--control-h); border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
   .tab:hover { border-color: rgba(87,166,214,.45); color: var(--text); }
   .tab.active { color: var(--text); border-color: rgba(87,166,214,.55); background: var(--panel-2); }
   .view { display: grid; gap: var(--gap-xl); min-height: 0; }
@@ -86,11 +87,11 @@
   .toolbar { display: flex; gap: 10px; align-items: center; margin: 0; }
   #drop { flex: 1; border: 1px dashed var(--border); border-radius: var(--radius); padding: 14px; text-align: center; color: var(--muted); cursor: pointer; background: var(--panel); min-width: min(100%, 260px); }
   #drop.over { border-color: var(--accent); color: var(--accent); }
-  input[type="search"], input[type="text"], input[type="number"], textarea, #gcode-input, select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; min-height: 34px; }
+  input[type="search"], input[type="text"], input[type="number"], #gcode-input, select { height: var(--control-h); min-height: var(--control-h); background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 0 10px; }
   select option { background: #fff; color: #18202a; }
   input[type="checkbox"] { accent-color: var(--accent); }
   input[type="range"] { accent-color: var(--accent); }
-  textarea { min-height: 104px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  textarea { min-height: 104px; resize: vertical; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   input[type="search"] { width: 260px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; }
   table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); }
@@ -106,7 +107,7 @@
   .actions > * { margin: 2px 0 2px 6px; vertical-align: middle; }
   .actions > :first-child { margin-left: 0; }
   .actions button, .actions a { max-width: 100%; }
-  button, .actions a { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 10px; cursor: pointer; font-size: 13px; text-decoration: none; }
+  button, .actions a { min-height: var(--control-h); display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 10px; cursor: pointer; font-size: 13px; text-decoration: none; white-space: nowrap; }
   button:hover, .actions a:hover { border-color: var(--accent); }
   button:focus-visible, .actions a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button:disabled, button[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
@@ -136,14 +137,14 @@
   .job-detail { min-width: 0; display: grid; gap: 4px; align-content: start; justify-items: start; }
   .job-message { font-weight: 650; overflow-wrap: anywhere; }
   .job-error { color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
-  .job-recovery { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .job-recovery { display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); gap: 6px; margin-top: 6px; }
   #run-history { background: var(--panel); border: 1px solid var(--border); }
   #run-history-panel .detail-body { gap: 8px; }
   .run-history-actions { display: flex; justify-content: flex-end; }
   .run-row { display: grid; grid-template-columns: minmax(180px, 1fr) 120px 120px minmax(220px, 1.4fr); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
   .run-row:last-child { border-bottom: 0; }
   .run-title { font-weight: 650; overflow-wrap: anywhere; }
-  .backup-panel { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
+  .backup-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
   .metric { min-width: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: grid; gap: 3px; align-content: start; }
   .metric .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .metric .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
@@ -153,20 +154,30 @@
   .action-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
   .action-row label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
   .action-row input[type="number"] { width: 112px; }
-  #tool-panel { background: transparent; border: 0; padding: 0; gap: var(--gap-sm); }
-  .tool-vendor-panel { display: grid; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .tool-status-title { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; background: #252b2d; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  #tool-panel { --tool-control-h: 34px; background: transparent; border: 0; padding: 0; gap: var(--gap-sm); }
+  .tool-vendor-panel { display: grid; gap: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #202629; }
+  .tool-status-title { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   #tool-active-status { color: var(--text); font: 650 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-transform: none; letter-spacing: 0; }
-  .tool-status-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border); }
-  .tool-status-cell { min-width: 0; min-height: 40px; display: grid; gap: 2px; padding: 7px 10px; background: #2a3133; }
-  .tool-status-cell span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .tool-status-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .tool-status-cell { min-width: 0; min-height: 42px; display: grid; gap: 2px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: #252b2d; }
+  .tool-status-cell span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
   .tool-status-cell b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--text); }
-  .tool-control-stack { display: grid; gap: 1px; background: var(--border); }
-  .tool-control-stack select, .tool-control-stack button { width: 100%; min-height: 40px; border: 0; border-radius: 0; background: #252b2d; justify-content: center; }
-  .tool-control-stack button:hover, .tool-control-stack select:hover { background: #2b3437; }
-  .tool-custom-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; padding: 8px; background: #202629; }
-  .tool-custom-row label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
-  .tool-custom-row input[type="number"] { width: 100%; }
+  .tool-control-stack { display: grid; gap: 6px; }
+  .tool-task-group { display: grid; gap: 6px; min-width: 0; }
+  .tool-task-group + .tool-task-group { padding-top: 6px; border-top: 1px solid rgba(48,56,58,.72); }
+  .tool-state-row { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 6px; align-items: center; min-width: 0; min-height: var(--tool-control-h); }
+  .tool-state-text { min-width: 0; height: var(--tool-control-h); display: flex; align-items: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .tool-state-row.is-waiting .tool-state-text { color: var(--warn); }
+  .tool-action-row { display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 6px; align-items: center; min-width: 0; }
+  .tool-action-row.has-custom { grid-template-columns: minmax(0, 1fr) 76px 92px; }
+  .tool-action-row.tool-single-action { grid-template-columns: minmax(0, 1fr); }
+  .tool-control-stack select, .tool-control-stack input[type="number"], .tool-control-stack button { width: 100%; height: var(--tool-control-h); min-height: var(--tool-control-h); max-height: var(--tool-control-h); border-radius: 6px; }
+  .tool-control-stack select, .tool-control-stack input[type="number"] { min-width: 0; border: 1px solid var(--border); background: #252b2d; color: var(--text); padding: 0 8px; }
+  .tool-control-stack button { justify-content: center; padding: 0 9px; }
+  .tool-control-stack button:hover, .tool-control-stack select:hover, .tool-control-stack input[type="number"]:hover { border-color: var(--accent); }
+  .tool-action-status { min-height: 18px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  .tool-action-status.ok { color: var(--ok); }
+  .tool-action-status.error { color: var(--err); }
   .active-gcode-body { min-width: 0; display: grid; gap: 8px; }
   .active-gcode-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
   .active-gcode-summary { min-width: 0; }
@@ -183,9 +194,9 @@
   #gcode-console-view { height: 100%; }
   #gcode-console-view > .page-section { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
   #console { min-height: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  #machine-controls, #macro-toolbar, #log-tools, #macro-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  #machine-controls, #macro-toolbar, #log-tools, #macro-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 6px; align-items: center; min-width: 0; }
   #machine-controls { align-items: stretch; }
-  #machine-controls button { flex: 1 1 96px; }
+  #machine-controls button { width: 100%; }
   #macro-toolbar, #macro-panel { min-height: 32px; }
   #log-tools { padding: 8px; border-bottom: 1px solid var(--border); }
   #log-tools { justify-content: space-between; }
@@ -203,7 +214,7 @@
   .macro-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
   .macro-form label span { text-transform: uppercase; letter-spacing: .04em; }
   .macro-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
-  .log-left, .log-right { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .log-left, .log-right { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px; align-items: center; min-width: 0; }
   #gcode-log { min-height: 0; overflow-y: auto; padding: 10px 12px; margin: 0; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; background: #12171c; }
   #gcode-log .send { color: var(--accent); }
   #gcode-log .recv { color: var(--text); }
@@ -282,7 +293,7 @@
   .outline-active-controls { display: grid; gap: 5px; align-items: stretch; }
   .outline-active-controls label { min-height: 30px; display: flex; gap: 6px; align-items: center; justify-content: center; padding: 4px 8px; color: var(--muted); background: rgba(18,23,28,.88); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
   .outline-capture { display: grid; gap: 8px; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
-  .outline-probe-controls, .outline-field-controls, .outline-export-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .outline-probe-controls, .outline-field-controls, .outline-export-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 6px; align-items: end; min-width: 0; }
   .outline-field-controls { padding-top: 4px; border-top: 1px solid var(--border); }
   .outline-probe-controls label, .outline-field-controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); min-height: 32px; }
   .outline-field-controls input[type="number"] { width: 88px; }
@@ -311,7 +322,7 @@
   #workarea-target-marker { fill: none; stroke: var(--warn); stroke-width: .2; }
   #machine-settings .detail-body, #gamepad-settings .detail-body { gap: 12px; }
   .machine-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
-  .machine-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .machine-settings-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 8px; align-items: center; }
   .machine-settings-actions button { flex: 0 1 auto; }
   #machine-learn-status[data-kind="ok"] { color: var(--ok); }
   #machine-learn-status[data-kind="error"] { color: var(--err); }
@@ -345,7 +356,7 @@
   #breadcrumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
   #breadcrumbs button { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .crumb-sep { color: var(--muted); }
-  #folder-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  #folder-actions { display: grid; grid-template-columns: minmax(0, 240px) max-content max-content; gap: 6px; align-items: center; justify-content: flex-end; min-width: 0; }
   #current-folder { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-name { display: inline; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; overflow-wrap: anywhere; }
   .file-name:hover { color: var(--accent); border: 0; }
@@ -542,45 +553,57 @@
                 <div class="tool-status-cell"><span>WP</span><b id="tool-wp-status">-</b></div>
               </div>
               <div class="tool-control-stack">
-                <select id="tool-change-select" aria-label="Change tool">
-                  <option value="">Change...</option>
-                  <option value="0">Probe</option>
-                  <option value="1">Tool: 1</option>
-                  <option value="2">Tool: 2</option>
-                  <option value="3">Tool: 3</option>
-                  <option value="4">Tool: 4</option>
-                  <option value="5">Tool: 5</option>
-                  <option value="6">Tool: 6</option>
-                  <option value="7">Tool: 7</option>
-                  <option value="8">Tool: 8</option>
-                  <option value="8888">Laser</option>
-                  <option value="other">Other Tool</option>
-                </select>
-                <div id="tool-change-custom-row" class="tool-custom-row" hidden>
-                  <label><span>Value</span><input id="tool-change-id" type="number" min="1" max="999" value="1"></label>
-                  <button type="button" id="tool-change-set" class="primary">Change</button>
+                <div class="tool-task-group">
+                  <div id="tool-wait-row" class="tool-state-row">
+                    <div id="tool-wait-status" class="tool-state-text" aria-live="polite">Tool change</div>
+                    <button type="button" id="tool-continue" class="primary" disabled>Continue</button>
+                  </div>
+                  <div id="tool-change-row" class="tool-action-row">
+                    <select id="tool-change-select" aria-label="Change tool">
+                      <option value="">Change tool</option>
+                      <option value="0">Probe</option>
+                      <option value="1">Tool 1</option>
+                      <option value="2">Tool 2</option>
+                      <option value="3">Tool 3</option>
+                      <option value="4">Tool 4</option>
+                      <option value="5">Tool 5</option>
+                      <option value="6">Tool 6</option>
+                      <option value="7">Tool 7</option>
+                      <option value="8">Tool 8</option>
+                      <option value="8888">Laser</option>
+                      <option value="other">Other</option>
+                    </select>
+                    <input id="tool-change-id" type="number" min="1" max="999" value="1" hidden aria-label="Custom change tool number">
+                    <button type="button" id="tool-change-set" class="primary">Change</button>
+                  </div>
                 </div>
-                <button type="button" id="tool-calibrate">Calibrate</button>
-                <button type="button" id="tool-drop">Drop</button>
-                <select id="tool-set-select" aria-label="Set current tool">
-                  <option value="">Set...</option>
-                  <option value="-1">Empty</option>
-                  <option value="0">Probe</option>
-                  <option value="1">Tool: 1</option>
-                  <option value="2">Tool: 2</option>
-                  <option value="3">Tool: 3</option>
-                  <option value="4">Tool: 4</option>
-                  <option value="5">Tool: 5</option>
-                  <option value="6">Tool: 6</option>
-                  <option value="7">Tool: 7</option>
-                  <option value="8">Tool: 8</option>
-                  <option value="8888">Laser</option>
-                  <option value="other">Other Tool</option>
-                </select>
-                <div id="tool-set-custom-row" class="tool-custom-row" hidden>
-                  <label><span>Value</span><input id="tool-id" type="number" min="1" max="999" value="1"></label>
-                  <button type="button" id="tool-set" class="primary">Set</button>
+                <div class="tool-task-group">
+                  <div id="tool-set-row" class="tool-action-row">
+                    <select id="tool-set-select" aria-label="Set current tool">
+                      <option value="">Set current</option>
+                      <option value="-1">Empty</option>
+                      <option value="0">Probe</option>
+                      <option value="1">Tool 1</option>
+                      <option value="2">Tool 2</option>
+                      <option value="3">Tool 3</option>
+                      <option value="4">Tool 4</option>
+                      <option value="5">Tool 5</option>
+                      <option value="6">Tool 6</option>
+                      <option value="7">Tool 7</option>
+                      <option value="8">Tool 8</option>
+                      <option value="8888">Laser</option>
+                      <option value="other">Other</option>
+                    </select>
+                    <input id="tool-id" type="number" min="1" max="999" value="1" hidden aria-label="Custom current tool number">
+                    <button type="button" id="tool-set" class="primary">Set</button>
+                  </div>
                 </div>
+                <div class="tool-task-group">
+                  <div id="tool-calibrate-row" class="tool-action-row tool-single-action">
+                    <button type="button" id="tool-calibrate">Calibrate</button>
+                  </div>
+                </div>
+                <div id="tool-action-status" class="tool-action-status" aria-live="polite"></div>
               </div>
             </div>
           </div>
@@ -843,15 +866,15 @@
               <label><span>Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
               <label><span>Feed Min</span><input id="machine-feed-min" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
               <label><span>Feed Max</span><input id="machine-feed-max" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
-	              <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
-	            </div>
-	            <div class="machine-settings-actions">
-	              <button type="button" id="machine-learn">Learn from machine</button>
-	            </div>
-	            <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
-	            <div id="machine-learned-summary" class="machine-learned-summary"></div>
-	          </div>
-	        </details>
+              <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
+            </div>
+            <div class="machine-settings-actions">
+              <button type="button" id="machine-learn">Learn from machine</button>
+            </div>
+            <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
+            <div id="machine-learned-summary" class="machine-learned-summary"></div>
+          </div>
+        </details>
       </div>
     </section>
 

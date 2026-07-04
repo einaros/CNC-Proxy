@@ -107,6 +107,12 @@ func ChangeToolLine(toolID int) string {
 	return "M6T" + strconv.Itoa(toolID) + "\n"
 }
 
+// ContinueToolChangeLine builds the controller's manual tool-change continue
+// command, matching Controller.change() in the official controller.
+func ContinueToolChangeLine() string {
+	return "M490.2\n"
+}
+
 // CalibrateCurrentToolLine builds the controller's current-tool calibration
 // command.
 func CalibrateCurrentToolLine() string {

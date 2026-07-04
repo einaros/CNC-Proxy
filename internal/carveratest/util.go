@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/uwin/cnc-proxy/internal/protocol"
 	"github.com/uwin/cnc-proxy/internal/quicklz"
 )
 
@@ -34,9 +35,10 @@ func md5hex(b []byte) string {
 
 func itoa(n int) string { return strconv.Itoa(n) }
 
-// lastSegment returns the final path component, decoding 0x01-escaped spaces.
+// lastSegment returns the final path component, decoding controller-escaped
+// path characters.
 func lastSegment(p string) string {
-	p = strings.ReplaceAll(p, "\x01", " ")
+	p = protocol.Unescape(p)
 	p = strings.TrimSuffix(p, "/")
 	if i := strings.LastIndexByte(p, '/'); i >= 0 {
 		return p[i+1:]
@@ -44,14 +46,29 @@ func lastSegment(p string) string {
 	return p
 }
 
-// secondField returns the decoded second whitespace-separated token of a
-// command line, e.g. the path in "rm <path> -e".
-func secondField(line string) string {
+// commandArgs returns decoded non-flag command arguments after the command
+// name. The controller escapes spaces and shell metacharacters before sending,
+// so whitespace splitting is safe before unescaping.
+func commandArgs(line string) []string {
 	fields := strings.Fields(line)
-	if len(fields) < 2 {
+	args := make([]string, 0, len(fields))
+	for _, f := range fields[1:] {
+		if strings.HasPrefix(f, "-") {
+			continue
+		}
+		args = append(args, protocol.Unescape(f))
+	}
+	return args
+}
+
+// secondField returns the decoded second non-flag whitespace-separated token of
+// a command line, e.g. the path in "rm <path> -e".
+func secondField(line string) string {
+	args := commandArgs(line)
+	if len(args) == 0 {
 		return ""
 	}
-	return strings.ReplaceAll(fields[1], "\x01", " ")
+	return args[0]
 }
 
 // md5Target returns the path argument of a "md5sum <path> -e" command.
@@ -62,15 +79,11 @@ func md5Target(line string) string {
 // lsDir extracts and decodes the directory argument of "ls -e -s <dir>". It is
 // the last whitespace-separated token that isn't a flag.
 func lsDir(line string) string {
-	fields := strings.Fields(line)
-	dir := ""
-	for _, f := range fields[1:] { // skip "ls"
-		if strings.HasPrefix(f, "-") {
-			continue
-		}
-		dir = f
+	args := commandArgs(line)
+	if len(args) == 0 {
+		return ""
 	}
-	return strings.ReplaceAll(dir, "\x01", " ")
+	return args[len(args)-1]
 }
 
 // parentOf returns the parent directory of a machine-absolute path, without a

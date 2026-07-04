@@ -82,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gcode/active/run", s.runActiveGcode)     // runs selected path
 	mux.HandleFunc("POST /api/tool/current", s.setCurrentTool)         // body: {tool_id}
 	mux.HandleFunc("POST /api/tool/change", s.changeTool)              // body: {tool_id}
+	mux.HandleFunc("POST /api/tool/continue", s.continueToolChange)    // runs M490.2
 	mux.HandleFunc("POST /api/tool/drop", s.dropCurrentTool)           // runs M6T-1
 	mux.HandleFunc("POST /api/tool/calibrate", s.calibrateCurrentTool) // starts M491
 	mux.HandleFunc("POST /api/probe/z", s.probeZ)                      // one serialized Z probe
@@ -308,6 +309,8 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrProbeUnavailable):
 		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrToolChangeUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrMachineStatusStale):
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case session.Retryable(err):
@@ -438,6 +441,15 @@ func (s *Server) changeTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.svc.ChangeTool(*toolID)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
+}
+
+func (s *Server) continueToolChange(w http.ResponseWriter, r *http.Request) {
+	res, err := s.svc.ContinueToolChange()
 	if err != nil {
 		s.mapError(w, err)
 		return

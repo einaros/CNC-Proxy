@@ -718,7 +718,7 @@ func TestJogStaleStatusPausesMotionWithoutDisarming(t *testing.T) {
 }
 
 func TestJogLogsAlarmWithLastMotion(t *testing.T) {
-	mgr, fm, cleanup := newJogManager(t)
+	mgr, _, cleanup := newJogManager(t)
 	defer cleanup()
 	log := gcodelog.New(20)
 	mgr.cfg.Log = log
@@ -735,7 +735,9 @@ func TestJogLogsAlarmWithLastMotion(t *testing.T) {
 	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
 	drainUntil(t, s, "motion")
 
-	fm.SetStatus("<Alarm|MPos:0.1,0,0|WPos:0.1,0,0|H:10>")
+	if err := s.applyStatusPayload("<Alarm|MPos:0.1,0,0|WPos:0.1,0,0|H:10>"); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		for _, ln := range log.Recent() {

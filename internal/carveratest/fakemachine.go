@@ -7,6 +7,7 @@ package carveratest
 import (
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,17 +30,33 @@ type FakeMachine struct {
 	ftype              string            // advertised upload type ("lz" enables compression)
 	compressDownloads  bool              // if set, downloads send a .lz container
 	downloadPacketSize int               // packet size reported/sent for downloads
+	config             map[string]string // firmware config-get-all key/value surface
+	modelName          string            // SimpleShell model name ("C1", "CA1")
+	machineModel       int               // Kernel FACTORY_SET MachineModel
+	funcSetting        int               // Kernel FACTORY_SET FuncSetting
+	probeAddr          int               // model command probe address field
+	probeModel         *fakeProbeModel   // optional machine-coordinate mesh for probe collision
+	probeLaserActive   bool              // M841/M842 and M494.1/M494.2 probe laser state
+	lastProbe          *fakeProbeResult  // last G30/G38 contact result
+	insertedTool       *fakeInsertedTool // physical tool currently inserted in the fake spindle
+	refToolMZ          float64           // calibration reference tool machine Z, matching ATC REFMZ
+	curToolMZ          float64           // last calibrated current tool machine Z, matching ATC TOOLMZ
 	gcodes             []string          // CTRL_MULTI gcode lines received (motion/MDI)
 	controls           []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
 	gcodeReplies       map[string]string // exact line -> textual reply payload
 	uploadPacketSizes  []int             // packet sizes advertised by upload senders
 	unlockDoesNotClear bool              // test hook: $X replies but leaves status unchanged
 	m999DoesNotClear   bool              // test hook: M999 replies but leaves status unchanged
-	absolute           bool              // simulated modal distance mode for ordinary G0/G1 moves
-	unit               float64           // simulated modal unit scale, mm per gcode unit
-	motionMode         int               // simulated modal motion mode for ordinary axis words
-	feedMMMin          float64           // simulated modal G1 feed, in mm/min
+	transferActive     bool              // firmware has one global upload/download conversation
+	holdActive         bool              // feed hold freezes simulated motion/program time
+	holdStarted        time.Time
+	holdResumeState    string
+	absolute           bool    // simulated modal distance mode for ordinary G0/G1 moves
+	unit               float64 // simulated modal unit scale, mm per gcode unit
+	motionMode         int     // simulated modal motion mode for ordinary axis words
+	feedMMMin          float64 // simulated modal G1 feed, in mm/min
 	motion             []fakeMotionSegment
+	program            *fakeProgramRun
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when
@@ -57,10 +74,16 @@ func NewOn(addr string) (*FakeMachine, error) {
 		ln:                 ln,
 		files:              map[string][]byte{},
 		dirs:               map[string]bool{},
-		status:             "<Idle|MPos:0,0,0|WPos:0,0,0>",
+		status:             "<Idle|MPos:0,0,0|WPos:0,0,0|C:2,4,0,1|T:0,0.000>",
 		failCmd:            map[string]bool{},
 		gcodeReplies:       map[string]string{},
 		downloadPacketSize: 8192,
+		config:             defaultFakeMachineConfig(),
+		modelName:          "CA1",
+		machineModel:       2,
+		funcSetting:        4,
+		refToolMZ:          math.NaN(),
+		curToolMZ:          math.NaN(),
 		absolute:           true,
 		unit:               1,
 		motionMode:         fakeMotionRapid,
@@ -81,6 +104,10 @@ func (m *FakeMachine) SetStatus(s string) {
 	defer m.mu.Unlock()
 	m.status = s
 	m.motion = nil
+	m.program = nil
+	m.holdActive = false
+	m.holdStarted = time.Time{}
+	m.holdResumeState = ""
 }
 
 // SetStatusReplyDelay delays replies to `?` status polls. It is a test hook for
@@ -139,6 +166,16 @@ func (m *FakeMachine) File(path string) ([]byte, bool) {
 	defer m.mu.Unlock()
 	b, ok := m.files[path]
 	return b, ok
+}
+
+// PutFile seeds a remote file in the fake machine's SD catalog. It is a test
+// hook for scenarios where higher layers already consider a file synced.
+func (m *FakeMachine) PutFile(path string, content []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]byte, len(content))
+	copy(cp, content)
+	m.files[path] = cp
 }
 
 // HasDir reports whether a directory was created.
@@ -210,7 +247,6 @@ func (m *FakeMachine) send(c net.Conn, cmd byte, payload string) {
 }
 
 func (m *FakeMachine) handle(c net.Conn) {
-	defer c.Close()
 	var scan protocol.Scanner
 	buf := make([]byte, 16*1024)
 
@@ -228,6 +264,20 @@ func (m *FakeMachine) handle(c net.Conn) {
 		sendData  []byte // contents being sent during a download
 	)
 	pktSize := 8192
+	transferStarted := false
+	releaseTransfer := func() {
+		if !transferStarted {
+			return
+		}
+		m.mu.Lock()
+		m.transferActive = false
+		m.mu.Unlock()
+		transferStarted = false
+	}
+	defer func() {
+		releaseTransfer()
+		c.Close()
+	}()
 
 	for {
 		c.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -263,12 +313,16 @@ func (m *FakeMachine) handle(c net.Conn) {
 							m.send(c, protocol.CmdStatusRes, s)
 						case '!', '~', 0x18:
 							// Realtime control: record it so tests can assert it
-							// arrived. The firmware acts out-of-band and sends no
-							// reply (halt does emit an ALARM line, but we keep the
-							// fake minimal).
+							// arrived. The firmware acts out-of-band; feed hold and
+							// resume send no reply, while halt emits an immediate
+							// alarm/info line on the WiFi path.
 							m.mu.Lock()
 							m.controls = append(m.controls, f.Data[0])
+							reply := m.applyControlLocked(f.Data[0], time.Now())
 							m.mu.Unlock()
+							if reply != "" {
+								m.send(c, protocol.CmdNormalInfo, reply)
+							}
 						}
 					}
 				case protocol.CmdCtrlMulti:
@@ -278,14 +332,19 @@ func (m *FakeMachine) handle(c net.Conn) {
 					verb, arg := "", ""
 					if fields := strings.SplitN(line, " ", 2); len(fields) == 2 {
 						verb = fields[0]
-						arg = strings.ReplaceAll(strings.TrimSpace(fields[1]), "\x01", " ")
+						arg = protocol.Unescape(strings.TrimSpace(fields[1]))
 					}
 					xferPath = arg
 					received = nil
 					nextSeq = 0
 					if verb == "download" {
-						mode = modeDownload
 						m.mu.Lock()
+						if !m.beginTransferLocked(time.Now()) {
+							m.mu.Unlock()
+							m.send(c, protocol.CmdFileCancel, "ok\r\n")
+							m.send(c, protocol.CmdNormalInfo, "error: Machine is busy.\r\n")
+							break
+						}
 						plain := append([]byte(nil), m.files[xferPath]...)
 						_, exists := m.files[xferPath]
 						compress := m.compressDownloads
@@ -293,9 +352,14 @@ func (m *FakeMachine) handle(c net.Conn) {
 						m.mu.Unlock()
 						if !exists {
 							m.send(c, protocol.CmdFileCancel, "not found")
+							m.mu.Lock()
+							m.transferActive = false
+							m.mu.Unlock()
 							mode = modeIdle
 							break
 						}
+						transferStarted = true
+						mode = modeDownload
 						// The reported MD5 is always of the uncompressed content.
 						uncompressedMD5 := md5hex(plain)
 						sendData = plain
@@ -310,6 +374,15 @@ func (m *FakeMachine) handle(c net.Conn) {
 							totalPkts = 1
 						}
 					} else {
+						m.mu.Lock()
+						if !m.beginTransferLocked(time.Now()) {
+							m.mu.Unlock()
+							m.send(c, protocol.CmdFileCancel, "ok\r\n")
+							m.send(c, protocol.CmdNormalInfo, "error: Machine is busy.\r\n")
+							break
+						}
+						m.mu.Unlock()
+						transferStarted = true
 						mode = modeUpload
 					}
 				case protocol.CmdFileMD5:
@@ -355,6 +428,7 @@ func (m *FakeMachine) handle(c net.Conn) {
 										content = dec
 									} else {
 										m.send(c, protocol.CmdFileCancel, "decompress failed")
+										releaseTransfer()
 										mode = modeIdle
 										continue
 									}
@@ -365,6 +439,7 @@ func (m *FakeMachine) handle(c net.Conn) {
 								m.files[storePath] = cp
 								m.mu.Unlock()
 								m.send(c, protocol.CmdFileEnd, "")
+								releaseTransfer()
 								mode = modeIdle
 							}
 						} else {
@@ -378,6 +453,7 @@ func (m *FakeMachine) handle(c net.Conn) {
 				case protocol.CmdFileEnd:
 					if mode == modeDownload {
 						m.send(c, protocol.CmdFileEnd, "")
+						releaseTransfer()
 						mode = modeIdle
 					}
 				}
@@ -420,6 +496,298 @@ func (m *FakeMachine) sendDownloadPacket(c net.Conn, data []byte, pktSize int, s
 	c.Write(protocol.Encode(protocol.CmdFileData, payload))
 }
 
+func (m *FakeMachine) beginTransferLocked(now time.Time) bool {
+	if m.transferActive {
+		return false
+	}
+	if !m.fileOpsIdleLocked(now) {
+		return false
+	}
+	m.transferActive = true
+	return true
+}
+
+func (m *FakeMachine) fileOpsIdleLocked(now time.Time) bool {
+	status := m.statusAtLocked(now)
+	_, state, _, ok := parseFakeStatus(status)
+	return ok && state == "Idle"
+}
+
+func (m *FakeMachine) withIdleFileOp() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.fileOpsIdleLocked(time.Now())
+}
+
+func (m *FakeMachine) renamePathLocked(from, to string) {
+	if b, ok := m.files[from]; ok {
+		cp := append([]byte(nil), b...)
+		delete(m.files, from)
+		m.files[to] = cp
+	}
+	if m.dirs[from] {
+		delete(m.dirs, from)
+		m.dirs[to] = true
+	}
+	fromPrefix := strings.TrimRight(from, "/") + "/"
+	toPrefix := strings.TrimRight(to, "/") + "/"
+	for p, b := range m.files {
+		if strings.HasPrefix(p, fromPrefix) {
+			np := toPrefix + strings.TrimPrefix(p, fromPrefix)
+			cp := append([]byte(nil), b...)
+			delete(m.files, p)
+			m.files[np] = cp
+		}
+	}
+	for p := range m.dirs {
+		if strings.HasPrefix(p, fromPrefix) {
+			np := toPrefix + strings.TrimPrefix(p, fromPrefix)
+			delete(m.dirs, p)
+			m.dirs[np] = true
+		}
+	}
+}
+
+func (m *FakeMachine) applyControlLocked(ctrl byte, now time.Time) string {
+	switch ctrl {
+	case protocol.CtrlFeedHold:
+		if m.holdActive {
+			return ""
+		}
+		m.advanceMotionLocked(now)
+		m.advanceProgramLocked(now)
+		_, state, _, ok := parseFakeStatus(m.status)
+		if ok {
+			m.holdResumeState = state
+		}
+		m.holdActive = true
+		m.holdStarted = now
+		m.setStatusStateLocked("Hold")
+	case protocol.CtrlResume:
+		if !m.holdActive {
+			return ""
+		}
+		heldFor := now.Sub(m.holdStarted)
+		for i := range m.motion {
+			if m.motion[i].end.After(m.holdStarted) {
+				m.motion[i].start = m.motion[i].start.Add(heldFor)
+				m.motion[i].end = m.motion[i].end.Add(heldFor)
+			}
+		}
+		if m.program != nil && m.program.end.After(m.holdStarted) {
+			m.program.start = m.program.start.Add(heldFor)
+			m.program.end = m.program.end.Add(heldFor)
+		}
+		m.holdActive = false
+		m.holdStarted = time.Time{}
+		state := m.holdResumeState
+		if len(m.motion) > 0 || m.program != nil {
+			state = "Run"
+		}
+		if state == "" || state == "Hold" {
+			state = "Idle"
+		}
+		m.holdResumeState = ""
+		m.setStatusStateLocked(state)
+	case protocol.CtrlHalt:
+		m.advanceMotionLocked(now)
+		m.motion = nil
+		m.program = nil
+		m.holdActive = false
+		m.holdStarted = time.Time{}
+		m.holdResumeState = ""
+		m.setStatusStateLocked("Alarm")
+		m.upsertStatusFieldLocked("H", "1")
+		return "ALARM: Abort during cycle\r\n"
+	}
+	return ""
+}
+
+func (m *FakeMachine) clearAlarmLocked() {
+	m.motion = nil
+	m.program = nil
+	m.holdActive = false
+	m.holdStarted = time.Time{}
+	m.holdResumeState = ""
+	m.setStatusStateLocked("Idle")
+	m.removeStatusFieldLocked("H")
+}
+
+func (m *FakeMachine) homeLocked(now time.Time) {
+	m.advanceMotionLocked(now)
+	m.motion = nil
+	m.program = nil
+	bracketed, _, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		m.status = "<Idle|MPos:0.0000,0.0000,0.0000|WPos:0.0000,0.0000,0.0000|C:2,4,0,1|T:0,0.000>"
+		return
+	}
+	zero := []float64{0, 0, 0}
+	applyFakeAxesToFields(&fields, zero, zero)
+	m.status = formatFakeStatus(bracketed, "Idle", fields)
+}
+
+func (m *FakeMachine) startProgramLocked(path string, content []byte, now time.Time) {
+	m.advanceMotionLocked(now)
+	m.program = nil
+	startMotionCount := len(m.motion)
+	lines := fakeExecutableProgramLines(string(content))
+	for _, line := range lines {
+		m.applySimulatedGcodeLocked(line)
+	}
+	end := now.Add(time.Duration(len(lines)) * 50 * time.Millisecond)
+	if last := m.lastMotionSegmentLocked(); last != nil && last.end.After(end) {
+		end = last.end
+	}
+	if !end.After(now) {
+		end = now.Add(50 * time.Millisecond)
+	}
+	if len(lines) == 0 && len(m.motion) == startMotionCount {
+		// Empty programs still briefly look like an active run to status
+		// observers, matching the firmware's player state rather than an
+		// instantaneous no-op.
+		end = now.Add(50 * time.Millisecond)
+	}
+	m.program = &fakeProgramRun{path: path, start: now, end: end, lines: len(lines)}
+	m.upsertStatusFieldLocked("P", "0,0,0")
+	m.setStatusStateLocked("Run")
+}
+
+func (m *FakeMachine) defaultGcodeReplyLocked(line string, now time.Time) (string, bool) {
+	line = strings.TrimSpace(protocol.Unescape(line))
+	if line == "" {
+		return "", false
+	}
+	norm := strings.ToLower(stripFakeGcodeComments(line))
+	if strings.HasPrefix(norm, "n") && len(norm) > 1 && norm[1] >= '0' && norm[1] <= '9' {
+		if i := strings.IndexAny(norm, " \t"); i >= 0 {
+			norm = strings.TrimSpace(norm[i+1:])
+		}
+	}
+	tok := norm
+	if i := strings.IndexAny(tok, " \t"); i >= 0 {
+		tok = tok[:i]
+	}
+	base := tok
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+
+	switch {
+	case base == "m114":
+		status := m.statusAtLocked(now)
+		_, _, fields, ok := parseFakeStatus(status)
+		if !ok {
+			return "ok C: X:0.0000 Y:0.0000 Z:0.0000", true
+		}
+		axes := []float64{0, 0, 0}
+		if wi := findFakeStatusField(fields, "WPos"); wi >= 0 {
+			if vals, ok := parseFakeAxisList(fields[wi].value); ok {
+				axes = vals
+			}
+		} else if mi := findFakeStatusField(fields, "MPos"); mi >= 0 {
+			if vals, ok := parseFakeAxisList(fields[mi].value); ok {
+				axes = vals
+			}
+		}
+		return "ok C: " + formatFakeM114Axes(axes), true
+	case base == "m115":
+		return "FIRMWARE_NAME:Smoothieware, FIRMWARE_VERSION:1.0.5, X-CNC:1, X-GRBL_MODE:1\nok", true
+	case base == "m119":
+		return "X_min:0 Y_min:0 Z_min:0 X_max:0 Y_max:0 Z_max:0\nok", true
+	case base == "m105":
+		return "ok T:0.0 /0.0 B:0.0 /0.0", true
+	case tok == "version":
+		return "version = 1.0.5", true
+	case tok == "model":
+		return m.modelReplyLocked(), true
+	case tok == "time":
+		return "Build time: 2026-01-01 12:00:00", true
+	case tok == "echo":
+		return "echo: on", true
+	case tok == "mem":
+		return "Unused Heap: 0", true
+	case tok == "progress":
+		if m.program == nil {
+			return "Not playing", true
+		}
+		percent, elapsed := m.programProgressLocked(now)
+		return "file: " + m.program.path + ", " + itoa(percent) + " % complete, elapsed time: " + fakeElapsed(elapsed), true
+	case tok == "$" || tok == "$$":
+		return "$0=10\n$1=25\nok", true
+	case tok == "$#":
+		return "[G54:0.000,0.000,0.000]\n[G92:0.000,0.000,0.000]\nok", true
+	case tok == "$g":
+		return "[GC:" + m.modalStateLocked() + "]\nok", true
+	case tok == "$i":
+		return "[VER:1.0.5:CarveraAir]\n[OPT:V,15,128]\nok", true
+	case tok == "$n":
+		return "$N0=\n$N1=\nok", true
+	case base == "m220":
+		return "Feed override: 100%", true
+	case base == "m221":
+		return "Flow override: 100%", true
+	case base == "m211":
+		return "Soft endstops: on", true
+	case base == "m204":
+		return "Acceleration: 1000", true
+	case base == "m203":
+		return "Maximum feedrates: X3000 Y3000 Z2000", true
+	case base == "m206":
+		return "Home offset: X0 Y0 Z0", true
+	case base == "m301":
+		return "PID: P0 I0 D0", true
+	case base == "g30" || base == "g38":
+		if m.lastProbe == nil {
+			return "[PRB:0.0000,0.0000,0.0000:0]", true
+		}
+		status := "0"
+		if m.lastProbe.Hit {
+			status = "1"
+		}
+		return "[PRB:" + formatFakeProbePoint(m.lastProbe.Machine) + ":" + status + "]", true
+	}
+	return "", false
+}
+
+func (m *FakeMachine) modalStateLocked() string {
+	motion := "G0"
+	if m.motionMode == fakeMotionFeed {
+		motion = "G1"
+	}
+	unit := "G21"
+	if fakeNear(m.unit, 25.4) {
+		unit = "G20"
+	}
+	distance := "G91"
+	if m.absolute {
+		distance = "G90"
+	}
+	return strings.Join([]string{motion, unit, distance}, " ")
+}
+
+func (m *FakeMachine) programProgressLocked(now time.Time) (int, time.Duration) {
+	if m.program == nil {
+		return 0, 0
+	}
+	total := m.program.end.Sub(m.program.start)
+	elapsed := now.Sub(m.program.start)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	if total <= 0 || elapsed >= total {
+		return 100, total
+	}
+	percent := int((elapsed.Seconds() / total.Seconds()) * 100)
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 99 {
+		percent = 99
+	}
+	return percent, elapsed
+}
+
 func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 	line = strings.TrimSpace(line)
 	m.mu.Lock()
@@ -434,6 +802,10 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 
 	switch {
 	case strings.HasPrefix(line, "ls"):
+		if !m.withIdleFileOp() {
+			m.send(c, protocol.CmdLoadError, "error: Machine is busy.\r\n")
+			return
+		}
 		// Synthesize a listing of the requested directory's DIRECT children,
 		// from stored files/dirs. The dir is the last token of "ls -e -s <dir>".
 		dir := lsDir(line)
@@ -456,6 +828,10 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		}
 		m.send(c, protocol.CmdLoadFinish, "Load directory finished.\r\n")
 	case strings.HasPrefix(line, "md5sum"):
+		if !m.withIdleFileOp() {
+			m.send(c, protocol.CmdNormalInfo, "error: Machine is busy.\n")
+			return
+		}
 		// Mirror the firmware: md5sum does NOT parse flags and replies with a
 		// single NORMAL_INFO line, not packetized LOAD_* frames.
 		path := md5Target(line)
@@ -475,14 +851,30 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 			ft = "nc" // default: no compression
 		}
 		m.send(c, protocol.CmdNormalInfo, "ftype = "+ft+"\n")
+	case strings.HasPrefix(line, "config-set"):
+		args := configSetArgs(line)
+		if len(args) < 3 {
+			m.send(c, protocol.CmdNormalInfo, "Usage: config-set source setting value # where source is sd, setting is the key and value\r\n")
+			return
+		}
+		source, key, value := args[0], args[1], args[2]
+		if source != "sd" {
+			m.send(c, protocol.CmdNormalInfo, source+" source does not exist\r\n")
+			return
+		}
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		m.config[key] = value
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, source+": "+key+" has been set to "+value+"\r\n")
 	case strings.HasPrefix(line, "config-get-all"):
 		m.mu.Lock()
 		m.gcodes = append(m.gcodes, line)
 		reply, ok := m.gcodeReplies[line]
-		m.mu.Unlock()
 		if !ok {
-			reply = "soft_endstop.x_min=-300\nsoft_endstop.y_min=-200\nsoft_endstop.z_min=-120\nalpha_max=0\nbeta_max=0\ngamma_max=0\nalpha_max_rate=3000\nbeta_max_rate=3000\ngamma_max_rate=2000\ndefault_seek_rate=3000"
+			reply = m.configGetAllReplyLocked(strings.Contains(line, "-e"))
 		}
+		m.mu.Unlock()
 		m.send(c, protocol.CmdNormalInfo, strings.TrimRight(reply, "\r\n")+"\n")
 	case strings.EqualFold(line, "diagnose"):
 		// Real firmware emits DIAG_RES for diagnose, not NORMAL_INFO. Keep the
@@ -506,7 +898,7 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		m.mu.Lock()
 		m.gcodes = append(m.gcodes, line)
 		if !m.m999DoesNotClear {
-			m.status = "<Idle|MPos:0,0,0|WPos:0,0,0>"
+			m.clearAlarmLocked()
 		}
 		m.mu.Unlock()
 		m.send(c, protocol.CmdNormalInfo, "WARNING: After HALT you should HOME before resume\nok\n")
@@ -514,29 +906,76 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		m.mu.Lock()
 		m.gcodes = append(m.gcodes, line)
 		if !m.unlockDoesNotClear {
-			m.status = "<Idle|MPos:0,0,0|WPos:0,0,0>"
+			m.clearAlarmLocked()
 		}
 		m.mu.Unlock()
 		m.send(c, protocol.CmdNormalInfo, "[Caution: Unlocked]\nok\n")
 	case line == "$H":
 		m.mu.Lock()
 		m.gcodes = append(m.gcodes, line)
-		m.status = "<Idle|MPos:0,0,0|WPos:0,0,0>"
+		m.homeLocked(time.Now())
 		m.mu.Unlock()
 		m.send(c, protocol.CmdNormalInfo, "ok\n")
 	case strings.HasPrefix(strings.ToLower(line), "play "):
 		m.mu.Lock()
-		m.gcodes = append(m.gcodes, protocol.Unescape(line))
+		playLine := protocol.Unescape(line)
+		m.gcodes = append(m.gcodes, playLine)
+		path := strings.TrimSpace(line[len("play "):])
+		path = protocol.Unescape(path)
+		if !m.fileOpsIdleLocked(time.Now()) {
+			m.mu.Unlock()
+			m.send(c, protocol.CmdNormalInfo, "error: Machine is busy.\r\n")
+			return
+		}
+		content, ok := m.files[path]
+		if !ok {
+			m.mu.Unlock()
+			m.send(c, protocol.CmdNormalInfo, "error: failed to open file ["+path+"]!\r\n")
+			return
+		}
+		m.startProgramLocked(path, content, time.Now())
 		m.mu.Unlock()
 	case strings.HasPrefix(line, "rm"):
+		if !m.withIdleFileOp() {
+			m.send(c, protocol.CmdLoadError, "error: Machine is busy.\r\n")
+			return
+		}
 		path := secondField(line)
 		m.mu.Lock()
 		delete(m.files, path)
+		delete(m.dirs, path)
+		for p := range m.files {
+			if strings.HasPrefix(p, strings.TrimRight(path, "/")+"/") {
+				delete(m.files, p)
+			}
+		}
+		for p := range m.dirs {
+			if strings.HasPrefix(p, strings.TrimRight(path, "/")+"/") {
+				delete(m.dirs, p)
+			}
+		}
 		m.mu.Unlock()
 		m.send(c, protocol.CmdLoadFinish, "ok\r\n")
 	case strings.HasPrefix(line, "mv"):
+		if !m.withIdleFileOp() {
+			m.send(c, protocol.CmdLoadError, "error: Machine is busy.\r\n")
+			return
+		}
+		args := commandArgs(line)
+		if len(args) < 2 {
+			m.send(c, protocol.CmdLoadError, "error: missing rename target\r\n")
+			return
+		}
+		from, to := args[0], args[1]
+		m.mu.Lock()
+		m.renamePathLocked(from, to)
+		m.mu.Unlock()
 		m.send(c, protocol.CmdLoadFinish, "ok\r\n")
 	case strings.HasPrefix(line, "mkdir"):
+		if !m.withIdleFileOp() {
+			m.send(c, protocol.CmdLoadError, "error: Machine is busy.\r\n")
+			return
+		}
 		path := secondField(line)
 		m.mu.Lock()
 		m.dirs[path] = true
@@ -556,6 +995,9 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		m.gcodes = append(m.gcodes, line)
 		m.applySimulatedGcodeLocked(line)
 		reply, ok := m.gcodeReplies[line]
+		if !ok {
+			reply, ok = m.defaultGcodeReplyLocked(line, time.Now())
+		}
 		m.mu.Unlock()
 		resp, _ := protocol.ClassifyGcode(line)
 		if ok {
@@ -613,10 +1055,101 @@ type fakeMotionSegment struct {
 	toW   []float64
 }
 
+type fakeProgramRun struct {
+	path  string
+	start time.Time
+	end   time.Time
+	lines int
+}
+
 const (
 	fakeFirmwareMaxXYMMMin = 3000.0
 	fakeFirmwareMaxZMMMin  = 2000.0
 )
+
+func defaultFakeMachineConfig() map[string]string {
+	return map[string]string{
+		"coordinate.anchor1_x":         "-287.51",
+		"coordinate.anchor1_y":         "-202.11",
+		"coordinate.anchor2_offset_x":  "88.5",
+		"coordinate.anchor2_offset_y":  "45.0",
+		"coordinate.toolrack_offset_x": "126.0",
+		"coordinate.toolrack_offset_y": "196.0",
+		"coordinate.toolrack_z":        "-108",
+		"coordinate.rotation_offset_x": "41.5",
+		"coordinate.rotation_offset_y": "82.5",
+		"coordinate.rotation_offset_z": "23.0",
+		"coordinate.anchor_width":      "15.0",
+		"coordinate.anchor_length":     "100.0",
+		"coordinate.worksize_x":        "300.0",
+		"coordinate.worksize_y":        "200.0",
+		"coordinate.clearance_x":       "-5.0",
+		"coordinate.clearance_y":       "-21.0",
+		"coordinate.clearance_z":       "-3.0",
+		"default_feed_rate":            "1000",
+		"default_seek_rate":            "3000.0",
+		"alpha_max_rate":               "3000.0",
+		"beta_max_rate":                "3000.0",
+		"gamma_max_rate":               "2000.0",
+		"soft_endstop.enable":          "true",
+		"soft_endstop.x_min":           "-302.0",
+		"soft_endstop.y_min":           "-212.0",
+		"soft_endstop.z_min":           "-121.0",
+		"laser_module_offset_x":        "0",
+		"laser_module_offset_y":        "0",
+		"laser_module_offset_z":        "-7.0",
+		"atc.probe.fast_rate_mm_m":     "500",
+		"atc.probe.slow_rate_mm_m":     "100",
+		"atc.probe.retract_mm":         "2",
+	}
+}
+
+func (m *FakeMachine) modelReplyLocked() string {
+	name := m.modelName
+	if name == "" {
+		name = fakeMachineModelName(m.machineModel)
+	}
+	return "model = " + name + ", " + itoa(m.machineModel) + ", " + itoa(m.funcSetting) + ", " + itoa(m.probeAddr)
+}
+
+func fakeMachineModelName(id int) string {
+	switch id {
+	case 1:
+		return "C1"
+	case 2:
+		return "CA1"
+	default:
+		return "C1"
+	}
+}
+
+func (m *FakeMachine) configGetAllReplyLocked(sendEOF bool) string {
+	keys := make([]string, 0, len(m.config))
+	for key := range m.config {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(m.config[key])
+		b.WriteByte('\n')
+	}
+	if sendEOF {
+		b.WriteByte(0x04)
+	}
+	return b.String()
+}
+
+func configSetArgs(line string) []string {
+	fields := strings.Fields(line)
+	args := make([]string, 0, len(fields))
+	for _, f := range fields[1:] {
+		args = append(args, protocol.Unescape(f))
+	}
+	return args
+}
 
 const (
 	fakeMotionRapid = iota
@@ -642,6 +1175,9 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 	if line == "" {
 		return
 	}
+	if m.applyToolGcodeLocked(line) {
+		return
+	}
 	if strings.HasPrefix(strings.ToUpper(line), "$J") {
 		words := parseFakeGcodeWords(line)
 		values, has := fakeWordValues(words, 1)
@@ -660,6 +1196,8 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 	}
 	hasG10 := false
 	hasG53 := false
+	hasDwell := false
+	hasProbe := false
 	lineMotionMode := -1
 	var lineAbsolute *bool
 	unit := m.unit
@@ -680,12 +1218,17 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 			if subcode == 0 {
 				lineMotionMode = fakeMotionFeed
 			}
+		case 4:
+			hasDwell = true
 		case 10:
 			hasG10 = true
 		case 20:
 			unit = 25.4
 		case 21:
 			unit = 1
+		case 30, 38:
+			hasProbe = true
+			lineMotionMode = fakeMotionFeed
 		case 53:
 			hasG53 = true
 		case 90:
@@ -713,9 +1256,20 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 		m.feedMMMin = values['F']
 	}
 
+	if hasDwell {
+		m.appendDwellLocked(fakeDwellDuration(words))
+		return
+	}
 	if hasG10 && fakeNear(values['L'], 20) && fakeNear(values['P'], 0) {
 		m.advanceMotionLocked(time.Now())
+		if has['Z'] {
+			m.setReferenceToolMZLocked()
+		}
 		m.applyWorkPositionLocked(fakeAxisValues(values, has))
+		return
+	}
+	if hasProbe {
+		m.applyProbeMoveLocked(line, values, has, hasG53)
 		return
 	}
 	axes := fakeAxisValues(values, has)
@@ -723,7 +1277,7 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 		return
 	}
 	feedMMMin := 0.0
-	if m.motionMode == fakeMotionFeed {
+	if m.motionMode == fakeMotionFeed || hasProbe {
 		feedMMMin = m.feedMMMin
 	}
 	if hasG53 || m.absolute {
@@ -731,6 +1285,61 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 		return
 	}
 	m.applyRelativeMoveLocked(axes, feedMMMin)
+}
+
+func (m *FakeMachine) applyToolGcodeLocked(line string) bool {
+	words := parseFakeGcodeWords(stripFakeGcodeComments(line))
+	if len(words) == 0 {
+		return false
+	}
+	mcode, subcode, hasM := 0, 0, false
+	toolID, hasTool := 0, false
+	for _, w := range words {
+		switch w.letter {
+		case 'M':
+			mcode, subcode = splitFakeGCode(w.value)
+			hasM = true
+		case 'T':
+			toolID = int(math.Round(w.value))
+			hasTool = true
+		}
+	}
+	if !hasM {
+		return false
+	}
+	switch {
+	case mcode == 841 || (mcode == 494 && (subcode == 0 || subcode == 1)):
+		m.probeLaserActive = true
+		return true
+	case mcode == 842 || (mcode == 494 && subcode == 2):
+		m.probeLaserActive = false
+		return true
+	case mcode == 491:
+		m.calibrateActiveToolLocked("M491")
+		return true
+	case mcode == 493 && (subcode == 0 || subcode == 1):
+		m.setToolOffsetFromProbeLocked()
+		return true
+	case mcode == 493 && subcode == 2 && hasTool:
+		m.setActiveToolPreserveOffsetLocked(toolID)
+		if toolID == 9999 {
+			m.probeLaserActive = true
+		} else if toolID != 8888 {
+			m.probeLaserActive = false
+		}
+		return true
+	case mcode == 490 && subcode == 1:
+		m.enterToolChangeWaitLocked(toolID, hasTool)
+		return true
+	case mcode == 490 && subcode == 2:
+		m.continueToolChangeLocked()
+		return true
+	case mcode == 6 && hasTool:
+		m.beginToolChangeLocked(toolID)
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *FakeMachine) applyRelativeMoveLocked(delta map[byte]float64, feedMMMin float64) {
@@ -887,7 +1496,12 @@ func (m *FakeMachine) applyWorkPositionLocked(targets map[byte]float64) {
 }
 
 func (m *FakeMachine) statusAtLocked(now time.Time) string {
+	if m.holdActive {
+		m.setStatusStateLocked("Hold")
+		return m.status
+	}
 	m.advanceMotionLocked(now)
+	m.advanceProgramLocked(now)
 	return m.status
 }
 
@@ -906,6 +1520,9 @@ func (m *FakeMachine) advanceMotionLocked(now time.Time) {
 		m.motion = m.motion[1:]
 	}
 	if len(m.motion) == 0 {
+		if state == "Run" && m.program == nil {
+			state = "Idle"
+		}
 		m.status = formatFakeStatus(bracketed, state, fields)
 		return
 	}
@@ -920,6 +1537,7 @@ func (m *FakeMachine) advanceMotionLocked(now time.Time) {
 		}
 	}
 	applyFakeAxesToFields(&fields, mpos, wpos)
+	state = "Run"
 	m.status = formatFakeStatus(bracketed, state, fields)
 }
 
@@ -937,6 +1555,70 @@ func (m *FakeMachine) appendMotionLocked(bracketed bool, state string, fields []
 		fromW: append([]float64(nil), fromW...),
 		toW:   append([]float64(nil), toW...),
 	})
+	state = "Run"
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) appendDwellLocked(dur time.Duration) {
+	if dur <= 0 {
+		return
+	}
+	now := time.Now()
+	m.advanceMotionLocked(now)
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	mi := findFakeStatusField(fields, "MPos")
+	if mi < 0 {
+		return
+	}
+	mpos, ok := parseFakeAxisList(fields[mi].value)
+	if !ok {
+		return
+	}
+	wpos := []float64(nil)
+	if wi := findFakeStatusField(fields, "WPos"); wi >= 0 {
+		if vals, ok := parseFakeAxisList(fields[wi].value); ok {
+			wpos = vals
+		}
+	}
+	start := now
+	if last := m.lastMotionSegmentLocked(); last != nil && last.end.After(now) {
+		start = last.end
+		mpos = append([]float64(nil), last.toM...)
+		if last.toW != nil {
+			wpos = append([]float64(nil), last.toW...)
+		}
+	}
+	m.appendMotionLocked(bracketed, state, fields, start, mpos, mpos, wpos, wpos, dur)
+}
+
+func (m *FakeMachine) advanceProgramLocked(now time.Time) {
+	if m.program == nil {
+		return
+	}
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		m.program = nil
+		return
+	}
+	if !now.Before(m.program.end) {
+		m.removeStatusFieldFrom(&fields, "P")
+		m.program = nil
+		if len(m.motion) == 0 && state == "Run" {
+			state = "Idle"
+		}
+		m.status = formatFakeStatus(bracketed, state, fields)
+		return
+	}
+	percent, elapsed := m.programProgressLocked(now)
+	played := 0
+	if m.program.lines > 0 {
+		played = int(float64(m.program.lines) * float64(percent) / 100)
+	}
+	m.upsertStatusFieldIn(&fields, "P", itoa(played)+","+itoa(percent)+","+itoa(int(elapsed.Seconds())))
+	state = "Run"
 	m.status = formatFakeStatus(bracketed, state, fields)
 }
 
@@ -1003,6 +1685,51 @@ func formatFakeStatus(bracketed bool, state string, fields []fakeStatusField) st
 	return "<" + b.String() + ">"
 }
 
+func (m *FakeMachine) setStatusStateLocked(state string) {
+	bracketed, _, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) upsertStatusFieldLocked(key, value string) {
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	m.upsertStatusFieldIn(&fields, key, value)
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) removeStatusFieldLocked(key string) {
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	m.removeStatusFieldFrom(&fields, key)
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) upsertStatusFieldIn(fields *[]fakeStatusField, key, value string) {
+	if idx := findFakeStatusField(*fields, key); idx >= 0 {
+		(*fields)[idx].value = value
+		return
+	}
+	*fields = append(*fields, fakeStatusField{key: key, value: value})
+}
+
+func (m *FakeMachine) removeStatusFieldFrom(fields *[]fakeStatusField, key string) {
+	out := (*fields)[:0]
+	for _, f := range *fields {
+		if strings.EqualFold(f.key, key) {
+			continue
+		}
+		out = append(out, f)
+	}
+	*fields = out
+}
+
 func findFakeStatusField(fields []fakeStatusField, key string) int {
 	for i, f := range fields {
 		if strings.EqualFold(f.key, key) {
@@ -1010,6 +1737,115 @@ func findFakeStatusField(fields []fakeStatusField, key string) int {
 		}
 	}
 	return -1
+}
+
+func (m *FakeMachine) currentMPosZLocked() float64 {
+	_, _, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return 0
+	}
+	if mi := findFakeStatusField(fields, "MPos"); mi >= 0 {
+		if vals, ok := parseFakeAxisList(fields[mi].value); ok && len(vals) >= 3 {
+			return vals[2]
+		}
+	}
+	return 0
+}
+
+func (m *FakeMachine) currentToolStatusLocked() (int, float64, bool) {
+	_, _, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return 0, 0, false
+	}
+	idx := findFakeStatusField(fields, "T")
+	if idx < 0 {
+		return 0, 0, false
+	}
+	vals, ok := parseFakeAxisList(fields[idx].value)
+	if !ok || len(vals) < 2 {
+		return 0, 0, false
+	}
+	return int(vals[0]), vals[1], true
+}
+
+func (m *FakeMachine) currentToolTargetStatusLocked() (int, float64, int, bool) {
+	_, _, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	idx := findFakeStatusField(fields, "T")
+	if idx < 0 {
+		return 0, 0, 0, false
+	}
+	vals, ok := parseFakeAxisList(fields[idx].value)
+	if !ok || len(vals) < 3 {
+		return 0, 0, 0, false
+	}
+	return int(vals[0]), vals[1], int(vals[2]), true
+}
+
+func (m *FakeMachine) setToolStatusLocked(toolID int, offset float64) {
+	if !fakeFinite(offset) {
+		offset = 0
+	}
+	_, oldOffset, ok := m.currentToolStatusLocked()
+	m.upsertStatusFieldLocked("T", formatFakeToolStatus(toolID, offset))
+	if ok {
+		m.applyToolOffsetDeltaLocked(offset - oldOffset)
+	}
+}
+
+func (m *FakeMachine) setToolTargetStatusLocked(toolID int, offset float64, target int) {
+	if !fakeFinite(offset) {
+		offset = 0
+	}
+	m.upsertStatusFieldLocked("T", formatFakeToolTargetStatus(toolID, offset, target))
+}
+
+func (m *FakeMachine) applyToolOffsetDeltaLocked(delta float64) {
+	if math.Abs(delta) < 0.0005 {
+		return
+	}
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	wi := findFakeStatusField(fields, "WPos")
+	wpos := []float64(nil)
+	if wi >= 0 {
+		vals, ok := parseFakeAxisList(fields[wi].value)
+		if !ok {
+			return
+		}
+		wpos = vals
+	} else {
+		mi := findFakeStatusField(fields, "MPos")
+		if mi < 0 {
+			return
+		}
+		vals, ok := parseFakeAxisList(fields[mi].value)
+		if !ok {
+			return
+		}
+		wpos = append([]float64(nil), vals...)
+		fields = append(fields, fakeStatusField{key: "WPos"})
+		wi = len(fields) - 1
+	}
+	wpos = ensureFakeAxisLen(wpos, 3)
+	wpos[2] -= delta
+	fields[wi].value = formatFakeAxisList(wpos)
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func formatFakeToolStatus(toolID int, offset float64) string {
+	if math.Abs(offset) < 0.0005 {
+		offset = 0
+	}
+	return strconv.Itoa(toolID) + "," + strconv.FormatFloat(offset, 'f', 3, 64)
+}
+
+func formatFakeToolTargetStatus(toolID int, offset float64, target int) string {
+	return formatFakeToolStatus(toolID, offset) + "," + strconv.Itoa(target)
 }
 
 func parseFakeAxisList(s string) ([]float64, bool) {
@@ -1231,4 +2067,85 @@ func fakeSelectedMachineMax(delta map[byte]float64) float64 {
 		}
 	}
 	return maxRate
+}
+
+func fakeExecutableProgramLines(program string) []string {
+	raw := strings.Split(program, "\n")
+	lines := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(stripFakeGcodeComments(line))
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func fakeDwellDuration(words []fakeGcodeWord) time.Duration {
+	seconds := 0.0
+	for _, w := range words {
+		switch w.letter {
+		case 'S':
+			seconds = w.value
+		case 'P':
+			// Smoothieware's G4 P parameter is seconds; drilling cycles may
+			// convert from milliseconds before generating G4.
+			seconds = w.value
+		}
+	}
+	if seconds <= 0 || !fakeFinite(seconds) {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+func formatFakeM114Axes(vals []float64) string {
+	names := []byte{'X', 'Y', 'Z', 'A', 'B', 'C'}
+	parts := make([]string, 0, len(vals))
+	for i, v := range vals {
+		if i >= len(names) {
+			break
+		}
+		parts = append(parts, string(names[i])+":"+strconv.FormatFloat(v, 'f', 4, 64))
+	}
+	if len(parts) == 0 {
+		return "X:0.0000 Y:0.0000 Z:0.0000"
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatFakeProbeAxes(vals []float64) string {
+	vals = ensureFakeAxisLen(append([]float64(nil), vals...), 3)
+	parts := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		parts[i] = strconv.FormatFloat(vals[i], 'f', 4, 64)
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatFakeProbePoint(p fakeVec3) string {
+	return strings.Join([]string{
+		strconv.FormatFloat(p.X, 'f', 4, 64),
+		strconv.FormatFloat(p.Y, 'f', 4, 64),
+		strconv.FormatFloat(p.Z, 'f', 4, 64),
+	}, ",")
+}
+
+func fakeElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	total := int(d.Seconds())
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	return twoDigits(h) + ":" + twoDigits(m) + ":" + twoDigits(s)
+}
+
+func twoDigits(n int) string {
+	if n < 10 {
+		return "0" + itoa(n)
+	}
+	return itoa(n)
 }

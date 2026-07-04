@@ -395,7 +395,7 @@ func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
 		return MachineActionResult{Action: "set_tool", ToolID: toolID, Message: err.Error()}, err
 	}
 	display := strings.TrimSpace(protocol.SetCurrentToolLine(toolID))
-	out, err := s.sendConsoleMachineAction(display, protocol.SetCurrentToolLine(toolID))
+	out, err := s.sendToolMachineAction(display, protocol.SetCurrentToolLine(toolID))
 	res := MachineActionResult{
 		Action:  "set_tool",
 		ToolID:  toolID,
@@ -418,7 +418,7 @@ func (s *Service) ChangeTool(toolID int) (MachineActionResult, error) {
 		return MachineActionResult{Action: "change_tool", ToolID: toolID, Message: err.Error()}, err
 	}
 	display := strings.TrimSpace(protocol.ChangeToolLine(toolID))
-	out, err := s.sendConsoleMachineAction(display, protocol.ChangeToolLine(toolID))
+	out, err := s.sendToolMachineAction(display, protocol.ChangeToolLine(toolID))
 	res := MachineActionResult{
 		Action:  "change_tool",
 		ToolID:  toolID,
@@ -433,10 +433,28 @@ func (s *Service) ChangeTool(toolID int) (MachineActionResult, error) {
 	return res, nil
 }
 
+// ContinueToolChange mirrors the controller's M490.2 action, which clears the
+// firmware's manual tool-change waiting state after the operator confirms.
+func (s *Service) ContinueToolChange() (MachineActionResult, error) {
+	display := strings.TrimSpace(protocol.ContinueToolChangeLine())
+	out, err := s.sendToolContinueAction(display, protocol.ContinueToolChangeLine())
+	res := MachineActionResult{
+		Action:  "continue_tool_change",
+		Command: display,
+		Output:  out,
+		Message: "Tool-change continue command sent; machine confirmation was not available.",
+	}
+	if err != nil {
+		res.Message = err.Error()
+		return res, err
+	}
+	return res, nil
+}
+
 // DropCurrentTool mirrors the controller's M6T-1 drop-tool action.
 func (s *Service) DropCurrentTool() (MachineActionResult, error) {
 	display := strings.TrimSpace(protocol.ChangeToolLine(-1))
-	out, err := s.sendConsoleMachineAction(display, protocol.ChangeToolLine(-1))
+	out, err := s.sendToolMachineAction(display, protocol.ChangeToolLine(-1))
 	res := MachineActionResult{
 		Action:  "drop_tool",
 		ToolID:  -1,
@@ -454,7 +472,7 @@ func (s *Service) DropCurrentTool() (MachineActionResult, error) {
 // CalibrateCurrentTool mirrors the controller's M491 current-tool calibration.
 func (s *Service) CalibrateCurrentTool() (MachineActionResult, error) {
 	display := strings.TrimSpace(protocol.CalibrateCurrentToolLine())
-	out, err := s.sendConsoleMachineAction(display, protocol.CalibrateCurrentToolLine())
+	out, err := s.sendToolMachineAction(display, protocol.CalibrateCurrentToolLine())
 	res := MachineActionResult{
 		Action:  "calibrate_tool",
 		Command: display,
@@ -485,6 +503,66 @@ func (s *Service) sendConsoleMachineAction(displayLine, wireLine string) (string
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "sent: no reply observed")
 	}
 	return out, err
+}
+
+func (s *Service) sendToolMachineAction(displayLine, wireLine string) (string, error) {
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, displayLine)
+	var out string
+	err := s.arb.WithMachine(true, func(c *client.Conn) error {
+		o, e := c.SendConsoleCommand(ensureWireLine(wireLine), client.GcodeOpts{Cap: gcodeReplyCap})
+		out = o
+		if e != nil {
+			return e
+		}
+		s.refreshStatusBestEffort(c)
+		return nil
+	})
+	if out != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+	} else if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "sent: no reply observed")
+	}
+	return out, err
+}
+
+func (s *Service) sendToolContinueAction(displayLine, wireLine string) (string, error) {
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, displayLine)
+	var out string
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			if errors.Is(err, ErrMachineStatusStale) {
+				return err
+			}
+			return fmt.Errorf("%w: %v", ErrMachineStatusStale, err)
+		}
+		if st.State != machine.Tool {
+			return fmt.Errorf("%w: machine reports %s", ErrToolChangeUnavailable, statusSummary(st))
+		}
+		o, e := c.SendConsoleCommand(ensureWireLine(wireLine), client.GcodeOpts{Cap: gcodeReplyCap})
+		out = o
+		if e != nil {
+			return e
+		}
+		s.refreshStatusBestEffort(c)
+		return nil
+	})
+	if out != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+	} else if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "sent: no reply observed")
+	}
+	return out, err
+}
+
+func (s *Service) refreshStatusBestEffort(c *client.Conn) {
+	_, _ = s.queryRecoveryStatus(c)
 }
 
 func ensureWireLine(line string) string {

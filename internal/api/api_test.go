@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
 	"time"
 
 	"github.com/coder/websocket"
@@ -573,8 +573,9 @@ func TestMachineStatusEndpointRichFields(t *testing.T) {
 }
 
 func TestRunsEndpointDerivesObservedRun(t *testing.T) {
-	srv, _, tr := serverWithMachine(t)
+	srv, m, tr := serverWithMachine(t)
 	tr.Observe(machine.Idle)
+	m.PutFile("/sd/gcodes/a.nc", []byte("G1 X1\n"))
 	resp := postJSON(t, srv.URL+"/api/gcode", map[string]string{"line": "play /sd/gcodes/a.nc"})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -625,6 +626,7 @@ func TestWebUIServed(t *testing.T) {
 	resp := get(t, srv.URL+"/")
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	bodyText := string(body)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<!DOCTYPE html>") {
 		t.Errorf("index status=%d body-start=%.30q", resp.StatusCode, body)
 	}
@@ -634,10 +636,26 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="workarea-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing work area visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `<h2>Active job</h2>`, `id="gcode-console-view"`, `<h2>Gcode console</h2>`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-drop"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
-		if !strings.Contains(string(body), want) {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `<h2>Active job</h2>`, `id="gcode-console-view"`, `<h2>Gcode console</h2>`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `id="tool-action-status"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-3d-1`} {
+		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing %s", want)
 		}
+	}
+	for _, want := range []string{`id="tool-wait-row"`, `id="tool-wait-status"`, `id="tool-calibrate-row"`, `tool-single-action`, `tool-task-group`, `tool-state-row`} {
+		if !strings.Contains(bodyText, want) {
+			t.Errorf("index missing tool lifecycle grouping marker %s", want)
+		}
+	}
+	if strings.Contains(bodyText, "tool-two-actions") {
+		t.Errorf("tool Continue must not be grouped as a two-action peer with Calibrate")
+	}
+	continueIdx := strings.Index(bodyText, `id="tool-continue"`)
+	setIdx := strings.Index(bodyText, `id="tool-set-row"`)
+	calibrateRowIdx := strings.Index(bodyText, `id="tool-calibrate-row"`)
+	calibrateIdx := strings.Index(bodyText, `id="tool-calibrate"`)
+	feedbackIdx := strings.Index(bodyText, `id="tool-action-status"`)
+	if continueIdx < 0 || setIdx < 0 || calibrateRowIdx < 0 || calibrateIdx < 0 || feedbackIdx < 0 || !(continueIdx < setIdx && setIdx < calibrateRowIdx && calibrateRowIdx < calibrateIdx && calibrateIdx < feedbackIdx) {
+		t.Errorf("tool Calibrate must be the bottom action after Set and before local feedback")
 	}
 	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("index Cache-Control = %q, want no-store", got)
@@ -715,9 +733,14 @@ func TestWebUIServed(t *testing.T) {
 	if got := three.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("three.module.min.js Cache-Control = %q, want no-store", got)
 	}
-	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "THREE.WebGLRenderer", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active", "/api/tool/current", "/api/tool/change", "/api/tool/drop", "/api/tool/calibrate"} {
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "THREE.WebGLRenderer", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active", "/api/tool/current", "/api/tool/change", "/api/tool/continue", "/api/tool/calibrate"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
+		}
+	}
+	for _, want := range []string{`const waitingForTool = state.machine?.state === "Tool"`, `tool-wait-row`, `tool-wait-status`, `cal.disabled = pending || waitingForTool`, `change.disabled = pending || waitingForTool`, `set.disabled = pending || waitingForTool`, `cont.disabled = pending || !waitingForTool`} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing tool wait-state UI policy %s", want)
 		}
 	}
 	if strings.Contains(string(jsBody), "renderStatusFields") {
@@ -1425,6 +1448,7 @@ func TestActiveGcodeEndpoints(t *testing.T) {
 	if active.Path != "/sd/gcodes/my part.nc" || !active.Runnable || active.Preview == nil || active.Preview.MoveCount != 1 {
 		t.Fatalf("active = %+v", active)
 	}
+	m.PutFile("/sd/gcodes/my part.nc", []byte("G1 X1\n"))
 
 	req, _ := http.NewRequest("POST", srv.URL+"/api/gcode/active/run", nil)
 	runResp := do(t, req)
@@ -1471,11 +1495,21 @@ func TestToolActionEndpoints(t *testing.T) {
 	if changeResp.StatusCode != http.StatusAccepted {
 		t.Fatalf("change tool status = %d", changeResp.StatusCode)
 	}
-	reqDrop, _ := http.NewRequest("POST", srv.URL+"/api/tool/drop", nil)
-	dropResp := do(t, reqDrop)
-	dropResp.Body.Close()
-	if dropResp.StatusCode != http.StatusAccepted {
-		t.Fatalf("drop tool status = %d", dropResp.StatusCode)
+	if _, err := m.InsertTool("tool_6"); err != nil {
+		t.Fatal(err)
+	}
+	if snap := m.Snapshot(); snap.Status.State != machine.Tool || snap.Status.Tool == nil || snap.Status.Tool.Target == nil || *snap.Status.Tool.Target != 2 {
+		t.Fatalf("fake status after insert = %+v, want pending target 2", snap.Status.Tool)
+	}
+	reqContinue, _ := http.NewRequest("POST", srv.URL+"/api/tool/continue", nil)
+	continueResp := do(t, reqContinue)
+	continueResp.Body.Close()
+	if continueResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("continue tool status = %d", continueResp.StatusCode)
+	}
+	st, _ := tr.Current()
+	if st.State != machine.Idle || st.Tool == nil || st.Tool.Active != 2 || st.Tool.Target != nil || math.Abs(st.Tool.Offset) < 0.001 {
+		t.Fatalf("tracker after continue = %+v, want Idle active tool 2 with non-zero TLO", st)
 	}
 	req, _ := http.NewRequest("POST", srv.URL+"/api/tool/calibrate", nil)
 	calResp := do(t, req)
@@ -1487,9 +1521,44 @@ func TestToolActionEndpoints(t *testing.T) {
 		g[0] != "M493.2T4" ||
 		g[1] != "M493.2T8888" ||
 		g[2] != "M6T2" ||
-		g[3] != "M6T-1" ||
+		g[3] != "M490.2" ||
 		g[4] != "M491" {
 		t.Fatalf("machine gcodes = %v, want tool commands", g)
+	}
+}
+
+func TestToolCalibrationEndpointReportsObservedTLO(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	if _, err := m.InsertTool("tool_6"); err != nil {
+		t.Fatal(err)
+	}
+	tr.ObserveStatusPayload(m.Snapshot().Status.Raw)
+
+	req, _ := http.NewRequest("POST", srv.URL+"/api/tool/calibrate", nil)
+	resp := do(t, req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("calibrate status = %d", resp.StatusCode)
+	}
+	snap := m.Snapshot()
+	if snap.Status.Tool == nil || snap.Status.Tool.Offset == 0 {
+		t.Fatalf("fake status after calibration = %+v", snap.Status.Tool)
+	}
+	if !tr.ObserveStatusPayload(snap.Status.Raw) {
+		t.Fatalf("tracker rejected fake status %q", snap.Status.Raw)
+	}
+
+	machineResp := get(t, srv.URL+"/api/machine")
+	defer machineResp.Body.Close()
+	if machineResp.StatusCode != http.StatusOK {
+		t.Fatalf("machine status = %d", machineResp.StatusCode)
+	}
+	var status service.MachineStatus
+	if err := json.NewDecoder(machineResp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Tool == nil || status.Tool.Active != 2 || status.Tool.Offset == 0 {
+		t.Fatalf("api machine tool = %+v, want calibrated tool 2 with non-zero TLO", status.Tool)
 	}
 }
 
