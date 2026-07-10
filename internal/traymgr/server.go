@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/uwin/cnc-proxy/internal/webguard"
 )
 
 type Notification struct {
@@ -53,14 +55,20 @@ type Server struct {
 	mu            sync.Mutex
 	notifications []Notification
 	managerLog    []ManagerLogEntry
+	logLines      int // entries currently in the on-disk manager log file
 	startedAt     time.Time
 	restartedAt   time.Time
 }
 
+// managerLogMaxEntries bounds both the in-memory manager log and the on-disk
+// cnc-manager.log file.
+const managerLogMaxEntries = 200
+
 func NewServer(configPath string, supervisor *Supervisor, notifier Notifier) *Server {
 	now := time.Now()
 	logPath := DefaultManagerLogPath(configPath)
-	return &Server{configPath: configPath, supervisor: supervisor, notifier: notifier, restartCh: make(chan struct{}, 1), restartLag: 100 * time.Millisecond, processExit: func() { os.Exit(0) }, ready: make(chan struct{}), logPath: logPath, managerLog: loadManagerLog(logPath), startedAt: now, restartedAt: now}
+	entries, lines := loadManagerLog(logPath)
+	return &Server{configPath: configPath, supervisor: supervisor, notifier: notifier, restartCh: make(chan struct{}, 1), restartLag: 100 * time.Millisecond, processExit: func() { os.Exit(0) }, ready: make(chan struct{}), logPath: logPath, managerLog: entries, logLines: lines, startedAt: now, restartedAt: now}
 }
 
 func (s *Server) SetManagerProcessExit(fn func()) {
@@ -98,7 +106,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/webdav/remount", s.withAuth(s.remountWebDAV))
 	mux.HandleFunc("POST /api/notify", s.withAuth(s.notify))
 	mux.HandleFunc("POST /api/deploy", s.withAuth(s.deploy))
-	return mux
+	return webguard.Handler(mux, webguard.Options{
+		RequiresSameOrigin: managerRequiresSameOrigin,
+		AllowHost:          webguard.AllowIPLiteralOrLocalhost,
+	})
+}
+
+// managerRequiresSameOrigin guards every mutating method (POST/PUT/DELETE and
+// the WebDAV write methods proxied under /webdav) against cross-site browser
+// requests and DNS-rebound hosts. Read-only methods stay unguarded so status
+// pages, the SPA, and native WebDAV clients (which send no fetch metadata)
+// keep working.
+func managerRequiresSameOrigin(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *Server) localWebDAVProxy(w http.ResponseWriter, r *http.Request) {
@@ -638,11 +663,20 @@ func (s *Server) addManagerLog(level, source, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.managerLog = append(s.managerLog, entry)
-	if len(s.managerLog) > 200 {
-		s.managerLog = append([]ManagerLogEntry(nil), s.managerLog[len(s.managerLog)-200:]...)
+	if len(s.managerLog) > managerLogMaxEntries {
+		s.managerLog = append([]ManagerLogEntry(nil), s.managerLog[len(s.managerLog)-managerLogMaxEntries:]...)
 	}
 	if s.logPath != "" {
-		_ = appendManagerLogEntry(s.logPath, entry)
+		// Keep the on-disk file at the same bound as the in-memory log:
+		// append while under the cap, otherwise rewrite the file from the
+		// already-capped in-memory entries (which include this entry).
+		if s.logLines >= managerLogMaxEntries {
+			if rewriteManagerLogFile(s.logPath, s.managerLog) == nil {
+				s.logLines = len(s.managerLog)
+			}
+		} else if appendManagerLogEntry(s.logPath, entry) == nil {
+			s.logLines++
+		}
 	}
 }
 
@@ -667,6 +701,7 @@ func (s *Server) clearManagerLog() error {
 		}
 	}
 	s.managerLog = nil
+	s.logLines = 0
 	return nil
 }
 
@@ -752,13 +787,17 @@ func appendManagerLogEntry(path string, entry ManagerLogEntry) error {
 	return json.NewEncoder(f).Encode(entry)
 }
 
-func loadManagerLog(path string) []ManagerLogEntry {
+// loadManagerLog reads the on-disk manager log, returning the most recent
+// entries (bounded to managerLogMaxEntries) and the total number of entries
+// currently stored in the file.
+func loadManagerLog(path string) ([]ManagerLogEntry, int) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	defer f.Close()
 	var out []ManagerLogEntry
+	total := 0
 	dec := json.NewDecoder(f)
 	for {
 		var entry ManagerLogEntry
@@ -766,14 +805,56 @@ func loadManagerLog(path string) []ManagerLogEntry {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return out
+			return out, total
 		}
 		out = append(out, entry)
-		if len(out) > 200 {
-			out = append([]ManagerLogEntry(nil), out[len(out)-200:]...)
+		total++
+		if len(out) > managerLogMaxEntries {
+			out = append([]ManagerLogEntry(nil), out[len(out)-managerLogMaxEntries:]...)
 		}
 	}
-	return out
+	return out, total
+}
+
+// rewriteManagerLogFile atomically replaces the on-disk manager log with the
+// given (already bounded) entries, using the same stage-then-rename discipline
+// as the store.
+func rewriteManagerLogFile(path string, entries []ManagerLogEntry) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".cnc-manager-log-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	enc := json.NewEncoder(tmp)
+	for _, entry := range entries {
+		if err := enc.Encode(entry); err != nil {
+			tmp.Close()
+			os.Remove(tmpName)
+			return err
+		}
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if d, derr := os.Open(dir); derr == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 func clearManagerLogFile(path string) error {

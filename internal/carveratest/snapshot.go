@@ -33,6 +33,7 @@ type Snapshot struct {
 	ProbeModel         *SnapshotProbeModel     `json:"probe_model,omitempty"`
 	LastProbe          *SnapshotProbeResult    `json:"last_probe,omitempty"`
 	InsertedTool       *SnapshotInsertedTool   `json:"inserted_tool,omitempty"`
+	Simulation         SnapshotSimulation      `json:"simulation"`
 	Config             map[string]string       `json:"config,omitempty"`
 	MachineProfile     SnapshotMachineProfile  `json:"machine_profile"`
 }
@@ -75,12 +76,24 @@ type SnapshotControl struct {
 }
 
 type SnapshotProbeModel struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Format    string     `json:"format"`
-	Triangles int        `json:"triangles"`
-	Bounds    fakeBounds `json:"bounds"`
-	LoadedAt  time.Time  `json:"loaded_at"`
+	ID           string                 `json:"id"`
+	Name         string                 `json:"name"`
+	Format       string                 `json:"format"`
+	Triangles    int                    `json:"triangles"`
+	Bounds       fakeBounds             `json:"bounds"`
+	SourceBounds fakeBounds             `json:"source_bounds"`
+	Placement    SnapshotModelPlacement `json:"placement"`
+	LoadedAt     time.Time              `json:"loaded_at"`
+}
+
+type SnapshotModelPlacement struct {
+	OffsetXMM   float64 `json:"offset_x_mm"`
+	OffsetYMM   float64 `json:"offset_y_mm"`
+	OffsetZMM   float64 `json:"offset_z_mm"`
+	RotationDeg float64 `json:"rotation_deg"`
+	XMinMM      float64 `json:"x_min_mm"`
+	YMinMM      float64 `json:"y_min_mm"`
+	TopZMM      float64 `json:"top_z_mm"`
 }
 
 type SnapshotProbeResult struct {
@@ -198,6 +211,7 @@ func (m *FakeMachine) Snapshot() Snapshot {
 		ProbeModel:         snapshotProbeModelLocked(m.probeModel),
 		LastProbe:          snapshotProbeResultLocked(m.lastProbe),
 		InsertedTool:       m.snapshotInsertedToolLocked(),
+		Simulation:         m.snapshotSimulationLocked(),
 		Config:             config,
 		MachineProfile:     m.snapshotMachineProfileLocked(st, config),
 	}
@@ -221,12 +235,29 @@ func snapshotProbeModelLocked(model *fakeProbeModel) *SnapshotProbeModel {
 		return nil
 	}
 	return &SnapshotProbeModel{
-		ID:        model.ID,
-		Name:      model.Name,
-		Format:    model.Format,
-		Triangles: len(model.Triangles),
-		Bounds:    model.Bounds,
-		LoadedAt:  model.LoadedAt,
+		ID:           model.ID,
+		Name:         model.Name,
+		Format:       model.Format,
+		Triangles:    len(model.Triangles),
+		Bounds:       model.Bounds,
+		SourceBounds: model.SourceBounds,
+		Placement:    snapshotModelPlacement(model),
+		LoadedAt:     model.LoadedAt,
+	}
+}
+
+func snapshotModelPlacement(model *fakeProbeModel) SnapshotModelPlacement {
+	if model == nil {
+		return SnapshotModelPlacement{}
+	}
+	return SnapshotModelPlacement{
+		OffsetXMM:   model.Placement.Offset.X,
+		OffsetYMM:   model.Placement.Offset.Y,
+		OffsetZMM:   model.Placement.Offset.Z,
+		RotationDeg: model.Placement.RotationDeg,
+		XMinMM:      model.Bounds.Min.X,
+		YMinMM:      model.Bounds.Min.Y,
+		TopZMM:      model.Bounds.Max.Z,
 	}
 }
 
@@ -253,7 +284,18 @@ func (m *FakeMachine) snapshotModalLocked() SnapshotModal {
 		units = "G20"
 	}
 	motion := "G0"
-	if m.motionMode == fakeMotionFeed {
+	switch m.motionCode {
+	case 2:
+		motion = "G2"
+	case 3:
+		motion = "G3"
+	case 81:
+		motion = "G81"
+	case 82:
+		motion = "G82"
+	case 83:
+		motion = "G83"
+	case 1:
 		motion = "G1"
 	}
 	return SnapshotModal{

@@ -196,6 +196,37 @@ func TestFakeMachineRenameMovesUploadedFile(t *testing.T) {
 	}
 }
 
+func TestFakeMachineDownloadPacketDelayPacesDownload(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	content := bytes.Repeat([]byte("G1 X1\n"), 1000) // 6000 bytes
+	m.PutFile("/sd/gcodes/slow.nc", content)
+	m.SetDownloadPacketSize(2048) // 3 packets
+	const perPacket = 60 * time.Millisecond
+	m.SetDownloadPacketDelay(perPacket)
+
+	conn := dialFakeClient(t, m)
+	var got bytes.Buffer
+	start := time.Now()
+	_, _, err = conn.Download("/sd/gcodes/slow.nc", &got, 5*time.Second, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !bytes.Equal(got.Bytes(), content) {
+		t.Fatalf("downloaded %d bytes, want %d", got.Len(), len(content))
+	}
+	// Three data packets, each delayed: the transfer must take at least the
+	// summed per-packet delay.
+	if min := 3 * perPacket; elapsed < min {
+		t.Fatalf("download elapsed = %s, want >= %s (delay hook not applied)", elapsed, min)
+	}
+}
+
 func TestFakeMachineRejectsFileOpsWhileRunning(t *testing.T) {
 	m, err := New()
 	if err != nil {
@@ -677,9 +708,7 @@ func TestFakeMachineProbeHitsLoadedSTLAndTracksLaser(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	if err := m.LoadProbeModel("plate.stl", []byte(testPlaneSTL(-5))); err != nil {
-		t.Fatal(err)
-	}
+	loadProbeModelAt(t, m, "plate.stl", []byte(testPlaneSTL(-5)), 0, 0, -5)
 	m.SetStatus("<Idle|MPos:5,5,2|WPos:0,0,7|C:2,4,0,1|T:0,0.000>")
 	c := dialFakeMachine(t, m)
 	defer c.Close()
@@ -736,9 +765,7 @@ func TestFakeMachineProbeChoosesNearestLoadedModelHit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	if err := m.LoadProbeModel("stack.stl", []byte(testStackedPlaneSTL(-8, -3))); err != nil {
-		t.Fatal(err)
-	}
+	loadProbeModelAt(t, m, "stack.stl", []byte(testStackedPlaneSTL(-8, -3)), 0, 0, -3)
 	m.SetStatus("<Idle|MPos:5,5,2|WPos:5,5,2|C:2,4,0,1|T:0,0.000>")
 	c := dialFakeMachine(t, m)
 	defer c.Close()
@@ -756,6 +783,298 @@ func TestFakeMachineProbeChoosesNearestLoadedModelHit(t *testing.T) {
 	}
 }
 
+func TestFakeMachinePositionsLoadedStockModelForProbeAndSimulation(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.LoadProbeModel("block.stl", []byte(testBlockSTL(0, 10, 0, 10, -5, 0))); err != nil {
+		t.Fatal(err)
+	}
+	xMin := 30.0
+	yMin := 40.0
+	topZ := -10.0
+	model, err := m.SetModelPlacement(ModelPlacementUpdate{XMinMM: &xMin, YMinMM: &yMin, TopZMM: &topZ})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Placement.XMinMM != xMin || model.Placement.YMinMM != yMin || model.Placement.TopZMM != topZ {
+		t.Fatalf("placement = %+v", model.Placement)
+	}
+	if model.Bounds.Min.X != xMin || model.Bounds.Min.Y != yMin || model.Bounds.Max.Z != topZ {
+		t.Fatalf("placed bounds = %+v", model.Bounds)
+	}
+	if model.SourceBounds.Min.X != 0 || model.SourceBounds.Max.Z != 0 {
+		t.Fatalf("source bounds changed = %+v", model.SourceBounds)
+	}
+	mesh, ok := m.ProbeModelMesh()
+	if !ok {
+		t.Fatal("missing probe mesh")
+	}
+	if mesh.Placement.XMinMM != xMin || mesh.Bounds.Min.X != xMin || mesh.Positions[0] < xMin-0.001 {
+		t.Fatalf("mesh placement = %+v first=%v", mesh.Placement, mesh.Positions[:3])
+	}
+	stock, ok := m.StockState()
+	if !ok {
+		t.Fatal("missing stock")
+	}
+	if stock.XMin != xMin || stock.YMin != yMin || math.Abs(stock.TopZ-topZ) > 0.001 {
+		t.Fatalf("stock placement = x %.3f y %.3f top %.3f", stock.XMin, stock.YMin, stock.TopZ)
+	}
+
+	m.SetStatus("<Idle|MPos:35,45,5|WPos:35,45,5|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+
+	writeCtrlMulti(t, c, "G38.2 Z-30 F100\n")
+	f := readFakeFrame(t, c)
+	if got := string(f.Data); f.Cmd != protocol.CmdNormalInfo || !strings.Contains(got, "[PRB:35.0000,45.0000,-10.0000:1]") {
+		t.Fatalf("placed probe reply cmd=%s data=%q", protocol.CmdName(f.Cmd), got)
+	}
+	snap := m.Snapshot()
+	if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != "block.stl" || math.Abs(snap.LastProbe.Machine.Z-topZ) > 0.001 {
+		t.Fatalf("last placed probe = %+v", snap.LastProbe)
+	}
+}
+
+func TestFakeMachineRotatesLoadedStockAroundCurrentCenter(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "block.stl", []byte(testBlockSTL(0, 20, 0, 10, -5, 0)), 30, 40, -10)
+
+	before := m.Snapshot().ProbeModel
+	if before == nil {
+		t.Fatal("missing probe model")
+	}
+	centerX := (before.Bounds.Min.X + before.Bounds.Max.X) / 2
+	centerY := (before.Bounds.Min.Y + before.Bounds.Max.Y) / 2
+	rot := 90.0
+	rotated, err := m.SetModelPlacement(ModelPlacementUpdate{RotationDeg: &rot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(rotated.Placement.RotationDeg-90) > 0.001 {
+		t.Fatalf("rotation = %.3f, want 90", rotated.Placement.RotationDeg)
+	}
+	if got := (rotated.Bounds.Min.X + rotated.Bounds.Max.X) / 2; math.Abs(got-centerX) > 0.001 {
+		t.Fatalf("rotated center X = %.3f, want %.3f", got, centerX)
+	}
+	if got := (rotated.Bounds.Min.Y + rotated.Bounds.Max.Y) / 2; math.Abs(got-centerY) > 0.001 {
+		t.Fatalf("rotated center Y = %.3f, want %.3f", got, centerY)
+	}
+	if math.Abs((rotated.Bounds.Max.X-rotated.Bounds.Min.X)-10) > 0.001 || math.Abs((rotated.Bounds.Max.Y-rotated.Bounds.Min.Y)-20) > 0.001 {
+		t.Fatalf("rotated bounds = %+v, want width 10 depth 20", rotated.Bounds)
+	}
+
+	m.SetStatus("<Idle|MPos:40,54,5|WPos:40,54,5|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, "G38.2 Z-30 F100\n")
+	f := readFakeFrame(t, c)
+	if got := string(f.Data); f.Cmd != protocol.CmdNormalInfo || !strings.Contains(got, "[PRB:40.0000,54.0000,-10.0000:1]") {
+		t.Fatalf("rotated probe reply cmd=%s data=%q", protocol.CmdName(f.Cmd), got)
+	}
+	snap := m.Snapshot()
+	if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != "block.stl" || math.Abs(snap.LastProbe.Machine.Z+10) > 0.001 {
+		t.Fatalf("last rotated probe = %+v", snap.LastProbe)
+	}
+}
+
+func TestFakeMachineAutoZProbeUsesCalibratedProbeTipAgainstStock(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "block.stl", []byte(testBlockSTL(0, 20, 0, 20, -80, -70)), 0, 0, -70)
+	probe, err := m.InsertTool("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetStatus("<Idle|MPos:10,10,-3|WPos:10,10,-3|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+
+	writeCtrlMulti(t, c, "M491\n")
+	st := queryFakeStatus(t, c)
+	if st.Tool == nil || st.Tool.Active != 0 || math.Abs(st.Tool.Offset) > 0.001 {
+		t.Fatalf("probe calibration status = %+v", st.Tool)
+	}
+
+	writeCtrlMulti(t, c, "M495 X10Y10O0F0\n")
+	st = queryFakeStatus(t, c)
+	wantContactMZ := -70.0 + probe.StickoutMM
+	wantRetract := configFloat(m.config, "atc.probe.retract_mm", 2)
+	assertAxis(t, st.MPos, "x", 10)
+	assertAxis(t, st.MPos, "y", 10)
+	assertAxis(t, st.MPos, "z", wantContactMZ+wantRetract)
+	assertAxis(t, st.WPos, "z", wantRetract)
+	snap := m.Snapshot()
+	if snap.ProbeLaserActive {
+		t.Fatal("probe laser left active after M495")
+	}
+	if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != "block.stl" || math.Abs(snap.LastProbe.Machine.Z-wantContactMZ) > 0.001 {
+		t.Fatalf("auto z probe last probe = %+v, want contact %.3f", snap.LastProbe, wantContactMZ)
+	}
+	if !strings.Contains(snap.LastProbe.Command, "F60") {
+		t.Fatalf("auto z probe slow command = %q, want firmware default F60", snap.LastProbe.Command)
+	}
+}
+
+func TestFakeMachineAutoZProbeSetsZ0AtFlatProbeTipContactOnSlopedModel(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "slope.stl", []byte(testSlopedPlaneSTL(0, 20, 0, 20, -80, -60)), 0, 0, -60)
+	probe, err := m.InsertTool("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetStatus("<Idle|MPos:10,10,-3|WPos:10,10,-3|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, "M491\n")
+	_ = queryFakeStatus(t, c)
+
+	writeCtrlMulti(t, c, "M495 X10Y10O0F0\n")
+	st := queryFakeStatus(t, c)
+	// The probe has a flat 2 mm tip, so a centered probe at X10 contacts the
+	// rising slope at X11, not at the center X10 and not at the 3.175 mm shoulder.
+	wantTipSurfaceZ := -69.0
+	wantContactMZ := wantTipSurfaceZ + probe.StickoutMM
+	wantRetract := configFloat(m.config, "atc.probe.retract_mm", 2)
+	assertAxis(t, st.MPos, "z", wantContactMZ+wantRetract)
+	assertAxis(t, st.WPos, "z", wantRetract)
+	snap := m.Snapshot()
+	if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != "slope.stl" || math.Abs(snap.LastProbe.Machine.Z-wantContactMZ) > 0.001 {
+		t.Fatalf("sloped flat-tip probe = %+v, want contact %.3f", snap.LastProbe, wantContactMZ)
+	}
+	if centerContact := -70.0 + probe.StickoutMM; math.Abs(snap.LastProbe.Machine.Z-centerContact) < 0.5 {
+		t.Fatalf("sloped flat-tip probe used center contact %.3f instead of disk contact %.3f", centerContact, wantContactMZ)
+	}
+}
+
+func TestFakeMachineAutoZProbeUsesProbeTipDiameterOverlap(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "tip-overlap.stl", []byte(testBlockSTL(10.75, 12, 9.5, 10.5, -80, -70)), 10.75, 9.5, -70)
+	probe, err := m.InsertTool("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetStatus("<Idle|MPos:10,10,-3|WPos:10,10,-3|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, "M491\n")
+	_ = queryFakeStatus(t, c)
+
+	writeCtrlMulti(t, c, "M495 X10Y10O0F0\n")
+	st := queryFakeStatus(t, c)
+	wantContactMZ := -70.0 + probe.StickoutMM
+	assertAxis(t, st.MPos, "z", wantContactMZ+configFloat(m.config, "atc.probe.retract_mm", 2))
+	snap := m.Snapshot()
+	if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != "tip-overlap.stl" || math.Abs(snap.LastProbe.Machine.Z-wantContactMZ) > 0.001 {
+		t.Fatalf("tip footprint probe = %+v, want %.3f", snap.LastProbe, wantContactMZ)
+	}
+}
+
+func TestFakeMachineAutoZProbeDoesNotUseShoulderAsZContact(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "shoulder-only.stl", []byte(testBlockSTL(-8.8, -8, -10.5, -9.5, -80, -68)), -8.8, -10.5, -68)
+	probe, err := m.InsertTool("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetStatus("<Idle|MPos:-10,-10,-3|WPos:-10,-10,-3|C:2,4,0,1|T:0,0.000>")
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, "M491\n")
+	_ = queryFakeStatus(t, c)
+
+	writeCtrlMulti(t, c, "M495 X-10Y-10O0F0\n")
+	st := queryFakeStatus(t, c)
+	wantContactMZ := configFloat(m.config, "soft_endstop.z_min", -121) + probe.StickoutMM
+	assertAxis(t, st.MPos, "z", wantContactMZ+configFloat(m.config, "atc.probe.retract_mm", 2))
+	snap := m.Snapshot()
+	if snap.LastProbe == nil || !snap.LastProbe.Hit || snap.LastProbe.Source != "bed" || math.Abs(snap.LastProbe.Machine.Z-wantContactMZ) > 0.001 {
+		t.Fatalf("shoulder-only probe = %+v, want bed contact %.3f", snap.LastProbe, wantContactMZ)
+	}
+}
+
+func TestFakeStockMaxSurfaceZInDiskUsesTriangulatedSurface(t *testing.T) {
+	stock := &fakeStock{
+		XMin:   0,
+		XMax:   10,
+		YMin:   0,
+		YMax:   10,
+		CellsX: 2,
+		CellsY: 2,
+		StepX:  10,
+		StepY:  10,
+		Heights: []float64{
+			-70, -60,
+			-70, -60,
+		},
+	}
+
+	z, ok := stock.maxSurfaceZInDisk(5, 5, 1)
+	if !ok || math.Abs(z-(-64)) > 0.001 {
+		t.Fatalf("stock disk max z = %.3f ok=%v, want -64", z, ok)
+	}
+}
+
+func TestFakeMachineDefaultsLoadedStockToConfiguredBedLowerLeft(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.LoadProbeModel("block.stl", []byte(testBlockSTL(0, 10, 0, 10, -5, 0))); err != nil {
+		t.Fatal(err)
+	}
+	snap := m.Snapshot()
+	if snap.ProbeModel == nil {
+		t.Fatal("missing probe model")
+	}
+	if snap.ProbeModel.Placement.XMinMM != -300 || snap.ProbeModel.Placement.YMinMM != -200 {
+		t.Fatalf("default placement = %+v, want lower-left work area", snap.ProbeModel.Placement)
+	}
+	if snap.ProbeModel.Bounds.Min.X != -300 || snap.ProbeModel.Bounds.Min.Y != -200 {
+		t.Fatalf("default bounds = %+v", snap.ProbeModel.Bounds)
+	}
+	if snap.ProbeModel.Bounds.Min.Z != -121 || snap.ProbeModel.Bounds.Max.Z != -116 {
+		t.Fatalf("default z bounds = %+v, want stock bottom on bed", snap.ProbeModel.Bounds)
+	}
+	stock, ok := m.StockState()
+	if !ok {
+		t.Fatal("missing stock")
+	}
+	if stock.XMin != -300 || stock.YMin != -200 {
+		t.Fatalf("default stock = x %.3f y %.3f", stock.XMin, stock.YMin)
+	}
+	if math.Abs(stock.BaseZ-(-121)) > 0.001 || math.Abs(stock.TopZ-(-116)) > 0.001 {
+		t.Fatalf("default stock z = base %.3f top %.3f, want bed contact", stock.BaseZ, stock.TopZ)
+	}
+	for i, h := range stock.Heights {
+		if math.Abs(h-stock.TopZ) > 0.001 {
+			t.Fatalf("default stock height[%d] = %.3f, want untouched top %.3f", i, h, stock.TopZ)
+		}
+	}
+}
+
 func TestFakeMachineProbeHitsLoadedGLTFAndGLB(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -770,9 +1089,7 @@ func TestFakeMachineProbeHitsLoadedGLTFAndGLB(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer m.Close()
-			if err := m.LoadProbeModel(tc.name, tc.data); err != nil {
-				t.Fatal(err)
-			}
+			loadProbeModelAt(t, m, tc.name, tc.data, 0, 0, -4)
 			m.SetStatus("<Idle|MPos:0.25,0.25,2|WPos:0.25,0.25,2|C:2,4,0,1|T:0,0.000>")
 			c := dialFakeMachine(t, m)
 			defer c.Close()
@@ -814,8 +1131,11 @@ func TestProbeModelParsesGLTFAndGLB(t *testing.T) {
 			if mesh.Triangles != 1 || len(mesh.Positions) != 9 {
 				t.Fatalf("mesh = %+v", mesh)
 			}
-			if mesh.Bounds.Min.Z != -4 || mesh.Bounds.Max.X != 1 || mesh.Bounds.Max.Y != 1 {
-				t.Fatalf("bounds = %+v", mesh.Bounds)
+			if mesh.SourceBounds.Min.Z != -4 || mesh.SourceBounds.Max.X != 1 || mesh.SourceBounds.Max.Y != 1 {
+				t.Fatalf("source bounds = %+v", mesh.SourceBounds)
+			}
+			if mesh.Bounds.Min.X != -300 || mesh.Bounds.Min.Y != -200 || math.Abs(mesh.Bounds.Min.Z-(-121)) > 0.001 {
+				t.Fatalf("placed bounds = %+v", mesh.Bounds)
 			}
 		})
 	}
@@ -847,6 +1167,180 @@ func TestFakeMachinePlayRunsUploadedProgramAndProgress(t *testing.T) {
 		t.Fatalf("final status kept progress field: %+v", done.Fields)
 	}
 	assertAxis(t, done.MPos, "x", 1)
+}
+
+func TestFakeMachineStockSimulationCutsUploadedProgram(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "block.stl", []byte(testBlockSTL(0, 20, 0, 12, -41, -36)), 0, 0, -36)
+	if _, err := m.InsertTool("tool_6"); err != nil {
+		t.Fatal(err)
+	}
+	speed := 100.0
+	shape := "flat"
+	if _, err := m.UpdateSimulationSettings(SimulationSettingsUpdate{SpeedScale: &speed, ToolShape: &shape}); err != nil {
+		t.Fatal(err)
+	}
+	conn := dialFakeClient(t, m)
+	uploadFakeContent(t, conn, "/sd/gcodes/slot.nc", []byte(strings.Join([]string{
+		"G21 G90",
+		"G0 X2 Y6 Z2",
+		"G1 Z-3 F600",
+		"G1 X18 F600",
+		"G0 Z2",
+	}, "\n")+"\n"))
+
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, protocol.PlayLine("/sd/gcodes/slot.nc"))
+	waitForFakeState(t, c, machine.Idle, time.Second)
+
+	stock, ok := m.StockState()
+	if !ok {
+		t.Fatal("missing stock")
+	}
+	center := stockHeightNearest(stock, 10, 6)
+	outside := stockHeightNearest(stock, 10, 0)
+	if center > -36.8 {
+		t.Fatalf("slot center height = %.3f, want cut near -37", center)
+	}
+	if math.Abs(outside-(-36)) > 0.001 {
+		t.Fatalf("outside height = %.3f, want untouched top -36", outside)
+	}
+	if stock.RemovedVolumeMM3 <= 0 {
+		t.Fatalf("removed volume = %.3f, want positive", stock.RemovedVolumeMM3)
+	}
+	if stl, ok := m.StockSTL(); !ok || !strings.Contains(string(stl[:min(len(stl), 64)]), "solid fakemachine-stock") {
+		t.Fatalf("stock stl ok=%v header=%q", ok, string(stl[:min(len(stl), 64)]))
+	}
+
+	if _, err := m.ResetStock(); err != nil {
+		t.Fatal(err)
+	}
+	reset, ok := m.StockState()
+	if !ok {
+		t.Fatal("missing reset stock")
+	}
+	if got := stockHeightNearest(reset, 10, 6); math.Abs(got-(-36)) > 0.001 || reset.RemovedVolumeMM3 != 0 {
+		t.Fatalf("reset stock center=%.3f removed=%.3f, want top and zero volume", got, reset.RemovedVolumeMM3)
+	}
+}
+
+func TestFakeMachineStockSimulationCutsInterpolatedArc(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "block.stl", []byte(testBlockSTL(0, 20, 0, 12, -41, -36)), 0, 0, -36)
+	if _, err := m.InsertTool("tool_3_175"); err != nil {
+		t.Fatal(err)
+	}
+	speed := 120.0
+	if _, err := m.UpdateSimulationSettings(SimulationSettingsUpdate{SpeedScale: &speed}); err != nil {
+		t.Fatal(err)
+	}
+	conn := dialFakeClient(t, m)
+	uploadFakeContent(t, conn, "/sd/gcodes/arc.nc", []byte(strings.Join([]string{
+		"G21 G90 G17",
+		"G0 X10 Y6 Z2",
+		"G1 Z-3 F600",
+		"G2 X14 Y6 I2 J0 F600",
+		"G0 Z2",
+	}, "\n")+"\n"))
+
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, protocol.PlayLine("/sd/gcodes/arc.nc"))
+	waitForFakeState(t, c, machine.Idle, time.Second)
+
+	stock, ok := m.StockState()
+	if !ok {
+		t.Fatal("missing stock")
+	}
+	if got := stockHeightNearest(stock, 12, 8); got > -36.8 {
+		t.Fatalf("arc midpoint height = %.3f, want cut below stock top", got)
+	}
+}
+
+func TestFakeMachineStockSimulationCutsDrillingCycle(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "block.stl", []byte(testBlockSTL(0, 20, 0, 12, -41, -36)), 0, 0, -36)
+	if _, err := m.InsertTool("tool_6"); err != nil {
+		t.Fatal(err)
+	}
+	speed := 100.0
+	if _, err := m.UpdateSimulationSettings(SimulationSettingsUpdate{SpeedScale: &speed}); err != nil {
+		t.Fatal(err)
+	}
+	conn := dialFakeClient(t, m)
+	uploadFakeContent(t, conn, "/sd/gcodes/drill.nc", []byte(strings.Join([]string{
+		"G21 G90 G98",
+		"G81 X10 Y6 Z-3 R2 F600",
+		"G80",
+	}, "\n")+"\n"))
+
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, protocol.PlayLine("/sd/gcodes/drill.nc"))
+	waitForFakeState(t, c, machine.Idle, time.Second)
+
+	stock, ok := m.StockState()
+	if !ok {
+		t.Fatal("missing stock")
+	}
+	if got := stockHeightNearest(stock, 10, 6); got > -36.8 {
+		t.Fatalf("drilled height = %.3f, want cut below stock top", got)
+	}
+	if snap := m.Snapshot(); snap.Modal.Motion != "G0" {
+		t.Fatalf("modal after G80 = %s, want G0", snap.Modal.Motion)
+	}
+}
+
+func TestFakeMachineStockSimulationHonorsG92WorkPosition(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	loadProbeModelAt(t, m, "block.stl", []byte(testBlockSTL(0, 20, 0, 12, -41, -36)), 0, 0, -36)
+	if _, err := m.InsertTool("tool_6"); err != nil {
+		t.Fatal(err)
+	}
+	speed := 100.0
+	if _, err := m.UpdateSimulationSettings(SimulationSettingsUpdate{SpeedScale: &speed}); err != nil {
+		t.Fatal(err)
+	}
+	conn := dialFakeClient(t, m)
+	uploadFakeContent(t, conn, "/sd/gcodes/g92.nc", []byte(strings.Join([]string{
+		"G21 G90",
+		"G53 G0 X10 Y6 Z2",
+		"G92 X0 Y0 Z2",
+		"G1 Z-3 F600",
+		"G1 X5 F600",
+	}, "\n")+"\n"))
+
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+	writeCtrlMulti(t, c, protocol.PlayLine("/sd/gcodes/g92.nc"))
+	st := waitForFakeState(t, c, machine.Idle, time.Second)
+	assertAxis(t, st.MPos, "x", 15)
+	assertAxis(t, st.WPos, "x", 5)
+
+	stock, ok := m.StockState()
+	if !ok {
+		t.Fatal("missing stock")
+	}
+	if got := stockHeightNearest(stock, 10, 6); got > -36.8 {
+		t.Fatalf("G92 physical start height = %.3f, want cut below stock top", got)
+	}
 }
 
 func TestFakeMachineSnapshotReportsVisualizedState(t *testing.T) {
@@ -915,6 +1409,20 @@ func dialFakeClient(t *testing.T, m *FakeMachine) *client.Conn {
 	return conn
 }
 
+func loadProbeModelAt(t *testing.T, m *FakeMachine, name string, data []byte, xMin, yMin, topZ float64) {
+	t.Helper()
+	if err := m.LoadProbeModel(name, data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetModelPlacement(ModelPlacementUpdate{
+		XMinMM: &xMin,
+		YMinMM: &yMin,
+		TopZMM: &topZ,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func uploadFakeContent(t *testing.T, conn *client.Conn, path string, content []byte) {
 	t.Helper()
 	if err := conn.Upload(path, bytes.NewReader(content), int64(len(content)), md5String(content), time.Second, nil); err != nil {
@@ -969,6 +1477,59 @@ func testStackedPlaneSTL(zs ...float64) string {
 		)
 	}
 	lines = append(lines, "endsolid stack")
+	return strings.Join(lines, "\n")
+}
+
+func testSlopedPlaneSTL(xMin, xMax, yMin, yMax, zAtXMin, zAtXMax float64) string {
+	v := []fakeVec3{
+		{xMin, yMin, zAtXMin},
+		{xMax, yMin, zAtXMax},
+		{xMax, yMax, zAtXMax},
+		{xMin, yMax, zAtXMin},
+	}
+	faces := [][3]int{{0, 1, 2}, {0, 2, 3}}
+	lines := []string{"solid slope"}
+	for _, f := range faces {
+		lines = append(lines,
+			"facet normal 0 0 0",
+			"outer loop",
+			"vertex "+strconvFloat(v[f[0]].X)+" "+strconvFloat(v[f[0]].Y)+" "+strconvFloat(v[f[0]].Z),
+			"vertex "+strconvFloat(v[f[1]].X)+" "+strconvFloat(v[f[1]].Y)+" "+strconvFloat(v[f[1]].Z),
+			"vertex "+strconvFloat(v[f[2]].X)+" "+strconvFloat(v[f[2]].Y)+" "+strconvFloat(v[f[2]].Z),
+			"endloop",
+			"endfacet",
+		)
+	}
+	lines = append(lines, "endsolid slope")
+	return strings.Join(lines, "\n")
+}
+
+func testBlockSTL(xMin, xMax, yMin, yMax, zMin, zMax float64) string {
+	v := []fakeVec3{
+		{xMin, yMin, zMin}, {xMax, yMin, zMin}, {xMax, yMax, zMin}, {xMin, yMax, zMin},
+		{xMin, yMin, zMax}, {xMax, yMin, zMax}, {xMax, yMax, zMax}, {xMin, yMax, zMax},
+	}
+	faces := [][3]int{
+		{4, 5, 6}, {4, 6, 7},
+		{0, 2, 1}, {0, 3, 2},
+		{0, 1, 5}, {0, 5, 4},
+		{1, 2, 6}, {1, 6, 5},
+		{2, 3, 7}, {2, 7, 6},
+		{3, 0, 4}, {3, 4, 7},
+	}
+	lines := []string{"solid block"}
+	for _, f := range faces {
+		lines = append(lines,
+			"facet normal 0 0 0",
+			"outer loop",
+			"vertex "+strconvFloat(v[f[0]].X)+" "+strconvFloat(v[f[0]].Y)+" "+strconvFloat(v[f[0]].Z),
+			"vertex "+strconvFloat(v[f[1]].X)+" "+strconvFloat(v[f[1]].Y)+" "+strconvFloat(v[f[1]].Z),
+			"vertex "+strconvFloat(v[f[2]].X)+" "+strconvFloat(v[f[2]].Y)+" "+strconvFloat(v[f[2]].Z),
+			"endloop",
+			"endfacet",
+		)
+	}
+	lines = append(lines, "endsolid block")
 	return strings.Join(lines, "\n")
 }
 
@@ -1083,6 +1644,39 @@ func queryFakeStatus(t *testing.T, c net.Conn) machine.Status {
 			return st
 		}
 	}
+}
+
+func waitForFakeState(t *testing.T, c net.Conn, want machine.State, timeout time.Duration) machine.Status {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var st machine.Status
+	for time.Now().Before(deadline) {
+		st = queryFakeStatus(t, c)
+		if st.State == want {
+			return st
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("state = %s, want %s", st.State, want)
+	return st
+}
+
+func stockHeightNearest(stock StockState, x, y float64) float64 {
+	xi := int(math.Round((x - stock.XMin) / stock.StepX))
+	yi := int(math.Round((y - stock.YMin) / stock.StepY))
+	if xi < 0 {
+		xi = 0
+	}
+	if yi < 0 {
+		yi = 0
+	}
+	if xi >= stock.CellsX {
+		xi = stock.CellsX - 1
+	}
+	if yi >= stock.CellsY {
+		yi = stock.CellsY - 1
+	}
+	return stock.Heights[yi*stock.CellsX+xi]
 }
 
 func waitForProbeLaser(t *testing.T, m *FakeMachine, want bool) {

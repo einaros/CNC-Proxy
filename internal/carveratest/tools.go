@@ -3,6 +3,7 @@ package carveratest
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -291,6 +292,69 @@ func (m *FakeMachine) calibrateActiveToolLocked(command string) {
 		Source:  fakeCalibrationSwitchSource,
 		At:      time.Now(),
 	}
+}
+
+func (m *FakeMachine) applyAutoZProbeLocked(words []fakeGcodeWord) {
+	xPath, hasX := fakeWordValue(words, 'X')
+	yPath, hasY := fakeWordValue(words, 'Y')
+	xOffset, hasO := fakeWordValue(words, 'O')
+	yOffset, hasF := fakeWordValue(words, 'F')
+	if !hasX || !hasY || !hasO || !hasF {
+		return
+	}
+	if m.insertedTool == nil || !m.insertedTool.Probe || !m.insertedTool.Calibrated {
+		m.lastProbe = &fakeProbeResult{
+			Command: "M495",
+			Hit:     false,
+			Machine: m.currentMPosPointLocked(),
+			Source:  "",
+			At:      time.Now(),
+		}
+		return
+	}
+	if active, _, ok := m.currentToolStatusLocked(); !ok || active != 0 {
+		m.setToolStatusLocked(0, 0)
+	}
+	oldAbsolute := m.absolute
+	defer func() { m.absolute = oldAbsolute }()
+
+	clearanceZ := configFloat(m.config, "coordinate.clearance_z", -3)
+	probeTargetZ := configFloat(m.config, "coordinate.toolrack_z", -108)
+	fastRate := configFloat(m.config, "atc.probe.fast_rate_mm_m", 300)
+	slowRate := configFloat(m.config, "atc.probe.slow_rate_mm_m", 60)
+	retract := configFloat(m.config, "atc.probe.retract_mm", 2)
+	probeHeight := configFloat(m.config, "atc.probe.probe_height_mm", 0)
+	runScriptLine := func(line string) {
+		m.applySimulatedGcodeLocked(line)
+		m.finishMotionLocked()
+	}
+
+	m.probeLaserActive = true
+	runScriptLine("G53 G0 Z" + fakeGcodeFloat(clearanceZ))
+	runScriptLine("G90 G0 X" + fakeGcodeFloat(xPath+xOffset) + " Y" + fakeGcodeFloat(yPath+yOffset))
+	runScriptLine("G38.2 Z" + fakeGcodeFloat(probeTargetZ) + " F" + fakeGcodeFloat(fastRate))
+	runScriptLine("G91 G0 Z" + fakeGcodeFloat(retract))
+	runScriptLine("G38.2 Z" + fakeGcodeFloat(-1-retract) + " F" + fakeGcodeFloat(slowRate))
+	runScriptLine("G10 L20 P0 Z" + fakeGcodeFloat(probeHeight))
+	runScriptLine("G91 G0 Z" + fakeGcodeFloat(retract))
+	m.probeLaserActive = false
+	m.setStatusStateLocked("Idle")
+}
+
+func fakeWordValue(words []fakeGcodeWord, letter byte) (float64, bool) {
+	if letter >= 'a' && letter <= 'z' {
+		letter -= 'a' - 'A'
+	}
+	for _, w := range words {
+		if w.letter == letter {
+			return w.value, true
+		}
+	}
+	return 0, false
+}
+
+func fakeGcodeFloat(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 func (m *FakeMachine) setToolOffsetFromProbeLocked() {

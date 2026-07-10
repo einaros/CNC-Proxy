@@ -18,6 +18,12 @@ const NOTICE_INFO_TIMEOUT_MS = 4500;
 const NOTICE_OK_TIMEOUT_MS = 3500;
 const NOTICE_ERROR_TIMEOUT_MS = 8000;
 const NOTICE_REPEAT_SUPPRESS_MS = 30000;
+const MACHINE_SETTING_IDS = [
+  "machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max",
+  "machine-origin-x", "machine-origin-y", "machine-feed-min", "machine-feed-max",
+  "tap-feed-mm-min", "machine-safe-z",
+];
+const MACRO_EDITOR_IDS = ["macro-name", "macro-description", "macro-color", "macro-lines", "macro-placement"];
 
 const state = {
   files: new Map(),
@@ -48,6 +54,8 @@ const state = {
   activeGcodePending: "",
   activeSelectPendingPath: "",
   toolPending: "",
+  toolChangeAwaitingContinue: false,
+  gamepadMacroBindingDirty: false,
   noticeKey: "",
   noticeSeq: 0,
   notices: new Map(),
@@ -80,6 +88,7 @@ const state = {
     targetLabel: "",
     zStepPending: 0,
     zStepLabel: "",
+    zProbePending: false,
     originPending: 0,
     originPendingAxis: "",
     originPendingMode: "",
@@ -119,6 +128,7 @@ const gcodeView = {
   cursor: 0,
   has4Axis: false,
   dragging: false,
+  timelineDragging: false,
   dragX: 0,
   dragY: 0,
   dragMode: "orbit",
@@ -448,12 +458,6 @@ function normalizeMachineSettings(machine) {
     Number.isFinite(learned.work_area?.y_min) && Number.isFinite(learned.work_area?.y_max);
   if (oldGeneratedDefault && !hasLearnedWorkArea) {
     machine = { ...machine, work_area: d.work_area };
-  }
-  const oldGeneratedFeedDefault = Number(machine.feed_min_mm_min || d.feed_min_mm_min) === 1 &&
-    Number(machine.feed_max_mm_min) === 1200 &&
-    Number(machine.tap_feed_mm_min || d.tap_feed_mm_min) === 600;
-  if (oldGeneratedFeedDefault) {
-    machine = { ...machine, feed_max_mm_min: d.feed_max_mm_min };
   }
   const normalizedWork = machine.work_area || {};
   const out = {
@@ -809,6 +813,20 @@ function setStatusMessage(key, text, kind = "", opts = {}) {
   setNotice(text, kind || "info", key, opts);
 }
 
+// Terminal action feedback lifecycle: callers set holder[textProp]/[kindProp]
+// on a terminal result, the render path displays it exactly once here, and the
+// stored feedback is cleared on that edge. The notice's own timeout removes it
+// from view; repeated renders never resurrect stale feedback or evict newer
+// notices.
+function consumeStatusFeedback(key, holder, textProp, kindProp) {
+  const text = holder[textProp];
+  if (!text) return;
+  const kind = holder[kindProp];
+  holder[textProp] = "";
+  holder[kindProp] = "";
+  setStatusMessage(key, text, kind, { force: true });
+}
+
 function clearVisibleNotices() {
   for (const notice of state.notices.values()) {
     if (notice.timer) clearTimeout(notice.timer);
@@ -1047,8 +1065,9 @@ function renderJog() {
   arm.classList.toggle("armed", j.armed);
   const armBusy = !!j.armPending || !!j.armQueuedAction;
   const originBusy = hasPendingOriginOperation();
+  const tapOperationBusy = originBusy || !!j.zProbePending;
   arm.disabled = armBusy;
-  setSoftDisabled(arm, !armBusy && ((j.caps && !j.caps.enabled) || j.link === "unsupported" || originBusy));
+  setSoftDisabled(arm, !armBusy && ((j.caps && !j.caps.enabled) || j.link === "unsupported" || tapOperationBusy));
   const feed = document.getElementById("tap-feed-mm-min");
   const machine = normalizeMachineSettings(state.ui.machine);
   const feedBounds = feedBoundsFor(machine);
@@ -1056,24 +1075,24 @@ function renderJog() {
   if (feed) {
     feed.min = String(Math.round(feedBounds.min));
     feed.max = String(Math.round(feedBounds.max));
-    if (feed !== document.activeElement) feed.value = String(feedValue);
-    feed.disabled = !!j.targetPending || !!j.zStepPending || originBusy;
+    if (!controlLocallyOwned(feed)) feed.value = String(feedValue);
+    feed.disabled = !!j.targetPending || !!j.zStepPending || tapOperationBusy;
   }
   for (const btn of document.querySelectorAll("[data-feed-step]")) {
     const step = Number(btn.dataset.feedStep) || 0;
     btn.disabled = !!feed?.disabled || (step < 0 && feedValue <= feedBounds.min) || (step > 0 && feedValue >= feedBounds.max);
   }
-  renderWorkMoveControls(originBusy);
+  renderWorkMoveControls(tapOperationBusy);
   renderOriginButtons();
   const zStepDistance = document.getElementById("z-step-distance");
-  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending || originBusy;
-  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending && !originBusy;
-  const zStepBusy = !!j.zStepPending || !!j.targetPending || originBusy;
+  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending || tapOperationBusy;
+  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending && !tapOperationBusy;
+  const zStepBusy = !!j.zStepPending || !!j.targetPending || tapOperationBusy;
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
     btn.disabled = zStepBusy;
     setSoftDisabled(btn, !zStepBusy && !zStepReady);
   }
-  setStatusMessage("tap-move", j.tapFeedback, j.tapFeedbackKind);
+  consumeStatusFeedback("tap-move", j, "tapFeedback", "tapFeedbackKind");
   const plot = document.getElementById("workarea-plot");
   if (plot) plot.classList.toggle("not-armed", !j.armed);
   renderWorkArea();
@@ -1143,36 +1162,46 @@ function machineReadyForOriginSet() {
 function renderOriginButtons() {
   const j = state.jog;
   const pendingAxis = hasPendingOriginOperation();
+  const zProbePending = !!j.zProbePending;
   const jogReady = !!j.caps?.enabled && j.link === "online" && j.armed;
   const externalJogBusy = !j.armed && j.availability && !j.availability.available && j.availability.reason === "busy";
   const apiReady = !j.armed && machineReadyForOriginSet() && !externalJogBusy;
-  const ready = (jogReady || apiReady) && !j.armPending && !j.targetPending && !j.zStepPending && !pendingAxis;
-  const busy = !!j.armPending || !!j.targetPending || !!j.zStepPending || !!pendingAxis;
+  const ready = (jogReady || apiReady) && !j.armPending && !j.targetPending && !j.zStepPending && !pendingAxis && !zProbePending;
+  const busy = !!j.armPending || !!j.targetPending || !!j.zStepPending || !!pendingAxis || zProbePending;
   const action = document.getElementById("origin-action");
   const actionValue = action?.value || "zero-x";
+  const probeSelected = actionValue === "probe-z";
+  const probeReady = apiReady && isProbeToolActive();
   if (action) action.disabled = busy;
-  for (const id of ["origin-value-x-wrap", "origin-value-y-wrap"]) {
+  for (const id of ["origin-value-x-wrap", "origin-value-y-wrap", "origin-value-z-wrap"]) {
     const wrap = document.getElementById(id);
     if (wrap) wrap.hidden = true;
   }
   const xNeeded = actionValue === "set-x";
   const yNeeded = actionValue === "set-y";
+  const zNeeded = actionValue === "set-z";
   const actionRow = action?.closest(".origin-row-action");
-  if (actionRow) actionRow.classList.toggle("needs-value", xNeeded || yNeeded);
+  if (actionRow) {
+    actionRow.classList.toggle("needs-value", xNeeded || yNeeded || zNeeded);
+  }
   const xWrap = document.getElementById("origin-value-x-wrap");
   const yWrap = document.getElementById("origin-value-y-wrap");
+  const zWrap = document.getElementById("origin-value-z-wrap");
   if (xWrap) xWrap.hidden = !xNeeded;
   if (yWrap) yWrap.hidden = !yNeeded;
+  if (zWrap) zWrap.hidden = !zNeeded;
   const xValue = document.getElementById("origin-value-x");
   const yValue = document.getElementById("origin-value-y");
+  const zValue = document.getElementById("origin-value-z");
   if (xValue) xValue.disabled = busy || !xNeeded;
   if (yValue) yValue.disabled = busy || !yNeeded;
+  if (zValue) zValue.disabled = busy || !zNeeded;
   renderSavedOriginSelect();
   const apply = document.getElementById("origin-apply");
   if (apply) {
     apply.disabled = busy;
-    setSoftDisabled(apply, !busy && !ready);
-    setTextIfChanged(apply, pendingAxis ? "Applying..." : "Apply");
+    setSoftDisabled(apply, !busy && !(probeSelected ? probeReady : ready));
+    setTextIfChanged(apply, zProbePending ? "Probing..." : (pendingAxis ? "Applying..." : "Apply"));
   }
   const save = document.getElementById("saved-origin-save");
   const label = document.getElementById("saved-origin-label");
@@ -1216,20 +1245,27 @@ function savedOriginLabel(origin) {
 function renderSavedOriginSelect() {
   const select = document.getElementById("saved-origin-select");
   if (!select) return;
-  const previous = select.value;
   const origins = savedOrigins();
-  select.innerHTML = "";
-  const empty = document.createElement("option");
-  empty.value = "";
-  empty.textContent = origins.length ? "Select saved zero" : "No saved zeros";
-  select.appendChild(empty);
-  for (const origin of origins) {
-    const option = document.createElement("option");
-    option.value = origin.id;
-    option.textContent = savedOriginLabel(origin);
-    select.appendChild(option);
+  const signature = JSON.stringify(origins.map((origin) => [origin.id, savedOriginLabel(origin)]));
+  // Rebuild options only when the backing list changed and the operator does
+  // not own the control (focused/open); a deferred rebuild happens on the next
+  // render after blur.
+  if (select.dataset.originsSignature !== signature && !controlLocallyOwned(select)) {
+    const previous = select.value;
+    select.innerHTML = "";
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = origins.length ? "Select saved zero" : "No saved zeros";
+    select.appendChild(empty);
+    for (const origin of origins) {
+      const option = document.createElement("option");
+      option.value = origin.id;
+      option.textContent = savedOriginLabel(origin);
+      select.appendChild(option);
+    }
+    if (origins.some((origin) => origin.id === previous)) select.value = previous;
+    select.dataset.originsSignature = signature;
   }
-  if (origins.some((origin) => origin.id === previous)) select.value = previous;
   select.disabled = hasPendingOriginOperation();
 }
 
@@ -1370,20 +1406,47 @@ function renderMachineSettings() {
 
 function setInputValue(id, value) {
   const el = document.getElementById(id);
-  if (!el || el === document.activeElement) return;
+  if (controlLocallyOwned(el)) return;
   el.value = Number.isFinite(value) ? String(value) : "";
 }
 
 function setControlValueIfIdle(id, value) {
   const el = document.getElementById(id);
-  if (!el || el === document.activeElement) return;
+  if (controlLocallyOwned(el)) return;
   el.value = value == null ? "" : String(value);
 }
 
 function setCheckedIfIdle(id, checked) {
   const el = document.getElementById(id);
-  if (!el || el === document.activeElement) return;
+  if (controlLocallyOwned(el)) return;
   el.checked = !!checked;
+}
+
+function controlLocallyOwned(el) {
+  return !el || el === document.activeElement || el.dataset.dirty === "1" || el.dataset.dragging === "1";
+}
+
+function markControlDirty(el) {
+  if (el) el.dataset.dirty = "1";
+}
+
+function clearControlDrafts(...items) {
+  for (const item of items.flat()) {
+    const el = typeof item === "string" ? document.getElementById(item) : item;
+    if (!el) continue;
+    delete el.dataset.dirty;
+    delete el.dataset.dragging;
+    el.setCustomValidity?.("");
+  }
+}
+
+function bindDirtyDraftControls(ids) {
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener("input", () => markControlDirty(el));
+    el.addEventListener("change", () => markControlDirty(el));
+  }
 }
 
 function renderMachineLearnedSummary(learned) {
@@ -1449,26 +1512,51 @@ async function learnMachineParameters() {
 
 function updateMachineSettings() {
   const current = state.ui.machine || defaultMachineSettings();
-  const read = (id, fallback) => finiteOr(document.getElementById(id)?.value, fallback);
+  const read = (id) => {
+    const el = document.getElementById(id);
+    const raw = String(el?.value ?? "").trim();
+    const value = Number(raw);
+    const ok = raw !== "" && Number.isFinite(value);
+    if (el) el.setCustomValidity(ok ? "" : "Enter a number.");
+    return { ok, value };
+  };
+  const values = {};
+  let valid = true;
+  for (const id of MACHINE_SETTING_IDS) {
+    const result = read(id);
+    values[id] = result.value;
+    if (!result.ok) valid = false;
+  }
+  if (!valid) {
+    for (const id of MACHINE_SETTING_IDS) {
+      const el = document.getElementById(id);
+      if (el?.validationMessage) {
+        el.reportValidity?.();
+        break;
+      }
+    }
+    return;
+  }
   state.ui.machine = normalizeMachineSettings({
     work_area: {
-      x_min: read("machine-x-min", current.work_area.x_min),
-      x_max: read("machine-x-max", current.work_area.x_max),
-      y_min: read("machine-y-min", current.work_area.y_min),
-      y_max: read("machine-y-max", current.work_area.y_max),
+      x_min: values["machine-x-min"],
+      x_max: values["machine-x-max"],
+      y_min: values["machine-y-min"],
+      y_max: values["machine-y-max"],
     },
     origin: {
-      x: read("machine-origin-x", current.origin.x),
-      y: read("machine-origin-y", current.origin.y),
+      x: values["machine-origin-x"],
+      y: values["machine-origin-y"],
     },
     saved_origins: current.saved_origins || [],
-    feed_min_mm_min: read("machine-feed-min", current.feed_min_mm_min),
-    feed_max_mm_min: read("machine-feed-max", current.feed_max_mm_min),
-    tap_feed_mm_min: read("tap-feed-mm-min", current.tap_feed_mm_min),
-    safe_z_mm: read("machine-safe-z", current.safe_z_mm),
+    feed_min_mm_min: values["machine-feed-min"],
+    feed_max_mm_min: values["machine-feed-max"],
+    tap_feed_mm_min: values["tap-feed-mm-min"],
+    safe_z_mm: values["machine-safe-z"],
     safe_z_disabled: !!current.safe_z_disabled,
     learned: current.learned || {},
   });
+  clearControlDrafts(MACHINE_SETTING_IDS);
   queueSaveUISettings();
   renderMachineSettings();
   renderWorkArea();
@@ -1990,7 +2078,6 @@ function redoOutline() {
 function setOutlineFeedback(text, kind = "") {
   state.outline.feedback = text;
   state.outline.feedbackKind = kind;
-  setStatusMessage("outline", text, kind, { force: true });
   renderOutlineCapture();
 }
 
@@ -2084,7 +2171,7 @@ function renderOutlineCapture() {
   }
   if (fieldControls) fieldControls.hidden = !fieldReady;
   if (spacing) {
-    spacing.value = pathNum(fieldProbeSpotGap());
+    if (!controlLocallyOwned(spacing)) spacing.value = pathNum(fieldProbeSpotGap());
     spacing.disabled = busy;
   }
   if (fieldProbe) {
@@ -2102,7 +2189,7 @@ function renderOutlineCapture() {
     setSoftDisabled(exportHeight, !busy && o.fieldProbeResults.length < 3);
   }
   if (summary) summary.textContent = outlineSummaryText();
-  setStatusMessage("outline", o.feedback, o.feedbackKind);
+  consumeStatusFeedback("outline", o, "feedback", "feedbackKind");
 }
 
 function toggleOutlineCurveFit() {
@@ -2119,9 +2206,19 @@ function toggleOutlineProbePoint() {
 }
 
 function updateOutlineFieldSpacing() {
-  const current = fieldProbeSpotGap();
-  const value = finiteOr(document.getElementById("outline-field-spacing")?.value, current);
+  const input = document.getElementById("outline-field-spacing");
+  const raw = String(input?.value ?? "").trim();
+  const value = Number(raw);
+  if (!input || raw === "" || !Number.isFinite(value)) {
+    if (input) {
+      input.setCustomValidity("Enter a number.");
+      input.reportValidity?.();
+    }
+    return;
+  }
+  input.setCustomValidity("");
   state.outline.fieldSpotGapMM = Math.max(0, Math.min(250, value));
+  clearControlDrafts(input);
   clearFieldProbeData(true);
   updateFieldProbePreview();
   renderOutlineCapture();
@@ -3011,8 +3108,10 @@ function renderGamepadSettings() {
   renderGamepadMacroBindings();
 }
 
-function renderGamepadMacroBindings() {
+function renderGamepadMacroBindings(opts = {}) {
   const box = document.getElementById("gamepad-macro-bindings");
+  if (!opts.force && gamepadMacroBindingsLocallyOwned(box)) return;
+  state.gamepadMacroBindingDirty = false;
   box.innerHTML = "";
   if (!state.ui.gamepad.macro_buttons.length) {
     box.innerHTML = `<div class="empty compact">No gamepad macro buttons.</div>`;
@@ -3027,11 +3126,23 @@ function renderGamepadMacroBindings() {
     button.min = "0";
     button.max = "63";
     button.value = String(binding.button);
+    button.oninput = () => {
+      state.gamepadMacroBindingDirty = true;
+      markControlDirty(button);
+    };
+    button.onfocus = () => {
+      state.gamepadMacroBindingDirty = true;
+    };
+    button.onblur = () => {
+      if (button.dataset.dirty !== "1") state.gamepadMacroBindingDirty = false;
+    };
     button.onchange = () => {
       const next = readInt(button.value, binding.button, 0, 63);
       binding.button = next;
+      clearControlDrafts(button);
+      state.gamepadMacroBindingDirty = false;
       normalizeGamepadMacroOrder();
-      renderGamepadMacroBindings();
+      renderGamepadMacroBindings({ force: true });
       queueSaveUISettings();
     };
 
@@ -3043,8 +3154,15 @@ function renderGamepadMacroBindings() {
       option.selected = macro.id === binding.macro_id;
       select.appendChild(option);
     }
+    select.onfocus = () => {
+      state.gamepadMacroBindingDirty = true;
+    };
+    select.onblur = () => {
+      state.gamepadMacroBindingDirty = false;
+    };
     select.onchange = () => {
       binding.macro_id = select.value;
+      state.gamepadMacroBindingDirty = false;
       queueSaveUISettings();
     };
 
@@ -3053,13 +3171,18 @@ function renderGamepadMacroBindings() {
     del.textContent = "Remove";
     del.onclick = () => {
       state.ui.gamepad.macro_buttons = state.ui.gamepad.macro_buttons.filter((b) => b.id !== binding.id);
-      renderGamepadMacroBindings();
+      state.gamepadMacroBindingDirty = false;
+      renderGamepadMacroBindings({ force: true });
       queueSaveUISettings();
     };
 
     row.append(button, select, del);
     box.appendChild(row);
   }
+}
+
+function gamepadMacroBindingsLocallyOwned(box = document.getElementById("gamepad-macro-bindings")) {
+  return !!box && (box.contains(document.activeElement) || state.gamepadMacroBindingDirty);
 }
 
 function readInt(value, fallback, min, max) {
@@ -3098,7 +3221,7 @@ function addGamepadMacroBinding() {
   while (used.has(button) && button < 64) button++;
   state.ui.gamepad.macro_buttons.push({ id: newID("gamepad-macro"), button, macro_id: macro.id });
   normalizeGamepadMacroOrder();
-  renderGamepadMacroBindings();
+  renderGamepadMacroBindings({ force: true });
   clearNotice("gamepad-macro-binding");
   queueSaveUISettings();
 }
@@ -3126,46 +3249,87 @@ function renderFiles() {
     ? (q ? "No files or folders match the search." : "This folder is empty.")
     : "Files load when this tab opens.";
   empty.hidden = rows.length > 0;
-  tbody.innerHTML = "";
 
-  for (const f of rows) {
-    const tr = document.createElement("tr");
-    const label = SYNC_LABEL[f.sync] || f.sync || "-";
-    const type = f.is_dir ? (f.virtual ? "folder" : "dir") : "file";
-    tr.innerHTML = `
-      <td class="path-cell">
-        <button type="button" class="file-name ${f.is_dir ? "folder-name" : ""}">${escapeHtml(q ? relPath(f.path) : basename(f.path))}</button>
-        ${f.children != null ? `<div class="muted">${f.children} item${f.children === 1 ? "" : "s"}</div>` : ""}
-        ${f.error ? `<div class="err">${escapeHtml(f.error)}</div>` : ""}
-      </td>
-      <td>${type}</td>
-      <td class="num">${escapeHtml(f.is_dir && f.children != null ? String(f.children) : fmtSize(f.size, f.is_dir))}</td>
-      <td>${escapeHtml(fmtTime(f.mtime))}</td>
-      <td class="status-cell">${f.virtual ? `<span class="sync"><span class="dot"></span>Folder</span>` : `<span class="sync s-${escapeHtml(f.sync)}"><span class="dot"></span>${escapeHtml(label)}</span>`}</td>
-      <td class="actions"></td>`;
-
-    const actions = tr.querySelector(".actions");
-    const name = tr.querySelector(".file-name");
-    if (f.is_dir) {
-      name.onclick = () => openDir(relPath(f.path));
-      const open = document.createElement("button");
-      open.type = "button";
-      open.textContent = "Open";
-      open.onclick = () => openDir(relPath(f.path));
-      actions.append(open);
+  // Update stable row nodes keyed by path instead of rebuilding the table:
+  // rows whose rendered state is unchanged keep their DOM (and any in-flight
+  // click/pointer state); only rows whose signature changed are rebuilt.
+  const existing = new Map();
+  for (const tr of tbody.children) existing.set(tr.dataset.fileKey, tr);
+  rows.forEach((f, i) => {
+    const key = (f.virtual ? "virtual:" : "entry:") + relPath(f.path);
+    const signature = fileRowSignature(f, q);
+    let tr = existing.get(key);
+    if (tr) {
+      existing.delete(key);
+      if (tr.dataset.fileSignature !== signature) {
+        buildFileRow(tr, f, q);
+        tr.dataset.fileSignature = signature;
+      }
     } else {
-      name.onclick = () => window.open(apiFileURL(f.path), "_blank", "noopener");
-      const open = document.createElement("a");
-      open.textContent = "Open";
-      open.href = apiFileURL(f.path);
-      open.target = "_blank";
-      open.rel = "noopener";
-      actions.append(open);
+      tr = document.createElement("tr");
+      tr.dataset.fileKey = key;
+      buildFileRow(tr, f, q);
+      tr.dataset.fileSignature = signature;
     }
-    if (!f.virtual) {
-      appendFileActions(actions, f);
-    }
-    tbody.appendChild(tr);
+    const ref = tbody.children[i] || null;
+    if (ref !== tr) tbody.insertBefore(tr, ref);
+  });
+  for (const tr of existing.values()) tr.remove();
+}
+
+function fileRowSignature(f, q) {
+  const retry = preferredRetryJob(failedJobsForPath(f.path));
+  return JSON.stringify([
+    q ? 1 : 0,
+    f.is_dir ? 1 : 0,
+    f.virtual ? 1 : 0,
+    f.children,
+    f.error || "",
+    f.sync || "",
+    f.size,
+    f.mtime || "",
+    retry ? retry.id + "/" + retryButtonText(retry) : "",
+    canDiscardFile(f) ? 1 : 0,
+    canSelectGcodeFile(f) ? 1 : 0,
+    state.activeSelectPendingPath === f.path ? 1 : 0,
+  ]);
+}
+
+function buildFileRow(tr, f, q) {
+  const label = SYNC_LABEL[f.sync] || f.sync || "-";
+  const type = f.is_dir ? (f.virtual ? "folder" : "dir") : "file";
+  tr.innerHTML = `
+    <td class="path-cell">
+      <button type="button" class="file-name ${f.is_dir ? "folder-name" : ""}">${escapeHtml(q ? relPath(f.path) : basename(f.path))}</button>
+      ${f.children != null ? `<div class="muted">${f.children} item${f.children === 1 ? "" : "s"}</div>` : ""}
+      ${f.error ? `<div class="err">${escapeHtml(f.error)}</div>` : ""}
+    </td>
+    <td>${type}</td>
+    <td class="num">${escapeHtml(f.is_dir && f.children != null ? String(f.children) : fmtSize(f.size, f.is_dir))}</td>
+    <td>${escapeHtml(fmtTime(f.mtime))}</td>
+    <td class="status-cell">${f.virtual ? `<span class="sync"><span class="dot"></span>Folder</span>` : `<span class="sync s-${escapeHtml(f.sync)}"><span class="dot"></span>${escapeHtml(label)}</span>`}</td>
+    <td class="actions"></td>`;
+
+  const actions = tr.querySelector(".actions");
+  const name = tr.querySelector(".file-name");
+  if (f.is_dir) {
+    name.onclick = () => openDir(relPath(f.path));
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "Open";
+    open.onclick = () => openDir(relPath(f.path));
+    actions.append(open);
+  } else {
+    name.onclick = () => window.open(apiFileURL(f.path), "_blank", "noopener");
+    const open = document.createElement("a");
+    open.textContent = "Open";
+    open.href = apiFileURL(f.path);
+    open.target = "_blank";
+    open.rel = "noopener";
+    actions.append(open);
+  }
+  if (!f.virtual) {
+    appendFileActions(actions, f);
   }
 }
 
@@ -3877,6 +4041,12 @@ function updateGcodeTimeline(total) {
   slider.max = String(total);
   slider.disabled = total <= 0;
   gcodeView.cursor = Math.max(0, Math.min(total, gcodeView.cursor));
+  const owned = gcodeView.timelineDragging || slider === document.activeElement || slider.dataset.dragging === "1";
+  if (owned) {
+    const draft = Math.max(0, Math.min(total, Number(slider.value) || 0));
+    label.textContent = `${draft} / ${total}`;
+    return;
+  }
   slider.value = String(gcodeView.cursor);
   label.textContent = `${gcodeView.cursor} / ${total}`;
 }
@@ -4069,15 +4239,15 @@ function selectedToolID(kind, allowEmpty) {
 }
 
 async function setCurrentTool(toolID = null) {
+  if (!beginToolAction("set")) return;
   if (toolID == null) {
     toolID = selectedToolID("set", true);
   }
   if (!validToolID(toolID, true)) {
+    finishToolAction("set");
     setToolFeedback("Choose Empty, Probe, Laser, or tool 1-999.", "error");
     return;
   }
-  state.toolPending = "set";
-  renderToolActions();
   setToolFeedback("Sending set-tool command for " + toolDisplayName(toolID) + "...", "");
   try {
     const r = await request("/api/tool/current", {
@@ -4087,28 +4257,27 @@ async function setCurrentTool(toolID = null) {
     });
     const result = await r.json();
     setToolFeedback(result.message || "Set-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
+    state.toolChangeAwaitingContinue = false;
     resetToolSelects();
-    await pollMachine();
-    setTimeout(pollMachine, 1200);
+    refreshMachineAfterToolAction();
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Set-tool failed: " + e.message, "error");
   } finally {
-    state.toolPending = "";
-    renderToolActions();
+    finishToolAction("set");
   }
 }
 
 async function changeTool(toolID = null) {
+  if (!beginToolAction("change")) return;
   if (toolID == null) {
     toolID = selectedToolID("change", false);
   }
   if (!validToolID(toolID, false)) {
+    finishToolAction("change");
     setToolFeedback("Choose Probe, Laser, or tool 1-999.", "error");
     return;
   }
-  state.toolPending = "change";
-  renderToolActions();
   setToolFeedback("Sending change-tool command for " + toolDisplayName(toolID) + "...", "");
   try {
     const r = await request("/api/tool/change", {
@@ -4118,59 +4287,77 @@ async function changeTool(toolID = null) {
     });
     const result = await r.json();
     setToolFeedback(result.message || "Change-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
+    state.toolChangeAwaitingContinue = true;
     resetToolSelects();
-    await pollMachine();
-    setTimeout(pollMachine, 1200);
+    refreshMachineAfterToolAction();
   } catch (e) {
+    state.toolChangeAwaitingContinue = false;
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Change-tool failed: " + e.message, "error");
   } finally {
-    state.toolPending = "";
-    renderToolActions();
+    finishToolAction("change");
   }
 }
 
 async function continueToolChange() {
-  if (state.machine?.state !== "Tool") {
+  const continueAvailable = state.machine?.state === "Tool" || state.toolChangeAwaitingContinue;
+  if (!continueAvailable) {
     setToolFeedback("Continue is only available while the machine is awaiting a tool.", "error");
     renderToolActions();
     return;
   }
-  state.toolPending = "continue";
-  renderToolActions();
+  if (!beginToolAction("continue")) return;
   setToolFeedback("Continuing tool change...", "");
   try {
     const r = await request("/api/tool/continue", { method: "POST" });
     const result = await r.json();
     setToolFeedback(result.message || "Tool-change continue command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    await pollMachine();
-    setTimeout(pollMachine, 1200);
+    state.toolChangeAwaitingContinue = false;
+    refreshMachineAfterToolAction();
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Continue failed: " + e.message, "error");
+    refreshMachineAfterToolAction();
   } finally {
-    state.toolPending = "";
-    renderToolActions();
+    finishToolAction("continue");
   }
 }
 
 async function calibrateCurrentTool() {
-  state.toolPending = "calibrate";
-  renderToolActions();
+  if (!beginToolAction("calibrate")) return;
   setToolFeedback("Sending calibration command...", "");
   try {
     const r = await request("/api/tool/calibrate", { method: "POST" });
     const result = await r.json();
     setToolFeedback(result.message || "Calibration command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    await pollMachine();
-    setTimeout(pollMachine, 1200);
+    refreshMachineAfterToolAction();
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Calibration failed: " + e.message, "error");
   } finally {
-    state.toolPending = "";
-    renderToolActions();
+    finishToolAction("calibrate");
   }
+}
+
+function beginToolAction(action) {
+  if (state.toolPending) {
+    setToolFeedback("Tool action already in progress.", "error");
+    renderToolActions();
+    return false;
+  }
+  state.toolPending = action;
+  renderToolActions();
+  return true;
+}
+
+function finishToolAction(action) {
+  if (state.toolPending === action) state.toolPending = "";
+  renderToolActions();
+}
+
+function refreshMachineAfterToolAction() {
+  pollMachine();
+  setTimeout(pollMachine, 1200);
 }
 
 function setElementBusy(el, busy) {
@@ -4189,36 +4376,44 @@ function renderToolActions(m = state.machine || {}) {
   const setInput = document.getElementById("tool-id");
   const changeInput = document.getElementById("tool-change-id");
   const pendingAction = state.toolPending || "";
-  const pending = !!pendingAction;
+  const setPending = pendingAction === "set";
+  const changePending = pendingAction === "change";
+  const continuePending = pendingAction === "continue";
+  const calibratePending = pendingAction === "calibrate";
   const waitingForTool = m.state === "Tool";
+  const continueAvailable = waitingForTool || state.toolChangeAwaitingContinue;
   const row = document.getElementById("tool-wait-row");
   const label = document.getElementById("tool-wait-status");
   if (row) row.classList.toggle("is-waiting", waitingForTool);
-  if (label) label.textContent = waitingForTool ? "Awaiting tool" : "Tool change";
+  if (label) label.textContent = continueAvailable ? "Awaiting tool" : "Tool change";
 
-  if (setSelect) setSelect.disabled = pending || waitingForTool;
-  if (changeSelect) changeSelect.disabled = pending || waitingForTool;
-  if (setInput) setInput.disabled = pending || waitingForTool;
-  if (changeInput) changeInput.disabled = pending || waitingForTool;
+  if (setSelect) setSelect.disabled = setPending || waitingForTool;
+  if (changeSelect) changeSelect.disabled = changePending || waitingForTool;
+  if (setInput) setInput.disabled = setPending || waitingForTool;
+  if (changeInput) changeInput.disabled = changePending || waitingForTool;
   if (set) {
-    set.disabled = pending || waitingForTool;
-    set.textContent = pendingAction === "set" ? "Setting..." : "Set";
-    setElementBusy(set, pendingAction === "set");
+    set.disabled = setPending || waitingForTool;
+    setSoftDisabled(set, !!pendingAction && !setPending);
+    set.textContent = setPending ? "Setting..." : "Set";
+    setElementBusy(set, setPending);
   }
   if (change) {
-    change.disabled = pending || waitingForTool;
-    change.textContent = pendingAction === "change" ? "Changing..." : "Change";
-    setElementBusy(change, pendingAction === "change");
+    change.disabled = changePending || waitingForTool;
+    setSoftDisabled(change, !!pendingAction && !changePending);
+    change.textContent = changePending ? "Changing..." : "Change";
+    setElementBusy(change, changePending);
   }
   if (cont) {
-    cont.textContent = pendingAction === "continue" ? "Continuing..." : "Continue";
-    cont.disabled = pending || !waitingForTool;
-    setElementBusy(cont, pendingAction === "continue");
+    cont.textContent = continuePending ? "Continuing..." : "Continue";
+    cont.disabled = continuePending;
+    setSoftDisabled(cont, !continuePending && !continueAvailable);
+    setElementBusy(cont, continuePending);
   }
   if (cal) {
-    cal.disabled = pending || waitingForTool;
-    cal.textContent = pendingAction === "calibrate" ? "Calibrating..." : "Calibrate";
-    setElementBusy(cal, pendingAction === "calibrate");
+    cal.disabled = calibratePending || waitingForTool;
+    setSoftDisabled(cal, !!pendingAction && !calibratePending);
+    cal.textContent = calibratePending ? "Calibrating..." : "Calibrate";
+    setElementBusy(cal, calibratePending);
   }
 }
 
@@ -4508,6 +4703,8 @@ function renderMacroEditor() {
     row.className = "macro-row" + (macro.id === state.selectedMacroId ? " active" : "");
     row.innerHTML = `<button type="button" class="chip">${escapeHtml(macro.name)}</button><span class="muted">${escapeHtml(slotForMacro(macro.id)?.region || "none")}</span>`;
     row.querySelector("button").onclick = () => {
+      if (macro.id !== state.selectedMacroId && !confirmDiscardMacroDraft()) return;
+      clearControlDrafts(MACRO_EDITOR_IDS);
       state.selectedMacroId = macro.id;
       renderMacroEditor();
     };
@@ -4556,6 +4753,7 @@ function saveMacroFromForm() {
   else state.ui.macros.push(macro);
   state.selectedMacroId = macro.id;
   setMacroPlacement(macro.id, document.getElementById("macro-placement").value);
+  clearControlDrafts(MACRO_EDITOR_IDS);
   renderMacroButtons();
   renderMacroEditor();
   renderGamepadSettings();
@@ -4564,6 +4762,8 @@ function saveMacroFromForm() {
 }
 
 function newMacro() {
+  if (!confirmDiscardMacroDraft()) return;
+  clearControlDrafts(MACRO_EDITOR_IDS);
   state.selectedMacroId = "";
   renderMacroEditor();
   document.getElementById("macro-name").value = "";
@@ -4574,6 +4774,14 @@ function newMacro() {
   document.getElementById("macro-name").focus();
 }
 
+function macroEditorDirty() {
+  return MACRO_EDITOR_IDS.some((id) => document.getElementById(id)?.dataset.dirty === "1");
+}
+
+function confirmDiscardMacroDraft() {
+  return !macroEditorDirty() || confirm("Discard unsaved macro edits?");
+}
+
 function deleteSelectedMacro() {
   const macro = macroByID(state.selectedMacroId);
   if (!macro || !confirm("Delete macro " + macro.name + "?")) return;
@@ -4581,6 +4789,7 @@ function deleteSelectedMacro() {
   state.ui.macro_buttons = state.ui.macro_buttons.filter((s) => s.macro_id !== macro.id);
   state.ui.gamepad.macro_buttons = state.ui.gamepad.macro_buttons.filter((s) => s.macro_id !== macro.id);
   state.selectedMacroId = state.ui.macros[0]?.id || "";
+  clearControlDrafts(MACRO_EDITOR_IDS);
   renderMacroButtons();
   renderMacroEditor();
   renderGamepadSettings();
@@ -4975,7 +5184,9 @@ function sendJog(msg) {
     return 0;
   }
   if (!msg.seq) msg.seq = state.jog.seq++;
-  state.jog.sent.set(msg.seq, performance.now());
+  // "input" messages are fire-and-forget (the server never acks them); only
+  // track messages that expect an ack so `sent` stays bounded while armed.
+  if (msg.type !== "input") state.jog.sent.set(msg.seq, performance.now());
   ws.send(JSON.stringify(msg));
   return msg.seq;
 }
@@ -4983,7 +5194,6 @@ function sendJog(msg) {
 function setTapFeedback(text, kind = "") {
   state.jog.tapFeedback = text;
   state.jog.tapFeedbackKind = kind;
-  setStatusMessage("tap-move", text, kind, { force: true });
   renderJog();
 }
 
@@ -5049,9 +5259,18 @@ function toggleTapMoveArm() {
 }
 
 function currentTapFeed() {
+  const input = document.getElementById("tap-feed-mm-min");
   const fallback = state.ui.machine?.tap_feed_mm_min || defaultMachineSettings().tap_feed_mm_min;
   const bounds = feedBoundsFor(state.ui.machine);
-  return clampNumber(finiteOr(document.getElementById("tap-feed-mm-min")?.value, fallback), bounds.min, bounds.max);
+  const raw = String(input?.value ?? "").trim();
+  const value = raw === "" ? NaN : Number(raw);
+  if (!Number.isFinite(value)) {
+    input?.setCustomValidity("Enter a feed rate.");
+    input?.reportValidity?.();
+    throw new Error("Feed must be a number.");
+  }
+  input?.setCustomValidity("");
+  return clampNumber(finiteOr(value, fallback), bounds.min, bounds.max);
 }
 
 function workMoveInput(axis) {
@@ -5092,7 +5311,7 @@ function renderWorkMoveControls(originBusy = hasPendingOriginOperation()) {
     const input = workMoveInput(axis);
     if (!input) continue;
     const value = axisValue(wpos, axis);
-    if (workMoveInputIsLive(input)) {
+    if (workMoveInputIsLive(input) && !controlLocallyOwned(input)) {
       input.value = value === null ? "" : formatOriginValue(value);
     }
     input.disabled = busy;
@@ -5161,7 +5380,13 @@ function sendWorkCoordinateMove() {
     setTapFeedback(e.message, "error");
     return;
   }
-  const feed = currentTapFeed();
+  let feed;
+  try {
+    feed = currentTapFeed();
+  } catch (e) {
+    setTapFeedback(e.message, "error");
+    return;
+  }
   const machine = normalizeMachineSettings(state.ui.machine);
   const safeZEnabled = !machine.safe_z_disabled;
   const seq = sendJog({ type: "target", target: move.machineTargets, feed_mm_min: feed, safe_z_enabled: safeZEnabled, safe_z_mm: machine.safe_z_mm });
@@ -5193,7 +5418,13 @@ function sendTapMove(target) {
     return;
   }
   if (hasPendingOriginOperation()) return;
-  const feed = currentTapFeed();
+  let feed;
+  try {
+    feed = currentTapFeed();
+  } catch (e) {
+    setTapFeedback(e.message, "error");
+    return;
+  }
   const machine = normalizeMachineSettings(state.ui.machine);
   const safeZEnabled = !machine.safe_z_disabled;
   const label = tapTargetLabel(target);
@@ -5270,6 +5501,8 @@ function originTargetsFromAction() {
     return { targets: { x: 0 }, label: "X0" };
   case "zero-y":
     return { targets: { y: 0 }, label: "Y0" };
+  case "zero-z":
+    return { targets: { z: 0 }, label: "Z0" };
   case "zero-xy":
     return { targets: { x: 0, y: 0 }, label: "XY0" };
   case "set-x": {
@@ -5281,6 +5514,11 @@ function originTargetsFromAction() {
     const value = finiteOr(document.getElementById("origin-value-y")?.value, NaN);
     if (!Number.isFinite(value)) throw new Error("Y value must be finite.");
     return { targets: { y: value }, label: "Y " + formatOriginValue(value) };
+  }
+  case "set-z": {
+    const value = finiteOr(document.getElementById("origin-value-z")?.value, NaN);
+    if (!Number.isFinite(value)) throw new Error("Z value must be finite.");
+    return { targets: { z: value }, label: "Z " + formatOriginValue(value) };
   }
   case "reset-xy": {
     const { mpos } = currentAxisValues();
@@ -5482,11 +5720,63 @@ function setOriginAxis(axis) {
 }
 
 function applyOriginAction() {
+  if ((document.getElementById("origin-action")?.value || "") === "probe-z") {
+    runAutoZProbe();
+    return;
+  }
   try {
     const { targets, label } = originTargetsFromAction();
     applyOriginTargets(targets, label);
   } catch (e) {
     setTapFeedback(e.message, "error");
+  }
+}
+
+async function runAutoZProbe() {
+  if (state.jog.zProbePending || state.jog.targetPending || state.jog.zStepPending || hasPendingOriginOperation()) return;
+  if (state.jog.armed) {
+    setTapFeedback("Disarm tap move before running Z probe.", "error");
+    renderJog();
+    return;
+  }
+  if (!machineReadyForOriginSet()) {
+    setTapFeedback("Machine must be connected and Idle to run Z probe.", "error");
+    renderJog();
+    return;
+  }
+  if (!isProbeToolActive()) {
+    setTapFeedback("Z probe requires the probe tool to be active.", "error");
+    renderJog();
+    return;
+  }
+  const { wpos } = currentAxisValues();
+  if (axisValue(wpos, "x") === null || axisValue(wpos, "y") === null) {
+    setTapFeedback("Current work XY is unavailable.", "error");
+    renderJog();
+    return;
+  }
+  state.jog.zProbePending = true;
+  state.jog.tapFeedback = "Starting Z probe...";
+  state.jog.tapFeedbackKind = "";
+  renderJog();
+  try {
+    const resp = await request("/api/probe/auto-z", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const result = await resp.json();
+    const msg = result.message || "Z probe command sent.";
+    state.jog.tapFeedback = msg;
+    state.jog.tapFeedbackKind = result.verified ? "ok" : "";
+    await pollMachine();
+  } catch (e) {
+    state.jog.tapFeedback = "Z probe failed: " + e.message;
+    state.jog.tapFeedbackKind = "error";
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+  } finally {
+    state.jog.zProbePending = false;
+    renderJog();
   }
 }
 
@@ -5904,6 +6194,7 @@ function applySnapshot(snap) {
   if (snap.machine) {
     state.jog.observed = snap.machine.mpos || state.jog.observed;
     state.machine = mergeMachineStatusForDisplay(snap.machine);
+    syncToolFlowFromMachineStatus(state.machine);
     clearNotice("machine-status");
   }
   if (Array.isArray(snap.files)) {
@@ -5995,6 +6286,7 @@ async function pollMachine() {
     const next = await r.json();
     state.jog.observed = next.mpos || state.jog.observed;
     state.machine = mergeMachineStatusForDisplay(next);
+    syncToolFlowFromMachineStatus(state.machine);
     clearNotice("machine-status");
     renderMachine();
   } catch (e) {
@@ -6004,6 +6296,17 @@ async function pollMachine() {
     await refreshJobs();
   } catch {
     // File SSE reports its own disconnect state; avoid duplicating it here.
+  }
+}
+
+function syncToolFlowFromMachineStatus(m) {
+  if (!m) return;
+  if (m.state === "Tool" || Number.isFinite(m.tool?.target)) {
+    state.toolChangeAwaitingContinue = true;
+    return;
+  }
+  if (state.toolPending !== "change" && state.toolPending !== "continue") {
+    state.toolChangeAwaitingContinue = false;
   }
 }
 
@@ -6120,6 +6423,7 @@ function init() {
   document.getElementById("macro-up").onclick = () => moveSelectedMacro(-1);
   document.getElementById("macro-down").onclick = () => moveSelectedMacro(1);
   document.getElementById("macro-delete").onclick = deleteSelectedMacro;
+  bindDirtyDraftControls(MACRO_EDITOR_IDS);
   for (const axis of ["x", "y", "z"]) {
     document.getElementById("gamepad-axis-" + axis).onchange = () => updateGamepadAxis(axis);
     document.getElementById("gamepad-invert-" + axis).onchange = () => updateGamepadAxis(axis);
@@ -6129,7 +6433,8 @@ function init() {
   document.getElementById("gamepad-slow-button-0").onchange = updateGamepadButtons;
   document.getElementById("gamepad-slow-button-1").onchange = updateGamepadButtons;
   document.getElementById("gamepad-add-macro").onclick = addGamepadMacroBinding;
-  for (const id of ["machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max", "machine-origin-x", "machine-origin-y", "machine-feed-min", "machine-feed-max", "tap-feed-mm-min", "machine-safe-z"]) {
+  bindDirtyDraftControls(MACHINE_SETTING_IDS);
+  for (const id of MACHINE_SETTING_IDS) {
     document.getElementById(id).onchange = updateMachineSettings;
   }
   for (const btn of document.querySelectorAll("[data-feed-step]")) {
@@ -6160,6 +6465,16 @@ function init() {
     bindButtonAction(btn, () => stepZ(Number(btn.dataset.zStepDir) || 1));
   }
   document.getElementById("origin-action").onchange = renderJog;
+  for (const id of ["origin-value-x", "origin-value-y", "origin-value-z"]) {
+    const input = document.getElementById(id);
+    if (!input) continue;
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyOriginAction();
+      }
+    };
+  }
   document.getElementById("saved-origin-select").onchange = renderJog;
   bindButtonAction(document.getElementById("origin-apply"), applyOriginAction);
   bindButtonAction(document.getElementById("saved-origin-recall"), recallSelectedOrigin);
@@ -6179,7 +6494,9 @@ function init() {
   document.getElementById("outline-curve-fit").onchange = toggleOutlineCurveFit;
   document.getElementById("outline-probe-point").onchange = toggleOutlineProbePoint;
   bindButtonAction(document.getElementById("outline-export"), exportOutline);
-  document.getElementById("outline-field-spacing").onchange = updateOutlineFieldSpacing;
+  const outlineSpacing = document.getElementById("outline-field-spacing");
+  outlineSpacing.oninput = () => markControlDirty(outlineSpacing);
+  outlineSpacing.onchange = updateOutlineFieldSpacing;
   bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);
@@ -6195,7 +6512,22 @@ function init() {
   document.getElementById("tool-set-select").onchange = (e) => handleToolSelect("set", e.target.value);
   document.getElementById("tool-change-select").onchange = (e) => handleToolSelect("change", e.target.value);
   bindButtonAction(document.getElementById("active-gcode-run"), runActiveGcode);
-  document.getElementById("gcode-timeline").oninput = (e) => {
+  const gcodeTimeline = document.getElementById("gcode-timeline");
+  gcodeTimeline.onpointerdown = () => {
+    gcodeView.timelineDragging = true;
+    gcodeTimeline.dataset.dragging = "1";
+  };
+  const releaseGcodeTimeline = () => {
+    gcodeView.cursor = Math.max(0, Math.min(gcodeView.segments.length, Number(gcodeTimeline.value) || 0));
+    gcodeView.timelineDragging = false;
+    clearControlDrafts(gcodeTimeline);
+    updateGcodeTimeline(gcodeView.segments.length);
+  };
+  gcodeTimeline.onpointerup = releaseGcodeTimeline;
+  gcodeTimeline.onpointercancel = releaseGcodeTimeline;
+  gcodeTimeline.onblur = releaseGcodeTimeline;
+  gcodeTimeline.onchange = releaseGcodeTimeline;
+  gcodeTimeline.oninput = (e) => {
     gcodeView.cursor = Number(e.target.value) || 0;
     updateGcodeProgress();
   };

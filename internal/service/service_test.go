@@ -778,8 +778,8 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 		"coordinate.clearance_x=-5.0",
 		"coordinate.clearance_y=-21.0",
 		"coordinate.clearance_z=-3.0",
-		"atc.probe.fast_rate_mm_m=500",
-		"atc.probe.slow_rate_mm_m=100",
+		"atc.probe.fast_rate_mm_m=300",
+		"atc.probe.slow_rate_mm_m=60",
 		"atc.probe.retract_mm=2",
 	}, "\n")+"\x04")
 

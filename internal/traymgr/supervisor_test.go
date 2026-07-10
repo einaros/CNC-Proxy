@@ -2,11 +2,91 @@ package traymgr
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRestartAlwaysLeavesProcessRunning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script as the supervised proxy")
+	}
+	run := func(t *testing.T, trapLine string, stopTimeout time.Duration, iterations int) {
+		dir := t.TempDir()
+		proxy := filepath.Join(dir, "proxy.sh")
+		// The stub answers -print-config-schema (Start probes the binary for
+		// the proxy option schema) and writes a pid marker once its TERM trap
+		// is installed so the test never signals a not-yet-ready shell.
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"-print-config-schema\" ]; then exit 0; fi\n" +
+			trapLine + "\n" +
+			": > \"" + dir + "/ready.$$\"\n" +
+			"while true; do sleep 1 & wait $!; done\n"
+		if err := os.WriteFile(proxy, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		waitReady := func(pid int) {
+			t.Helper()
+			marker := filepath.Join(dir, fmt.Sprintf("ready.%d", pid))
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(marker); err == nil {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("proxy script pid %d never became ready", pid)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		cfg := DefaultConfig()
+		cfg.ProxyBinary = proxy
+		sup := NewSupervisor(cfg, "")
+		if err := sup.Start(); err != nil {
+			t.Fatalf("start proxy script: %v", err)
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = sup.Stop(ctx)
+		})
+		prev := sup.State().PID
+		if prev == 0 {
+			t.Fatal("initial start left no running process")
+		}
+		waitReady(prev)
+		for i := 0; i < iterations; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+			err := sup.Restart(ctx)
+			cancel()
+			if err != nil {
+				t.Fatalf("Restart #%d: %v", i, err)
+			}
+			st := sup.State()
+			if !st.Running {
+				t.Fatalf("Restart #%d reported success but no process is running (state=%+v)", i, st)
+			}
+			if st.PID == prev {
+				t.Fatalf("Restart #%d reported success but PID %d is unchanged: restart was a no-op", i, prev)
+			}
+			prev = st.PID
+			waitReady(prev)
+		}
+	}
+	t.Run("term", func(t *testing.T) {
+		run(t, "trap 'exit 0' TERM INT", 5*time.Second, 10)
+	})
+	// A proxy that ignores SIGTERM forces Stop onto its deadline/kill path;
+	// Restart must still leave a freshly started process rather than
+	// no-opping against the half-reaped old one.
+	t.Run("kill_after_stop_deadline", func(t *testing.T) {
+		run(t, "trap '' TERM", 500*time.Millisecond, 5)
+	})
+}
 
 func TestProxyWorkingDirIgnoresMissingSourceDir(t *testing.T) {
 	cfg := DefaultConfig()

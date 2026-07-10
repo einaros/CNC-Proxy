@@ -4,12 +4,34 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/uwin/cnc-proxy/internal/jog"
 )
+
+func TestSaveConfigRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "tray.json")
+	cfg := DefaultConfig()
+	cfg.AdminToken = "secret"
+	cfg.SourceDir = "/tmp/cnc-src"
+	cfg.AutoStart = true
+	cfg.WebDAVMount.Enabled = true
+	cfg.Flags["name"] = "Shop CNC"
+	cfg.Flags["machine-transport"] = "usb"
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if want := normalizeConfig(cfg); !reflect.DeepEqual(loaded, want) {
+		t.Fatalf("round-tripped config = %+v, want %+v", loaded, want)
+	}
+}
 
 func TestDefaultConfigIncludesEveryProxyOption(t *testing.T) {
 	cfg := DefaultConfig()

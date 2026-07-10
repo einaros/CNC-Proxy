@@ -486,6 +486,69 @@ func (s *Service) CalibrateCurrentTool() (MachineActionResult, error) {
 	return res, nil
 }
 
+// AutoZProbe mirrors the official controller's M495 auto Z probe action. The
+// proxy uses the current work XY as the probe point and zero X/Y probe offsets.
+func (s *Service) AutoZProbe() (MachineActionResult, error) {
+	res := MachineActionResult{Action: "auto_z_probe"}
+	var out string
+	var display string
+	err := s.arb.WithMachine(true, func(c *client.Conn) error {
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			if errors.Is(err, ErrMachineStatusStale) {
+				return err
+			}
+			return fmt.Errorf("%w: %v", ErrMachineStatusStale, err)
+		}
+		if st.State != machine.Idle {
+			return fmt.Errorf("%w: machine reports %s", ErrMachineStatusStale, statusSummary(st))
+		}
+		workX, workY, ok := currentWorkXY(st)
+		if !ok {
+			return fmt.Errorf("%w: current work XY is unavailable", ErrProbeUnavailable)
+		}
+		wire := protocol.AutoZProbeLine(workX, workY, 0, 0)
+		display = strings.TrimSpace(wire)
+		s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, display)
+		o, e := c.SendConsoleCommand(wire, client.GcodeOpts{Cap: gcodeReplyCap})
+		out = o
+		if e != nil {
+			return e
+		}
+		s.refreshStatusBestEffort(c)
+		return nil
+	})
+	res.Command = display
+	res.Output = out
+	res.Message = "Auto Z probe command sent; machine confirmation was not available."
+	if out != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+	}
+	if err != nil {
+		res.Message = err.Error()
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return res, err
+	}
+	if out == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "sent: no reply observed")
+	}
+	return res, nil
+}
+
+func currentWorkXY(st machine.Status) (float64, float64, bool) {
+	x, okX := finiteAxisValue(st.WPos, "x")
+	y, okY := finiteAxisValue(st.WPos, "y")
+	return x, y, okX && okY
+}
+
+func finiteAxisValue(values machine.AxisValues, axis string) (float64, bool) {
+	if values == nil {
+		return 0, false
+	}
+	v, ok := values[strings.ToLower(axis)]
+	return v, ok && !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
 func (s *Service) sendConsoleMachineAction(displayLine, wireLine string) (string, error) {
 	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, displayLine)
 	var out string

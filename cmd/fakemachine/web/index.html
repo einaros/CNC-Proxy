@@ -43,19 +43,27 @@
   #tool-panel button,
   #tool-panel select,
   #tool-panel input[type="number"],
-  #tool-panel input[type="range"] {
+  #tool-panel input[type="range"],
+  #simulation-panel button,
+  #simulation-panel select,
+  #simulation-panel input[type="number"] {
     height: var(--control-h);
     min-height: var(--control-h);
     max-height: var(--control-h);
     vertical-align: middle;
   }
   #view-controls button { flex: 0 0 auto; min-width: 34px; display: inline-flex; align-items: center; justify-content: center; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
-  #tool-panel button { min-width: 34px; display: inline-flex; align-items: center; justify-content: center; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
-  #tool-panel select { min-width: 0; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 28px 0 8px; line-height: var(--control-h); }
-  #tool-panel input[type="number"] { width: 74px; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; line-height: var(--control-h); }
+  #view-controls .view-mode-group { flex: 0 0 auto; display: inline-grid; grid-template-columns: repeat(3, 58px); gap: 4px; align-items: center; }
+  #view-controls .view-mode-button { min-width: 0; width: 58px; padding: 0 6px; }
+  #view-controls .view-mode-button[aria-pressed="true"] { border-color: rgba(88,184,216,.68); background: rgba(88,184,216,.16); color: #fff; }
+  #tool-panel button, #simulation-panel button { min-width: 34px; display: inline-flex; align-items: center; justify-content: center; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
+  #tool-panel select, #simulation-panel select { min-width: 0; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 28px 0 8px; line-height: var(--control-h); }
+  #tool-panel input[type="number"], #simulation-panel input[type="number"] { width: 74px; color: var(--text); background: rgba(255,255,255,.06); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; line-height: var(--control-h); }
   #tool-panel input[type="range"] { width: 100%; padding: 0; accent-color: var(--green); }
   #insert-tool-button { border-color: rgba(75,193,125,.52); background: rgba(75,193,125,.12); font-weight: 650; }
   #tool-lock-button.unlocked { border-color: rgba(213,155,66,.62); background: rgba(213,155,66,.14); }
+  #simulation-enable[aria-pressed="true"], #simulation-vectors[aria-pressed="true"] { border-color: rgba(75,193,125,.52); background: rgba(75,193,125,.12); }
+  #simulation-download { border-color: rgba(88,184,216,.55); background: rgba(88,184,216,.13); font-weight: 650; }
   #view-controls #model-button { min-width: 118px; border-color: rgba(88,184,216,.55); background: rgba(88,184,216,.13); font-weight: 650; }
   #view-controls #laser-toggle { min-width: 58px; }
   #view-controls #laser-toggle[aria-pressed="true"] { border-color: rgba(228,100,95,.62); background: rgba(228,100,95,.16); color: #fff; }
@@ -63,10 +71,10 @@
   #laser-status { flex: 0 0 74px; width: 74px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   #laser-status[data-kind="on"] { color: var(--red); }
   #laser-status[data-kind="controller"] { color: var(--orange); }
-  #view-controls button:disabled, #tool-panel button:disabled, #tool-panel select:disabled, #tool-panel input:disabled { opacity: .52; cursor: not-allowed; }
-  #view-controls [aria-busy="true"], #tool-panel [aria-busy="true"] { cursor: progress; }
-  #view-controls button:hover, #tool-panel button:hover { border-color: var(--cyan); }
-  #view-controls button:focus-visible, #tool-panel button:focus-visible, #tool-panel select:focus-visible, #tool-panel input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  #view-controls button:disabled, #tool-panel button:disabled, #tool-panel select:disabled, #tool-panel input:disabled, #simulation-panel button:disabled, #simulation-panel select:disabled, #simulation-panel input:disabled { opacity: .52; cursor: not-allowed; }
+  #view-controls [aria-busy="true"], #tool-panel [aria-busy="true"], #simulation-panel [aria-busy="true"] { cursor: progress; }
+  #view-controls button:hover, #tool-panel button:hover, #simulation-panel button:hover { border-color: var(--cyan); }
+  #view-controls button:focus-visible, #tool-panel button:focus-visible, #tool-panel select:focus-visible, #tool-panel input:focus-visible, #simulation-panel button:focus-visible, #simulation-panel select:focus-visible, #simulation-panel input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   #model-status { flex: 0 0 150px; width: 150px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   #insert-tool-status, #tool-calibration-status { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   #tool-calibration-status.calibrated { color: var(--green); }
@@ -78,6 +86,13 @@
   .tool-row.depth { grid-template-columns: minmax(0, 1fr) 74px; }
   .tool-row.lock { grid-template-columns: 136px; }
   .tool-status-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(108px, auto); gap: 8px; align-items: center; min-width: 0; min-height: 18px; }
+  #simulation-panel { left: 12px; top: 242px; width: 420px; display: grid; gap: 8px; padding: 10px; pointer-events: auto; }
+  .simulation-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; align-items: center; min-width: 0; }
+  .simulation-row.tooling { grid-template-columns: minmax(0, 1fr) 74px; }
+  .simulation-row.placement { grid-template-columns: 66px 66px 66px 66px minmax(0, 1fr); }
+  .simulation-row.output { grid-template-columns: minmax(0, 1fr) 72px 128px; }
+  #simulation-speed { width: 100%; }
+  #simulation-status { min-width: 0; min-height: 18px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   #readout { left: 12px; bottom: 12px; width: min(520px, calc(100vw - 24px)); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; background: var(--border); }
   .metric { min-width: 0; display: grid; gap: 3px; padding: 8px 10px; background: var(--panel-strong); }
   .metric .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
@@ -95,7 +110,7 @@
   .item { min-width: 0; border: 1px solid rgba(137,153,167,.18); border-radius: 6px; padding: 5px 6px; background: rgba(255,255,255,.035); }
   .item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .item .sub { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #timeline { left: 12px; top: 264px; width: min(360px, calc(100vw - 24px)); max-height: min(30vh, 320px); overflow: hidden; }
+  #timeline { left: 12px; top: 428px; width: min(360px, calc(100vw - 24px)); max-height: min(30vh, 320px); overflow: hidden; }
   #history { max-height: 390px; overflow: auto; display: grid; gap: 4px; padding: 6px; scrollbar-width: thin; }
   .history-line { min-width: 0; display: grid; gap: 2px; border-left: 3px solid var(--cyan); padding: 5px 6px; background: rgba(255,255,255,.035); border-radius: 4px; }
   .history-line.control { border-left-color: var(--magenta); }
@@ -114,7 +129,8 @@
   @media (max-width: 860px) {
     #topbar { height: auto; min-height: 48px; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
     #view-controls { justify-self: start; }
-    #tool-panel { top: auto; bottom: 176px; width: min(360px, calc(100vw - 24px)); }
+    #tool-panel { top: auto; bottom: 316px; width: min(360px, calc(100vw - 24px)); }
+    #simulation-panel { top: auto; bottom: 176px; width: min(420px, calc(100vw - 24px)); }
     #activity { display: none; }
     #timeline { display: none; }
     #readout { grid-template-columns: 1fr; bottom: 12px; width: min(420px, calc(100vw - 24px)); }
@@ -122,6 +138,7 @@
   }
   @media (max-width: 520px) {
     #topbar { left: 8px; right: 8px; top: 8px; }
+    #tool-panel, #simulation-panel { left: 8px; width: calc(100vw - 16px); }
     #timeline { left: 8px; width: calc(100vw - 16px); }
     #readout { left: 8px; width: calc(100vw - 16px); }
     .badge { max-width: 100%; }
@@ -148,6 +165,11 @@
       <span id="model-status" aria-live="polite">no model</span>
       <button id="laser-toggle" type="button" aria-pressed="false">Laser</button>
       <span id="laser-status" data-kind="off" aria-live="polite">off</span>
+      <span class="view-mode-group" role="group" aria-label="3D interaction mode">
+        <button class="view-mode-button" type="button" data-view-mode="orbit" aria-pressed="true">Orbit</button>
+        <button class="view-mode-button" type="button" data-view-mode="move" aria-pressed="false">Move</button>
+        <button class="view-mode-button" type="button" data-view-mode="rotate" aria-pressed="false">Rotate</button>
+      </span>
       <button id="view-iso" type="button">ISO</button>
       <button id="view-top" type="button">TOP</button>
       <button id="view-front" type="button">FRONT</button>
@@ -174,6 +196,34 @@
     <div class="tool-row depth">
       <input id="tool-depth-slider" type="range" min="10" max="70" step="0.5" value="38" disabled aria-label="Tool stickout">
       <input id="tool-depth-value" type="number" min="10" max="70" step="0.5" value="38" disabled aria-label="Tool stickout millimeters">
+    </div>
+  </div>
+  <div id="simulation-panel" class="hud panel">
+    <div class="tool-title">Simulation</div>
+    <div class="simulation-row">
+      <button id="simulation-enable" type="button" aria-pressed="true">Sim</button>
+      <button id="simulation-vectors" type="button" aria-pressed="true">Vectors</button>
+      <input id="simulation-speed" type="number" min="0.1" max="200" step="0.5" value="1" aria-label="Replay speed factor">
+    </div>
+    <div class="simulation-row tooling">
+      <select id="simulation-tool-shape" aria-label="Simulation cutter shape">
+        <option value="flat">Flat end mill</option>
+        <option value="ball">Ball mill</option>
+        <option value="v_bit">V-bit</option>
+      </select>
+      <input id="simulation-tool-angle" type="number" min="10" max="160" step="1" value="60" aria-label="V-bit angle degrees">
+    </div>
+    <div class="simulation-row placement">
+      <input id="stock-x-min" type="number" step="0.5" placeholder="X min" aria-label="Stock X minimum">
+      <input id="stock-y-min" type="number" step="0.5" placeholder="Y min" aria-label="Stock Y minimum">
+      <input id="stock-top-z" type="number" step="0.5" placeholder="Top Z" aria-label="Stock top Z">
+      <input id="stock-rotation" type="number" step="1" placeholder="Rot" aria-label="Stock rotation degrees">
+      <button id="stock-place" type="button" disabled>Place</button>
+    </div>
+    <div class="simulation-row output">
+      <span id="simulation-status" aria-live="polite">no stock</span>
+      <button id="simulation-reset" type="button" disabled>Reset</button>
+      <button id="simulation-download" type="button" disabled>Download STL</button>
     </div>
   </div>
   <div id="timeline" class="hud panel">

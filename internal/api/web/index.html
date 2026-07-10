@@ -224,16 +224,26 @@
   #gcode-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #jog, #gamepad-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; align-items: start; }
   #jog { min-width: 0; --tap-control-h: 34px; --tap-label-h: 14px; --tap-field-gap: 4px; --tap-module-gap: 18px; }
-  .tap-move-toolbar { display: grid; grid-template-columns: minmax(168px, 220px) minmax(260px, 320px) minmax(320px, 1fr); gap: 12px 18px; align-items: stretch; padding-bottom: 8px; border-bottom: 1px solid rgba(48,56,58,.72); }
+  .control-page-layout { display: grid; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr); gap: 12px; align-items: start; min-width: 0; }
+  .control-command-drawer { position: sticky; top: 142px; max-height: calc(100dvh - 170px); overflow: auto; background: #151a1c; border-color: rgba(48,56,58,.95); }
+  .control-command-drawer > summary { min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; color: var(--text); }
+  .control-command-drawer > summary::after, .control-drawer-section > summary::after { content: "▾"; color: var(--muted); font-size: 11px; }
+  .control-command-drawer:not([open]) > summary::after, .control-drawer-section:not([open]) > summary::after { content: "▸"; }
+  .tap-move-toolbar { display: grid; grid-template-columns: 1fr; gap: 10px; align-items: stretch; padding: 10px; border-top: 1px solid var(--border); }
+  .control-drawer-section { background: transparent; border-radius: 0; border-width: 0 0 1px; }
+  .control-drawer-section:last-child { border-bottom: 0; }
+  .control-drawer-section > summary { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; color: var(--muted); }
+  .control-drawer-section > .detail-body { padding: 0 0 10px; border-top: 0; }
+  .control-workspace { min-width: 0; display: grid; gap: 10px; align-items: start; }
   .tap-arm-panel, .tap-control-group, .tap-coordinate-panel { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) auto; gap: 6px; align-content: start; }
   .origin-group { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) auto; gap: 6px; align-content: start; }
-  .tap-control-group, .tap-coordinate-panel, .tap-origin-panel .origin-group + .origin-group { padding-left: var(--tap-module-gap); border-left: 1px solid rgba(48,56,58,.72); }
+  .tap-control-group, .tap-coordinate-panel, .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
   .tap-control-title, .origin-group-title { min-height: var(--tap-label-h); color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; line-height: 1.1; }
   .tap-primary-controls { display: grid; grid-template-columns: minmax(150px, 174px) 96px; gap: 8px; align-items: end; }
   .tap-move-toolbar label, .tap-field, .machine-settings-grid label { display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
   .tap-move-toolbar label > span:first-child, .tap-field-label, .machine-settings-grid label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
-  .tap-move-toolbar input:not([type="checkbox"]), .tap-move-toolbar select, .tap-move-toolbar button:not(#jog-arm), .tap-safe-z-toggle { height: var(--tap-control-h); min-height: var(--tap-control-h); }
-  #jog-arm { min-height: 64px; justify-content: center; padding: 0 16px; border-color: rgba(87,166,214,.62); background: rgba(87,166,214,.12); color: var(--text); font-size: 15px; font-weight: 750; }
+  .tap-move-toolbar input:not([type="checkbox"]), .tap-move-toolbar select, .tap-move-toolbar button, .tap-safe-z-toggle { height: var(--tap-control-h); min-height: var(--tap-control-h); }
+  #jog-arm { width: 100%; min-width: 0; justify-content: center; padding: 0 10px; border-color: rgba(87,166,214,.62); background: rgba(87,166,214,.12); color: var(--text); font-size: 13px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #jog-arm:hover:not(:disabled) { border-color: rgba(87,166,214,.9); background: rgba(87,166,214,.18); }
   #jog-arm.armed { border-color: rgba(68,194,123,.72); background: rgba(68,194,123,.13); color: var(--ok); }
   .tap-feed-field { width: 150px; }
@@ -276,6 +286,17 @@
   .origin-row label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
   .origin-row input, .origin-row select { width: 100%; min-width: 0; }
   .origin-row button { align-self: end; justify-content: center; min-width: 0; white-space: nowrap; }
+  .control-command-drawer .tap-primary-controls { grid-template-columns: minmax(0, 1fr) 90px; }
+  .control-command-drawer .tap-feed-field { width: 100%; }
+  .control-command-drawer .tap-feed-stepper { grid-template-columns: 34px minmax(0, 1fr) 34px; }
+  .control-command-drawer .tap-coordinate-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .control-command-drawer .work-move-field { width: 100%; }
+  .control-command-drawer .tap-coordinate-row > button { grid-column: 1 / -1; }
+  .control-command-drawer .tap-origin-panel { grid-template-columns: 1fr; gap: 10px; padding-top: 0; border-top: 0; }
+  .control-command-drawer .tap-control-group, .control-command-drawer .tap-coordinate-panel, .control-command-drawer .origin-group { grid-template-rows: auto; gap: 0; }
+  .control-command-drawer .origin-group.has-title { grid-template-rows: var(--tap-label-h) auto; gap: 6px; }
+  .control-command-drawer .origin-row-action, .control-command-drawer .origin-row-action.needs-value, .control-command-drawer .origin-row-saved { grid-template-columns: 1fr; }
+  .control-command-drawer .saved-origin-label-field, .control-command-drawer #saved-origin-save { grid-column: auto; }
   .tap-move-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(74px, 92px); gap: 10px; align-items: stretch; }
   .workarea-frame { position: relative; width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .workarea-controls { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 3px; padding: 3px; background: rgba(18,23,28,.82); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
@@ -286,9 +307,9 @@
   #workarea-plot { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; background: #12171c; }
   #workarea-plot.not-armed { cursor: grab; }
   #workarea-plot.panning { cursor: grabbing; }
-  .outline-preview-controls { position: absolute; top: 8px; left: 8px; z-index: 2; display: grid; gap: 6px; align-items: start; max-width: min(178px, calc(100% - 86px)); pointer-events: none; }
+  .outline-preview-controls { position: absolute; top: 8px; left: 8px; z-index: 2; display: grid; gap: 6px; align-items: start; width: min(178px, calc(100% - 86px)); pointer-events: none; }
   .outline-preview-controls button, .outline-preview-controls label { pointer-events: auto; }
-  .outline-preview-controls button { width: 100%; min-height: 30px; justify-content: center; padding: 4px 9px; background: rgba(18,23,28,.88); backdrop-filter: blur(6px); }
+  .outline-preview-controls button { width: 100%; height: var(--tap-control-h); min-height: var(--tap-control-h); justify-content: center; padding: 0 9px; background: rgba(18,23,28,.88); backdrop-filter: blur(6px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .outline-preview-controls > #outline-start { border-color: rgba(87,166,214,.72); background: rgba(87,166,214,.18); }
   .outline-active-controls { display: grid; gap: 5px; align-items: stretch; }
   .outline-active-controls label { min-height: 30px; display: flex; gap: 6px; align-items: center; justify-content: center; padding: 4px 8px; color: var(--muted); background: rgba(18,23,28,.88); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
@@ -342,6 +363,11 @@
   .gamepad-bindings-head, .gamepad-binding { display: grid; grid-template-columns: 84px minmax(150px, 1fr) auto; gap: 8px; align-items: center; }
   .gamepad-bindings-head { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   #gamepad-macro-bindings { display: grid; gap: 6px; }
+  .control-command-drawer #gamepad-panel { padding: 0; border: 0; background: transparent; }
+  .control-command-drawer .jog-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .control-command-drawer .gamepad-axis-row { grid-template-columns: 26px minmax(0, 1fr) 74px; }
+  .control-command-drawer .gamepad-axis-row label:last-child { grid-column: 2 / -1; }
+  .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 70px minmax(0, 1fr) auto; }
   .empty.compact { padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
   #file-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
   .summary-pill { background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; color: var(--muted); font-size: 12px; }
@@ -373,13 +399,12 @@
     #folder-sidebar { position: sticky; top: 142px; }
   }
   @media (max-width: 1360px) {
-    .tap-move-toolbar { grid-template-columns: minmax(180px, 220px) minmax(276px, 1fr); gap: 12px 18px; }
     .tap-coordinate-panel { grid-column: 1 / -1; padding-left: 0; border-left: 0; }
   }
   @media (max-width: 1040px) {
     .active-gcode-head { grid-template-columns: 1fr; }
     #active-gcode-run { width: 100%; justify-content: center; }
-    .tap-move-toolbar { grid-template-columns: 1fr; }
+    .control-page-layout { grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); }
     .tap-control-group, .tap-coordinate-panel { padding-left: 0; border-left: 0; }
     .tap-origin-panel { grid-template-columns: minmax(220px, .75fr) minmax(0, 1fr); }
     .origin-row-saved { grid-template-columns: minmax(210px, 1fr) 74px 72px; }
@@ -390,6 +415,8 @@
     .file-col-status { width: 15%; }
   }
   @media (max-width: 880px) {
+    .control-page-layout { grid-template-columns: 1fr; }
+    .control-command-drawer { position: static; max-height: none; }
     #file-browser { grid-template-columns: 1fr; }
     .file-col-type, th:nth-child(2), td:nth-child(2) { display: none; }
     .file-col-actions { width: 34%; }
@@ -398,6 +425,8 @@
   @media (max-width: 760px) {
     #header-main { display: grid; gap: var(--gap-sm); }
     header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-arm-panel, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-row, .origin-row-action, .origin-row-saved { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    .control-command-drawer .gamepad-axis-row, .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 1fr; }
+    .control-command-drawer .gamepad-axis-row label:last-child { grid-column: auto; }
     .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
     .tap-feed-field { width: 100%; }
     .tap-feed-stepper { grid-template-columns: 38px minmax(0, 1fr) 38px; }
@@ -708,220 +737,244 @@
     <section class="page-section">
       <h2>Control</h2>
       <div id="jog">
-        <div class="tap-move-toolbar">
-          <div class="tap-arm-panel">
-            <div class="tap-control-title">Tap Move</div>
-            <button type="button" id="jog-arm">Arm Tap Move</button>
-          </div>
-          <div class="tap-control-group">
-            <div class="tap-control-title">Jog Settings</div>
-            <div class="tap-primary-controls">
-              <div class="tap-field tap-feed-field">
-                <label id="tap-feed-label" class="tap-field-label" for="tap-feed-mm-min">Feed</label>
-                <div class="tap-feed-stepper" aria-labelledby="tap-feed-label">
-                  <button type="button" data-feed-step="-500" aria-label="Decrease feed by 500">-</button>
-                  <input id="tap-feed-mm-min" type="number" min="1" step="500" inputmode="decimal">
-                  <button type="button" data-feed-step="500" aria-label="Increase feed by 500">+</button>
+        <div class="control-page-layout">
+          <details id="control-command-drawer" class="control-command-drawer" open>
+            <summary>Commands</summary>
+            <div class="tap-move-toolbar">
+              <details class="control-drawer-section" open>
+                <summary>Jog Settings</summary>
+                <div class="detail-body">
+                  <div class="tap-control-group">
+                    <div class="tap-primary-controls">
+                      <div class="tap-field tap-feed-field">
+                        <label id="tap-feed-label" class="tap-field-label" for="tap-feed-mm-min">Feed</label>
+                        <div class="tap-feed-stepper" aria-labelledby="tap-feed-label">
+                          <button type="button" data-feed-step="-500" aria-label="Decrease feed by 500">-</button>
+                          <input id="tap-feed-mm-min" type="number" min="1" step="500" inputmode="decimal">
+                          <button type="button" data-feed-step="500" aria-label="Increase feed by 500">+</button>
+                        </div>
+                      </div>
+                      <label class="tap-safe-z-field"><span>Safe Z</span><span class="tap-safe-z-toggle"><input id="tap-safe-z-enabled" type="checkbox" checked><span class="tap-safe-z-switch" aria-hidden="true"></span></span></label>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <label class="tap-safe-z-field"><span>Safe Z</span><span class="tap-safe-z-toggle"><input id="tap-safe-z-enabled" type="checkbox" checked><span class="tap-safe-z-switch" aria-hidden="true"></span></span></label>
+              </details>
+              <details class="control-drawer-section" open>
+                <summary>Move To Work</summary>
+                <div class="detail-body">
+                  <div class="tap-coordinate-panel" aria-label="Move to work coordinate">
+                    <div class="tap-coordinate-row">
+                      <div class="work-move-axis">
+                        <label class="work-move-label" for="work-move-x">Work X</label>
+                        <span class="work-move-field is-live" data-work-move-axis="x"><input id="work-move-x" type="number" step="0.001" inputmode="decimal"><button type="button" class="work-move-reset" data-work-move-reset="x" aria-label="Reset Work X to current coordinate" title="Reset Work X to current coordinate"><svg class="icon-reset" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v6h6"></path><path d="M3.5 13a8.5 8.5 0 1 0 2.4-5.9L3 9"></path></svg></button></span>
+                      </div>
+                      <div class="work-move-axis">
+                        <label class="work-move-label" for="work-move-y">Work Y</label>
+                        <span class="work-move-field is-live" data-work-move-axis="y"><input id="work-move-y" type="number" step="0.001" inputmode="decimal"><button type="button" class="work-move-reset" data-work-move-reset="y" aria-label="Reset Work Y to current coordinate" title="Reset Work Y to current coordinate"><svg class="icon-reset" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v6h6"></path><path d="M3.5 13a8.5 8.5 0 1 0 2.4-5.9L3 9"></path></svg></button></span>
+                      </div>
+                      <div class="work-move-axis">
+                        <label class="work-move-label" for="work-move-z">Work Z</label>
+                        <span class="work-move-field is-live" data-work-move-axis="z"><input id="work-move-z" type="number" step="0.001" inputmode="decimal"><button type="button" class="work-move-reset" data-work-move-reset="z" aria-label="Reset Work Z to current coordinate" title="Reset Work Z to current coordinate"><svg class="icon-reset" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v6h6"></path><path d="M3.5 13a8.5 8.5 0 1 0 2.4-5.9L3 9"></path></svg></button></span>
+                      </div>
+                      <button type="button" id="work-move-send">Move</button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+              <details class="control-drawer-section" open>
+                <summary>Work Zero</summary>
+                <div class="detail-body">
+                  <div class="tap-origin-panel" aria-label="Set work origin">
+                    <div class="origin-group">
+                      <div class="origin-row origin-row-action">
+                        <label><span>Origin Action</span>
+                          <select id="origin-action">
+                            <option value="zero-x">Zero X</option>
+                            <option value="zero-y">Zero Y</option>
+                            <option value="zero-z">Zero Z</option>
+                            <option value="zero-xy">Zero XY</option>
+                            <option value="set-x">Set X Value</option>
+                            <option value="set-y">Set Y Value</option>
+                            <option value="set-z">Set Z Value</option>
+                            <option value="probe-z">Probe Z</option>
+                            <option value="reset-xy">Reset XY to Machine</option>
+                          </select>
+                        </label>
+                        <label id="origin-value-x-wrap"><span>X Value</span><input id="origin-value-x" type="number" step="0.001" inputmode="decimal"></label>
+                        <label id="origin-value-y-wrap"><span>Y Value</span><input id="origin-value-y" type="number" step="0.001" inputmode="decimal"></label>
+                        <label id="origin-value-z-wrap"><span>Z Value</span><input id="origin-value-z" type="number" step="0.001" inputmode="decimal"></label>
+                        <button type="button" id="origin-apply">Apply</button>
+                      </div>
+                    </div>
+                    <div class="origin-group has-title">
+                      <div class="origin-group-title">Saved Zeros</div>
+                      <div class="origin-row origin-row-saved">
+                        <label><span>Preset</span><select id="saved-origin-select"></select></label>
+                        <button type="button" id="saved-origin-recall">Recall</button>
+                        <button type="button" id="saved-origin-delete">Delete</button>
+                        <label class="saved-origin-label-field"><span>Save Label</span><input id="saved-origin-label" type="text" maxlength="80" autocomplete="off" spellcheck="false"></label>
+                        <button type="button" id="saved-origin-save">Save Current</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </details>
+              <details id="machine-settings" class="control-drawer-section">
+                <summary>Machine Settings</summary>
+                <div class="detail-body">
+                  <div class="machine-settings-grid">
+                    <label><span>Display X Min</span><input id="machine-x-min" type="number" step="1" inputmode="decimal"></label>
+                    <label><span>Display X Max</span><input id="machine-x-max" type="number" step="1" inputmode="decimal"></label>
+                    <label><span>Display Y Min</span><input id="machine-y-min" type="number" step="1" inputmode="decimal"></label>
+                    <label><span>Display Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
+                    <label><span>Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
+                    <label><span>Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
+                    <label><span>Feed Min</span><input id="machine-feed-min" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
+                    <label><span>Feed Max</span><input id="machine-feed-max" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
+                    <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
+                  </div>
+                  <div class="machine-settings-actions">
+                    <button type="button" id="machine-learn">Learn from machine</button>
+                  </div>
+                  <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
+                  <div id="machine-learned-summary" class="machine-learned-summary"></div>
+                </div>
+              </details>
+              <details class="control-drawer-section">
+                <summary>Gamepad</summary>
+                <div class="detail-body">
+                  <div id="gamepad-panel">
+                    <div class="jog-summary">
+                      <span>link: <b id="jog-link">-</b></span>
+                      <span>pad: <b id="jog-pad">-</b></span>
+                      <span>deadman: <b id="jog-deadman">off</b></span>
+                      <span>latency: <b id="jog-latency">-</b></span>
+                    </div>
+                    <details id="gamepad-settings">
+                      <summary>Gamepad Settings</summary>
+                      <div class="detail-body">
+                        <div class="gamepad-axis-config">
+                          <div class="gamepad-axis-row">
+                            <span>X</span>
+                            <label><span>Axis</span><input id="gamepad-axis-x" type="number" min="0" max="31"></label>
+                            <label><span>Invert</span><input id="gamepad-invert-x" type="checkbox"></label>
+                            <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-x" type="range" min="5" max="100" step="5"><b id="gamepad-speed-x-value">100%</b></span></label>
+                          </div>
+                          <div class="gamepad-axis-row">
+                            <span>Y</span>
+                            <label><span>Axis</span><input id="gamepad-axis-y" type="number" min="0" max="31"></label>
+                            <label><span>Invert</span><input id="gamepad-invert-y" type="checkbox"></label>
+                            <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-y" type="range" min="5" max="100" step="5"><b id="gamepad-speed-y-value">100%</b></span></label>
+                          </div>
+                          <div class="gamepad-axis-row">
+                            <span>Z</span>
+                            <label><span>Axis</span><input id="gamepad-axis-z" type="number" min="0" max="31"></label>
+                            <label><span>Invert</span><input id="gamepad-invert-z" type="checkbox"></label>
+                            <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-z" type="range" min="5" max="100" step="5"><b id="gamepad-speed-z-value">100%</b></span></label>
+                          </div>
+                        </div>
+                        <div class="gamepad-button-config">
+                          <div class="macro-grid">
+                            <label><span>Deadman Button</span><input id="gamepad-deadman-button" type="number" min="0" max="63"></label>
+                            <label><span>Slow Button A</span><input id="gamepad-slow-button-0" type="number" min="0" max="63"></label>
+                            <label><span>Slow Button B</span><input id="gamepad-slow-button-1" type="number" min="0" max="63"></label>
+                          </div>
+                          <div class="gamepad-bindings-head"><span>Button</span><span>Macro</span><span></span></div>
+                          <div id="gamepad-macro-bindings"></div>
+                          <div><button type="button" id="gamepad-add-macro">Add Macro Button</button></div>
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+                </div>
+              </details>
             </div>
-          </div>
-          <div class="tap-coordinate-panel" aria-label="Move to work coordinate">
-            <div class="tap-control-title">Move To Work</div>
-            <div class="tap-coordinate-row">
-              <div class="work-move-axis">
-                <label class="work-move-label" for="work-move-x">Work X</label>
-                <span class="work-move-field is-live" data-work-move-axis="x"><input id="work-move-x" type="number" step="0.001" inputmode="decimal"><button type="button" class="work-move-reset" data-work-move-reset="x" aria-label="Reset Work X to current coordinate" title="Reset Work X to current coordinate"><svg class="icon-reset" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v6h6"></path><path d="M3.5 13a8.5 8.5 0 1 0 2.4-5.9L3 9"></path></svg></button></span>
+          </details>
+          <div class="control-workspace">
+            <div class="tap-move-body">
+              <div class="workarea-frame">
+                <div class="workarea-controls" aria-label="Work area view controls">
+                  <button type="button" id="workarea-zoom-out" title="Zoom out">-</button>
+                  <button type="button" id="workarea-zoom-reset" title="Fit work area">Fit</button>
+                  <button type="button" id="workarea-zoom-in" title="Zoom in">+</button>
+                </div>
+                <div id="outline-preview-controls" class="outline-preview-controls">
+                  <div class="tap-arm-panel">
+                    <div class="tap-control-title">Tap Move</div>
+                    <button type="button" id="jog-arm">Arm Tap Move</button>
+                  </div>
+                  <button type="button" id="outline-start" class="primary">Capture outline</button>
+                  <div id="outline-active-controls" class="outline-active-controls" hidden>
+                    <button type="button" id="outline-end">End outline</button>
+                    <button type="button" id="outline-add-point">Add point</button>
+                    <button type="button" id="outline-trace" hidden>Trace outline</button>
+                    <button type="button" id="outline-undo">Undo</button>
+                    <button type="button" id="outline-redo">Redo</button>
+                    <button type="button" id="outline-close">Close outline</button>
+                    <button type="button" id="outline-export">Export SVG</button>
+                    <label><input type="checkbox" id="outline-curve-fit"> Curve fit</label>
+                  </div>
+                </div>
+                <div id="workarea-hover-position" hidden></div>
+                <svg id="workarea-plot" class="not-armed" viewBox="0 0 100 100" role="img" aria-label="Machine work area">
+                  <g id="workarea-viewport">
+                    <rect id="workarea-boundary" x="6" y="6" width="88" height="88"></rect>
+                    <g id="workarea-grid"></g>
+                    <line id="workarea-origin-x" x1="6" y1="94" x2="94" y2="94"></line>
+                    <line id="workarea-origin-y" x1="94" y1="6" x2="94" y2="94"></line>
+                    <g id="workarea-origin" display="none">
+                      <path id="workarea-origin-x-axis" d="M -6.2 0 H 6.2 M 4.8 -1.1 L 6.2 0 L 4.8 1.1 M -4.8 -1.1 L -6.2 0 L -4.8 1.1"></path>
+                      <path id="workarea-origin-y-axis" d="M 0 6.2 V -6.2 M -1.1 -4.8 L 0 -6.2 L 1.1 -4.8 M -1.1 4.8 L 0 6.2 L 1.1 4.8"></path>
+                      <text id="workarea-origin-xp" x="6.9" y=".75">X+</text>
+                      <text id="workarea-origin-xm" x="-11.1" y=".75">X-</text>
+                      <text id="workarea-origin-yp" x=".8" y="-6.9">Y+</text>
+                      <text id="workarea-origin-ym" x=".8" y="8.4">Y-</text>
+                    </g>
+                    <g id="workarea-outline" display="none">
+                      <path id="workarea-outline-path"></path>
+                      <g id="workarea-outline-points"></g>
+                    </g>
+                    <g id="workarea-field-probe-preview" display="none"></g>
+                    <g id="workarea-target" display="none">
+                      <circle id="workarea-target-marker" cx="0" cy="0" r="0.5"></circle>
+                      <path id="workarea-target-cross" d="M -4 0 L 4 0 M 0 -4 L 0 4"></path>
+                    </g>
+                    <g id="workarea-spindle" display="none">
+                      <circle id="workarea-spindle-marker" cx="0" cy="0" r="0.5"></circle>
+                      <path id="workarea-spindle-cross" d="M -3 0 L 3 0 M 0 -3 L 0 3"></path>
+                    </g>
+                  </g>
+                </svg>
               </div>
-              <div class="work-move-axis">
-                <label class="work-move-label" for="work-move-y">Work Y</label>
-                <span class="work-move-field is-live" data-work-move-axis="y"><input id="work-move-y" type="number" step="0.001" inputmode="decimal"><button type="button" class="work-move-reset" data-work-move-reset="y" aria-label="Reset Work Y to current coordinate" title="Reset Work Y to current coordinate"><svg class="icon-reset" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v6h6"></path><path d="M3.5 13a8.5 8.5 0 1 0 2.4-5.9L3 9"></path></svg></button></span>
-              </div>
-              <div class="work-move-axis">
-                <label class="work-move-label" for="work-move-z">Work Z</label>
-                <span class="work-move-field is-live" data-work-move-axis="z"><input id="work-move-z" type="number" step="0.001" inputmode="decimal"><button type="button" class="work-move-reset" data-work-move-reset="z" aria-label="Reset Work Z to current coordinate" title="Reset Work Z to current coordinate"><svg class="icon-reset" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v6h6"></path><path d="M3.5 13a8.5 8.5 0 1 0 2.4-5.9L3 9"></path></svg></button></span>
-              </div>
-              <button type="button" id="work-move-send">Move</button>
-            </div>
-          </div>
-          <div class="tap-origin-panel" aria-label="Set work origin">
-            <div class="origin-group">
-              <div class="origin-group-title">Work Zero</div>
-              <div class="origin-row origin-row-action">
-                <label><span>Origin Action</span>
-                  <select id="origin-action">
-                    <option value="zero-x">Zero X</option>
-                    <option value="zero-y">Zero Y</option>
-                    <option value="zero-xy">Zero XY</option>
-                    <option value="set-x">Set X Value</option>
-                    <option value="set-y">Set Y Value</option>
-                    <option value="reset-xy">Reset XY to Machine</option>
+              <div class="z-step-controls" aria-label="Z movement">
+                <button type="button" data-z-step-dir="1">Z+</button>
+                <label><span>Step</span>
+                  <select id="z-step-distance">
+                    <option value="10">10</option>
+                    <option value="1" selected>1</option>
+                    <option value="0.1">0.1</option>
+                    <option value="0.01">0.01</option>
                   </select>
                 </label>
-                <label id="origin-value-x-wrap"><span>X Value</span><input id="origin-value-x" type="number" step="0.001" inputmode="decimal"></label>
-                <label id="origin-value-y-wrap"><span>Y Value</span><input id="origin-value-y" type="number" step="0.001" inputmode="decimal"></label>
-                <button type="button" id="origin-apply">Apply</button>
+                <button type="button" data-z-step-dir="-1">Z-</button>
               </div>
             </div>
-            <div class="origin-group">
-              <div class="origin-group-title">Saved Zeros</div>
-              <div class="origin-row origin-row-saved">
-                <label><span>Saved Zero</span><select id="saved-origin-select"></select></label>
-                <button type="button" id="saved-origin-recall">Recall</button>
-                <button type="button" id="saved-origin-delete">Delete</button>
-                <label class="saved-origin-label-field"><span>Save Label</span><input id="saved-origin-label" type="text" maxlength="80" autocomplete="off" spellcheck="false"></label>
-                <button type="button" id="saved-origin-save">Save Current</button>
+            <div id="outline-capture" class="outline-capture">
+              <div id="outline-probe-controls" class="outline-probe-controls" hidden>
+                <label id="outline-probe-point-wrap" hidden><input type="checkbox" id="outline-probe-point"> Probe Z</label>
               </div>
+              <div id="outline-field-controls" class="outline-field-controls" hidden>
+                <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
+                <button type="button" id="outline-field-probe">Probe field Z</button>
+                <div id="outline-export-controls" class="outline-export-controls" hidden>
+                  <button type="button" id="outline-export-obj">Export OBJ</button>
+                  <button type="button" id="outline-export-height">Export Height PGM</button>
+                </div>
+              </div>
+              <div id="outline-summary" class="outline-summary"></div>
             </div>
           </div>
         </div>
-        <div class="tap-move-body">
-          <div class="workarea-frame">
-            <div class="workarea-controls" aria-label="Work area view controls">
-              <button type="button" id="workarea-zoom-out" title="Zoom out">-</button>
-              <button type="button" id="workarea-zoom-reset" title="Fit work area">Fit</button>
-              <button type="button" id="workarea-zoom-in" title="Zoom in">+</button>
-            </div>
-            <div id="outline-preview-controls" class="outline-preview-controls">
-              <button type="button" id="outline-start" class="primary">Capture outline</button>
-              <div id="outline-active-controls" class="outline-active-controls" hidden>
-                <button type="button" id="outline-end">End outline</button>
-                <button type="button" id="outline-add-point">Add point</button>
-                <button type="button" id="outline-trace" hidden>Trace outline</button>
-                <button type="button" id="outline-undo">Undo</button>
-                <button type="button" id="outline-redo">Redo</button>
-                <button type="button" id="outline-close">Close outline</button>
-                <button type="button" id="outline-export">Export SVG</button>
-                <label><input type="checkbox" id="outline-curve-fit"> Curve fit</label>
-              </div>
-            </div>
-            <div id="workarea-hover-position" hidden></div>
-            <svg id="workarea-plot" class="not-armed" viewBox="0 0 100 100" role="img" aria-label="Machine work area">
-              <g id="workarea-viewport">
-                <rect id="workarea-boundary" x="6" y="6" width="88" height="88"></rect>
-                <g id="workarea-grid"></g>
-                <line id="workarea-origin-x" x1="6" y1="94" x2="94" y2="94"></line>
-                <line id="workarea-origin-y" x1="94" y1="6" x2="94" y2="94"></line>
-                <g id="workarea-origin" display="none">
-                  <path id="workarea-origin-x-axis" d="M -6.2 0 H 6.2 M 4.8 -1.1 L 6.2 0 L 4.8 1.1 M -4.8 -1.1 L -6.2 0 L -4.8 1.1"></path>
-                  <path id="workarea-origin-y-axis" d="M 0 6.2 V -6.2 M -1.1 -4.8 L 0 -6.2 L 1.1 -4.8 M -1.1 4.8 L 0 6.2 L 1.1 4.8"></path>
-                  <text id="workarea-origin-xp" x="6.9" y=".75">X+</text>
-                  <text id="workarea-origin-xm" x="-11.1" y=".75">X-</text>
-                  <text id="workarea-origin-yp" x=".8" y="-6.9">Y+</text>
-                  <text id="workarea-origin-ym" x=".8" y="8.4">Y-</text>
-                </g>
-                <g id="workarea-outline" display="none">
-                  <path id="workarea-outline-path"></path>
-                  <g id="workarea-outline-points"></g>
-                </g>
-                <g id="workarea-field-probe-preview" display="none"></g>
-                <g id="workarea-target" display="none">
-                  <circle id="workarea-target-marker" cx="0" cy="0" r="0.5"></circle>
-                  <path id="workarea-target-cross" d="M -4 0 L 4 0 M 0 -4 L 0 4"></path>
-                </g>
-                <g id="workarea-spindle" display="none">
-                  <circle id="workarea-spindle-marker" cx="0" cy="0" r="0.5"></circle>
-                  <path id="workarea-spindle-cross" d="M -3 0 L 3 0 M 0 -3 L 0 3"></path>
-                </g>
-              </g>
-            </svg>
-          </div>
-          <div class="z-step-controls" aria-label="Z movement">
-            <button type="button" data-z-step-dir="1">Z+</button>
-            <label><span>Step</span>
-              <select id="z-step-distance">
-                <option value="10">10</option>
-                <option value="1" selected>1</option>
-                <option value="0.1">0.1</option>
-                <option value="0.01">0.01</option>
-              </select>
-            </label>
-            <button type="button" data-z-step-dir="-1">Z-</button>
-          </div>
-        </div>
-        <div id="outline-capture" class="outline-capture">
-          <div id="outline-probe-controls" class="outline-probe-controls" hidden>
-            <label id="outline-probe-point-wrap" hidden><input type="checkbox" id="outline-probe-point"> Probe Z</label>
-          </div>
-          <div id="outline-field-controls" class="outline-field-controls" hidden>
-            <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
-            <button type="button" id="outline-field-probe">Probe field Z</button>
-            <div id="outline-export-controls" class="outline-export-controls" hidden>
-              <button type="button" id="outline-export-obj">Export OBJ</button>
-              <button type="button" id="outline-export-height">Export Height PGM</button>
-            </div>
-          </div>
-          <div id="outline-summary" class="outline-summary"></div>
-        </div>
-        <details id="machine-settings">
-          <summary>Machine Settings</summary>
-          <div class="detail-body">
-            <div class="machine-settings-grid">
-              <label><span>Display X Min</span><input id="machine-x-min" type="number" step="1" inputmode="decimal"></label>
-              <label><span>Display X Max</span><input id="machine-x-max" type="number" step="1" inputmode="decimal"></label>
-              <label><span>Display Y Min</span><input id="machine-y-min" type="number" step="1" inputmode="decimal"></label>
-              <label><span>Display Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
-              <label><span>Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
-              <label><span>Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
-              <label><span>Feed Min</span><input id="machine-feed-min" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
-              <label><span>Feed Max</span><input id="machine-feed-max" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
-              <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
-            </div>
-            <div class="machine-settings-actions">
-              <button type="button" id="machine-learn">Learn from machine</button>
-            </div>
-            <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
-            <div id="machine-learned-summary" class="machine-learned-summary"></div>
-          </div>
-        </details>
-      </div>
-    </section>
-
-    <section class="page-section">
-      <h2>Gamepad</h2>
-      <div id="gamepad-panel">
-        <div class="jog-summary">
-          <span>link: <b id="jog-link">-</b></span>
-          <span>pad: <b id="jog-pad">-</b></span>
-          <span>deadman: <b id="jog-deadman">off</b></span>
-          <span>latency: <b id="jog-latency">-</b></span>
-        </div>
-        <details id="gamepad-settings">
-          <summary>Gamepad Settings</summary>
-          <div class="detail-body">
-            <div class="gamepad-axis-config">
-              <div class="gamepad-axis-row">
-                <span>X</span>
-                <label><span>Axis</span><input id="gamepad-axis-x" type="number" min="0" max="31"></label>
-                <label><span>Invert</span><input id="gamepad-invert-x" type="checkbox"></label>
-                <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-x" type="range" min="5" max="100" step="5"><b id="gamepad-speed-x-value">100%</b></span></label>
-              </div>
-              <div class="gamepad-axis-row">
-                <span>Y</span>
-                <label><span>Axis</span><input id="gamepad-axis-y" type="number" min="0" max="31"></label>
-                <label><span>Invert</span><input id="gamepad-invert-y" type="checkbox"></label>
-                <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-y" type="range" min="5" max="100" step="5"><b id="gamepad-speed-y-value">100%</b></span></label>
-              </div>
-              <div class="gamepad-axis-row">
-                <span>Z</span>
-                <label><span>Axis</span><input id="gamepad-axis-z" type="number" min="0" max="31"></label>
-                <label><span>Invert</span><input id="gamepad-invert-z" type="checkbox"></label>
-                <label><span>Speed</span><span class="gamepad-speed"><input id="gamepad-speed-z" type="range" min="5" max="100" step="5"><b id="gamepad-speed-z-value">100%</b></span></label>
-              </div>
-            </div>
-            <div class="gamepad-button-config">
-              <div class="macro-grid">
-                <label><span>Deadman Button</span><input id="gamepad-deadman-button" type="number" min="0" max="63"></label>
-                <label><span>Slow Button A</span><input id="gamepad-slow-button-0" type="number" min="0" max="63"></label>
-                <label><span>Slow Button B</span><input id="gamepad-slow-button-1" type="number" min="0" max="63"></label>
-              </div>
-              <div class="gamepad-bindings-head"><span>Button</span><span>Macro</span><span></span></div>
-              <div id="gamepad-macro-bindings"></div>
-              <div><button type="button" id="gamepad-add-macro">Add Macro Button</button></div>
-            </div>
-          </div>
-        </details>
       </div>
     </section>
   </section>

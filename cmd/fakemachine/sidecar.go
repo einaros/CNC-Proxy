@@ -162,6 +162,103 @@ func sidecarHandler(m *carveratest.FakeMachine) http.Handler {
 			log.Printf("encode probe model mesh: %v", err)
 		}
 	})
+	mux.HandleFunc("/api/model/placement", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		noStore(w)
+		update, err := readModelPlacementRequest(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		model, err := m.SetModelPlacement(update)
+		if err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "not idle") {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(model); err != nil {
+			log.Printf("encode model placement: %v", err)
+		}
+	})
+	mux.HandleFunc("/api/simulation/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		noStore(w)
+		update, err := readSimulationSettingsRequest(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sim, err := m.UpdateSimulationSettings(update)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(sim); err != nil {
+			log.Printf("encode simulation settings: %v", err)
+		}
+	})
+	mux.HandleFunc("/api/simulation/reset", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		noStore(w)
+		sim, err := m.ResetStock()
+		if err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "not idle") {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(sim); err != nil {
+			log.Printf("encode simulation reset: %v", err)
+		}
+	})
+	mux.HandleFunc("/api/simulation/stock", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		noStore(w)
+		stock, ok := m.StockState()
+		if !ok {
+			http.Error(w, "no stock loaded", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stock); err != nil {
+			log.Printf("encode stock: %v", err)
+		}
+	})
+	mux.HandleFunc("/api/simulation/stock.stl", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		noStore(w)
+		data, ok := m.StockSTL()
+		if !ok {
+			http.Error(w, "no stock loaded", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "model/stl")
+		w.Header().Set("Content-Disposition", `attachment; filename="fakemachine-end-stock.stl"`)
+		_, _ = w.Write(data)
+	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -261,6 +358,26 @@ func readToolInsertKind(w http.ResponseWriter, r *http.Request) (string, error) 
 		return kind, nil
 	}
 	return "", errors.New("unsupported content type")
+}
+
+func readSimulationSettingsRequest(w http.ResponseWriter, r *http.Request) (carveratest.SimulationSettingsUpdate, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	defer r.Body.Close()
+	var req carveratest.SimulationSettingsUpdate
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return carveratest.SimulationSettingsUpdate{}, err
+	}
+	return req, nil
+}
+
+func readModelPlacementRequest(w http.ResponseWriter, r *http.Request) (carveratest.ModelPlacementUpdate, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	defer r.Body.Close()
+	var req carveratest.ModelPlacementUpdate
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return carveratest.ModelPlacementUpdate{}, err
+	}
+	return req, nil
 }
 
 func readModelUpload(w http.ResponseWriter, r *http.Request) (string, []byte, error) {

@@ -119,6 +119,18 @@ func CalibrateCurrentToolLine() string {
 	return "M491\n"
 }
 
+// AutoZProbeLine builds the controller-compatible auto Z probe command. The
+// official controller sends M495 with the work path X/Y origin and O/F probe
+// offsets; zero offsets probe at the supplied work XY point.
+func AutoZProbeLine(workX, workY, offsetX, offsetY float64) string {
+	return "M495 X" + controllerFloat(workX) + "Y" + controllerFloat(workY) +
+		"O" + controllerFloat(offsetX) + "F" + controllerFloat(offsetY) + "\n"
+}
+
+func controllerFloat(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
 // Single-character control frames (CTRL_SINGLE).
 func QueryStatus() []byte { return Encode(CmdCtrlSingle, []byte{'?'}) }
 func Halt() []byte        { return Encode(CmdCtrlSingle, []byte{0x18}) } // Ctrl-X

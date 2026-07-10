@@ -132,11 +132,27 @@ func saveConfig(path string, cfg Config, validate func(Config) error) error {
 		os.Remove(tmpName)
 		return err
 	}
+	// fsync through rename (same discipline as store.flushLocked) so a crash
+	// or power loss cannot leave an empty or missing tray config.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	// fsync the directory so the rename itself is durable.
+	if dir, derr := os.Open(filepath.Dir(path)); derr == nil {
+		dir.Sync()
+		dir.Close()
+	}
+	return nil
 }
 
 func ValidateConfig(cfg Config) error {

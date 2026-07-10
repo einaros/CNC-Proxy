@@ -8,9 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
@@ -18,6 +16,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
+	"github.com/uwin/cnc-proxy/internal/webguard"
 )
 
 // Server holds the HTTP handlers.
@@ -86,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tool/drop", s.dropCurrentTool)           // runs M6T-1
 	mux.HandleFunc("POST /api/tool/calibrate", s.calibrateCurrentTool) // starts M491
 	mux.HandleFunc("POST /api/probe/z", s.probeZ)                      // one serialized Z probe
+	mux.HandleFunc("POST /api/probe/auto-z", s.autoZProbe)             // controller-style M495 auto Z probe
 	mux.HandleFunc("POST /api/outline/trace", s.traceOutline)          // serialized probe-laser outline trace
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
@@ -348,6 +348,16 @@ func (s *Server) probeZ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.svc.ProbeZ(body)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) autoZProbe(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	res, err := s.svc.AutoZProbe()
 	if err != nil {
 		s.mapError(w, err)
 		return
@@ -653,24 +663,11 @@ func sendEvent(w io.Writer, event string, v any) {
 }
 
 func sameOriginGuard(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !requiresSameOrigin(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if site := strings.ToLower(r.Header.Get("Sec-Fetch-Site")); site == "cross-site" {
-			writeErr(w, http.StatusForbidden, "cross-site request rejected")
-			return
-		}
-		if !sameOrigin(r, r.Header.Get("Origin")) {
-			writeErr(w, http.StatusForbidden, "cross-origin request rejected")
-			return
-		}
-		if r.Header.Get("Origin") == "" && !sameOrigin(r, r.Header.Get("Referer")) {
-			writeErr(w, http.StatusForbidden, "cross-origin request rejected")
-			return
-		}
-		next.ServeHTTP(w, r)
+	return webguard.Handler(next, webguard.Options{
+		RequiresSameOrigin: requiresSameOrigin,
+		Reject: func(w http.ResponseWriter, message string) {
+			writeErr(w, http.StatusForbidden, message)
+		},
 	})
 }
 
@@ -692,42 +689,3 @@ func requiresSameOrigin(r *http.Request) bool {
 	}
 }
 
-func sameOrigin(r *http.Request, raw string) bool {
-	if raw == "" {
-		return true
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return false
-	}
-	host := r.Host
-	if host == "" {
-		host = r.URL.Host
-	}
-	return strings.EqualFold(normalizeHost(u.Host), normalizeHost(host)) &&
-		strings.EqualFold(u.Scheme, requestScheme(r))
-}
-
-func requestScheme(r *http.Request) string {
-	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
-		if i := strings.IndexByte(xf, ','); i >= 0 {
-			xf = xf[:i]
-		}
-		return strings.ToLower(strings.TrimSpace(xf))
-	}
-	if r.TLS != nil {
-		return "https"
-	}
-	return "http"
-}
-
-func normalizeHost(host string) string {
-	h, p, err := net.SplitHostPort(host)
-	if err != nil {
-		return strings.ToLower(host)
-	}
-	if (p == "80" || p == "443") && h != "" {
-		return strings.ToLower(h)
-	}
-	return strings.ToLower(net.JoinHostPort(h, p))
-}

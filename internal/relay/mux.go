@@ -41,6 +41,11 @@ type mux struct {
 	interactive bool
 	// injectCh delivers machine frames to the active injector.
 	injectCh chan protocol.Frame
+	// injectOverflow is set when a non-interactive injection's reply frame
+	// could not be buffered. The transport is then errored so the managed op
+	// fails loudly instead of reporting success over a silently truncated
+	// reply stream (e.g. a partial `ls` that reconcile would act on).
+	injectOverflow bool
 	// injectStatusPolls counts STATUS_RES replies owed to non-interactive
 	// injected `?` polls. Controller polls are answered from cache and never
 	// increment this.
@@ -56,6 +61,12 @@ type mux struct {
 	// controllerMidXfer is true while the controller is inside a file transfer
 	// (FILE_START..FILE_END/CAN), during which injection must not begin.
 	controllerMidXfer bool
+
+	// testHookBeforeHeldFlush, when set (tests only), runs once per release just
+	// before the first batch of held controller frames is written to the
+	// machine. It lets ordering tests deterministically interleave a fresh
+	// controller frame with the held-frame flush.
+	testHookBeforeHeldFlush func()
 }
 
 func newMux(machine machinetransport.Conn) *mux {
@@ -154,7 +165,11 @@ func (m *mux) AcquireInjection() (*injectTransport, func(), error) {
 	}
 	m.injecting = true
 	m.interactive = false
-	m.injectCh = make(chan protocol.Frame, 64)
+	// One 32 KB machine read can decode hundreds of LOAD_INFO frames; size the
+	// buffer for a full burst. If it still overflows, the transport is errored
+	// (see deliverInjectLocked) rather than silently truncated.
+	m.injectCh = make(chan protocol.Frame, 256)
+	m.injectOverflow = false
 	m.abortCh = nil
 	m.mu.Unlock()
 
@@ -180,6 +195,7 @@ func (m *mux) AcquireInteractive() (*injectTransport, <-chan struct{}, func(), e
 	m.injecting = true
 	m.interactive = true
 	m.injectCh = make(chan protocol.Frame, 128)
+	m.injectOverflow = false
 	m.abortCh = make(chan struct{})
 	abortCh := m.abortCh
 	m.mu.Unlock()
@@ -189,29 +205,53 @@ func (m *mux) AcquireInteractive() (*injectTransport, <-chan struct{}, func(), e
 	return it, abortCh, release, nil
 }
 
-// releaseInjection ends the injection window and flushes held controller frames
+// releaseInjection ends the injection window, flushing held controller frames
 // to the machine so the controller's pending traffic proceeds.
+//
+// Ordering invariant (F8): held frames must reach the machine before any
+// controller frame forwarded after the release. `injecting` therefore stays
+// true until the held queue has fully drained — while it is set the controller
+// pump keeps holding new frames instead of forwarding them, so a freshly
+// arrived frame can never overtake a held one. The machine writes themselves
+// happen outside m.mu (never hold the mode lock across I/O); serialization is
+// by state: the pump forwards only when injecting is false, which this
+// function only makes true after the last held frame was written.
 func (m *mux) releaseInjection() {
-	m.mu.Lock()
-	held := m.heldController
-	m.heldController = nil
-	m.injecting = false
-	m.interactive = false
-	m.injectStatusPolls = 0
-	ch := m.injectCh
-	m.injectCh = nil
-	abortCh := m.abortCh
-	m.abortCh = nil
-	m.mu.Unlock()
+	firstFlush := true
+	for {
+		m.mu.Lock()
+		held := m.heldController
+		m.heldController = nil
+		if len(held) == 0 {
+			// Nothing (left) held: end the window atomically with the empty
+			// queue so the pump resumes forwarding only after every held
+			// frame reached the machine.
+			m.injecting = false
+			m.interactive = false
+			m.injectStatusPolls = 0
+			ch := m.injectCh
+			m.injectCh = nil
+			abortCh := m.abortCh
+			m.abortCh = nil
+			m.mu.Unlock()
 
-	if abortCh != nil {
-		m.closeAbort(abortCh)
-	}
-	if ch != nil {
-		close(ch)
-	}
-	for _, raw := range held {
-		_, _ = m.machine.Write(raw)
+			if abortCh != nil {
+				m.closeAbort(abortCh)
+			}
+			if ch != nil {
+				close(ch)
+			}
+			return
+		}
+		m.mu.Unlock()
+
+		if firstFlush && m.testHookBeforeHeldFlush != nil {
+			m.testHookBeforeHeldFlush()
+		}
+		firstFlush = false
+		for _, raw := range held {
+			_, _ = m.machine.Write(raw)
+		}
 	}
 }
 
@@ -252,6 +292,19 @@ func (m *mux) deliverInjectLocked(f protocol.Frame) {
 	select {
 	case m.injectCh <- f:
 	default:
+		if m.interactive {
+			// Interactive (jog) delivery is latest-wins status traffic;
+			// dropping under pressure is acceptable there.
+			return
+		}
+		// Managed injection: a dropped frame would let runManaged see a later
+		// LOAD_FINISH and report success over a truncated reply stream. Error
+		// the transport instead so the operation fails and is retried. We must
+		// not block here (m.mu is held; the controller pump and heartbeat
+		// answering path both need it), so backpressure is not an option.
+		m.injectOverflow = true
+		close(m.injectCh)
+		m.injectCh = nil
 	}
 }
 
@@ -284,8 +337,12 @@ type injectTransport struct {
 
 func (t *injectTransport) Write(p []byte) (int, error) {
 	t.m.mu.Lock()
+	overflow := t.m.injectOverflow
 	closed := !t.m.injecting || (t.m.interactive && t.m.injectCh == nil)
 	t.m.mu.Unlock()
+	if overflow {
+		return 0, errInjectOverflow
+	}
 	if closed {
 		return 0, errInjectionClosed
 	}
@@ -318,8 +375,12 @@ func (t *injectTransport) Read(p []byte) (int, error) {
 	}
 	t.m.mu.Lock()
 	ch := t.m.injectCh
+	overflow := t.m.injectOverflow
 	t.m.mu.Unlock()
 	if ch == nil {
+		if overflow {
+			return 0, errInjectOverflow
+		}
 		return 0, errInjectionClosed
 	}
 
@@ -342,6 +403,12 @@ func (t *injectTransport) Read(p []byte) (int, error) {
 	select {
 	case f, ok := <-ch:
 		if !ok {
+			t.m.mu.Lock()
+			overflow := t.m.injectOverflow
+			t.m.mu.Unlock()
+			if overflow {
+				return 0, errInjectOverflow
+			}
 			return 0, errInjectionClosed
 		}
 		raw := f.Raw // exact wire bytes, preserving the original CRC
@@ -359,6 +426,11 @@ func (t *injectTransport) SetReadDeadline(d time.Time) error { t.deadline = d; r
 func (t *injectTransport) Close() error                      { return nil }
 
 var errInjectionClosed = errors.New("relay: injection window closed")
+
+// errInjectOverflow errors a managed injection whose reply frames arrived
+// faster than the injector consumed them. The operation fails (and can be
+// retried) instead of acting on a silently truncated reply stream.
+var errInjectOverflow = errors.New("relay: injection reply overflow, frames arrived faster than the injector consumed them")
 
 // timeoutError is a net.Error timeout, so a read deadline on the injection
 // transport surfaces the same way a socket read timeout would.

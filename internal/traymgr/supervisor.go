@@ -141,6 +141,11 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		_ = killProcess(cmd)
+		// The kill forces the process to exit; wait for the reaper so the
+		// supervisor is never left half-reaped (s.cmd still set for a dead
+		// process). Restart relies on this: Start must observe "not running"
+		// after Stop returns, even on the deadline path.
+		<-done
 		return ctx.Err()
 	}
 }
@@ -181,9 +186,11 @@ func (s *Supervisor) Build(ctx context.Context) (string, error) {
 
 func (s *Supervisor) wait(cmd *exec.Cmd, done chan<- error) {
 	err := cmd.Wait()
-	done <- err
+	// Clear the supervisor state BEFORE signaling done: Stop returns when
+	// done fires, and Restart immediately calls Start, which must not observe
+	// the exited command as still running (that would make the restart a
+	// silent no-op).
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.cmd == cmd {
 		s.cmd = nil
 		s.done = nil
@@ -193,6 +200,8 @@ func (s *Supervisor) wait(cmd *exec.Cmd, done chan<- error) {
 	} else {
 		s.lastExit = "clean exit"
 	}
+	s.mu.Unlock()
+	done <- err
 }
 
 func killProcess(cmd *exec.Cmd) error {

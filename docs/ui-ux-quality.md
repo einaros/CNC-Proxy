@@ -86,6 +86,10 @@ References:
 - Status should be close to the control or readout it explains, visually quieter
   than actions, and not duplicated unless transformed into task-specific
   context.
+- Do not repeat a drawer, tab, popover, group, or section heading as the first
+  title or field label inside that same visible region. The outer heading
+  already labels the region; inner copy must name distinct subgroups or
+  concrete controls. Exact or near-exact repeated labels are production defects.
 
 ### Accessibility And Input
 
@@ -138,5 +142,7 @@ Before a UI change is considered done:
   controls.
 - Check that machine-action controls provide local pending and terminal
   feedback without causing layout shift.
+- Check that section, drawer, tab, and group labels are not repeated as local
+  titles or field labels inside the same visible region.
 - For canvas/3D work, verify the visual surface is nonblank, correctly framed,
   and still leaves controls readable at relevant viewport sizes.

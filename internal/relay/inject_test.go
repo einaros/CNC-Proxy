@@ -1,11 +1,14 @@
 package relay
 
 import (
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/client"
+	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/protocol"
 )
 
@@ -412,6 +415,196 @@ func TestInteractiveLeaseAbortsAndFlushesControllerTraffic(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("controller frame was not flushed after release; frames: %s", frameSummary(m.recvFrames()))
+}
+
+// TestReleaseFlushesHeldFramesBeforeResumingController verifies the F8
+// ordering invariant: when an injection releases, controller frames that were
+// held during the injection must reach the machine BEFORE any controller frame
+// forwarded after the release. If release clears `injecting` before flushing,
+// a freshly forwarded FILE_DATA can overtake the held FILE_START and corrupt
+// the controller's upload handshake. The mux test hook makes the race
+// deterministic: at the moment release begins flushing, the controller sends
+// its next frame and the hook waits until the pump has processed it.
+func TestReleaseFlushesHeldFramesBeforeResumingController(t *testing.T) {
+	m := newFrameMachine(t)
+	srv, addr := startRelay(t, m)
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	drainController(controller)
+	time.Sleep(100 * time.Millisecond)
+
+	_, release, err := srv.AcquireMachine()
+	if err != nil {
+		t.Fatalf("AcquireMachine: %v", err)
+	}
+
+	// FILE_START sent while the injection holds the mux: it must be held.
+	if _, err := controller.Write(protocol.UploadCommand("/sd/gcodes/job.nc")); err != nil {
+		t.Fatal(err)
+	}
+	mx := currentMux(t, srv)
+	waitForHeldFrame(t, mx, protocol.CmdFileStart)
+
+	// At the exact moment release starts flushing held frames, the controller
+	// sends the transfer's next frame. The hook waits until the pump has
+	// processed it — pre-fix it is forwarded straight to the machine (racing
+	// ahead of the held FILE_START); post-fix it is held and flushed in order.
+	dataPayload := append([]byte{0, 0, 0, 1}, []byte("chunk")...)
+	dataFrame := protocol.Encode(protocol.CmdFileData, dataPayload)
+	mx.testHookBeforeHeldFlush = func() {
+		if _, err := controller.Write(dataFrame); err != nil {
+			return
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if heldContains(mx, protocol.CmdFileData) || hasFrame(m.recvFrames(), protocol.CmdFileData) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	release()
+
+	waitForMachineFrame(t, m, protocol.CmdFileStart)
+	waitForMachineFrame(t, m, protocol.CmdFileData)
+	frames := m.recvFrames()
+	start, data := -1, -1
+	for i, f := range frames {
+		switch f.Cmd {
+		case protocol.CmdFileStart:
+			if start == -1 {
+				start = i
+			}
+		case protocol.CmdFileData:
+			if data == -1 {
+				data = i
+			}
+		}
+	}
+	if start == -1 || data == -1 {
+		t.Fatalf("machine missing transfer frames: %s", frameSummary(frames))
+	}
+	if start > data {
+		t.Fatalf("held FILE_START reached the machine AFTER the later FILE_DATA; frames: %s", frameSummary(frames))
+	}
+}
+
+// TestManagedInjectionDoesNotDropListingFrames verifies the F9 contract: a
+// managed injection (relay-mode reconcile `ls`) whose reply frames overflow
+// the inject channel while the consumer is briefly not draining must never
+// surface as a LOAD_FINISH "success" with a silently truncated listing — it
+// must either deliver the complete listing or fail the operation.
+func TestManagedInjectionDoesNotDropListingFrames(t *testing.T) {
+	const total = 400
+	m := newFrameMachine(t)
+	m.onFrame = func(c net.Conn, f protocol.Frame) {
+		if f.Cmd != protocol.CmdCtrlMulti {
+			return
+		}
+		// Burst far more LOAD_INFO frames than the inject channel buffers,
+		// then send LOAD_FINISH only after the consumer has had time to drain
+		// the buffered prefix — the exact pattern in which dropped middle
+		// frames still end in a "successful" LOAD_FINISH.
+		for i := 0; i < total; i++ {
+			row := fmt.Sprintf("file%04d.nc 10 20260101120000\r\n", i)
+			c.Write(protocol.Encode(protocol.CmdLoadInfo, []byte(row)))
+		}
+		time.Sleep(600 * time.Millisecond)
+		c.Write(protocol.Encode(protocol.CmdLoadFinish, []byte("ok\r\n")))
+	}
+	srv, addr := startRelay(t, m)
+
+	controller, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	drainController(controller)
+	time.Sleep(100 * time.Millisecond)
+
+	it, release, err := srv.AcquireMachine()
+	if err != nil {
+		t.Fatalf("AcquireMachine: %v", err)
+	}
+	defer release()
+
+	// Slow consumer: delay the first read so the whole burst lands while
+	// nobody is draining the inject channel (a briefly descheduled reconcile).
+	conn := client.NewTransport(&slowFirstReadTransport{Conn: it, delay: 300 * time.Millisecond})
+	entries, err := conn.List("/sd/gcodes", 5*time.Second)
+	if err != nil {
+		t.Logf("managed ls failed instead of silently truncating (acceptable): %v", err)
+		return
+	}
+	if len(entries) != total {
+		t.Fatalf("managed ls reported SUCCESS with a truncated listing: %d of %d entries", len(entries), total)
+	}
+}
+
+// slowFirstReadTransport delays the first Read to simulate a consumer that is
+// descheduled while the machine's reply burst arrives.
+type slowFirstReadTransport struct {
+	machinetransport.Conn
+	once  sync.Once
+	delay time.Duration
+}
+
+func (s *slowFirstReadTransport) Read(p []byte) (int, error) {
+	s.once.Do(func() { time.Sleep(s.delay) })
+	return s.Conn.Read(p)
+}
+
+// currentMux returns the active session's mux, waiting for the relay session
+// to establish.
+func currentMux(t *testing.T, srv *Server) *mux {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.mu.Lock()
+		mx := srv.curMux
+		srv.mu.Unlock()
+		if mx != nil {
+			return mx
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no active relay session")
+	return nil
+}
+
+// waitForHeldFrame waits until the injection window is holding a controller
+// frame with the given command.
+func waitForHeldFrame(t *testing.T, mx *mux, cmd byte) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if heldContains(mx, cmd) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("frame %s was not held by the injection window", protocol.CmdName(cmd))
+}
+
+func heldContains(mx *mux, cmd byte) bool {
+	mx.mu.Lock()
+	held := make([][]byte, len(mx.heldController))
+	copy(held, mx.heldController)
+	mx.mu.Unlock()
+	for _, raw := range held {
+		var sc protocol.Scanner
+		for _, f := range sc.Push(raw) {
+			if f.Cmd == cmd {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func waitForMachineFrame(t *testing.T, m *frameMachine, want byte) {

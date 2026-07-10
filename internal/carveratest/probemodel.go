@@ -17,6 +17,12 @@ import (
 
 const maxProbeModelTriangles = 500000
 
+const (
+	fakeProbeTipDiameterMM      = 2.0
+	fakeProbeShoulderDiameterMM = 3.175
+	fakeProbeShoulderOffsetMM   = fakeProbeTipDiameterMM
+)
+
 type fakeVec3 struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
@@ -34,22 +40,32 @@ type fakeBounds struct {
 	Max fakeVec3
 }
 
+type fakeModelPlacement struct {
+	Offset      fakeVec3
+	RotationDeg float64
+}
+
 type fakeProbeModel struct {
-	ID        string
-	Name      string
-	Format    string
-	Triangles []fakeTriangle
-	Bounds    fakeBounds
-	LoadedAt  time.Time
+	ID              string
+	Name            string
+	Format          string
+	SourceTriangles []fakeTriangle
+	SourceBounds    fakeBounds
+	Triangles       []fakeTriangle
+	Bounds          fakeBounds
+	Placement       fakeModelPlacement
+	LoadedAt        time.Time
 }
 
 type ProbeModelMesh struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Format    string     `json:"format"`
-	Triangles int        `json:"triangles"`
-	Bounds    fakeBounds `json:"bounds"`
-	Positions []float64  `json:"positions"`
+	ID           string                 `json:"id"`
+	Name         string                 `json:"name"`
+	Format       string                 `json:"format"`
+	Triangles    int                    `json:"triangles"`
+	Bounds       fakeBounds             `json:"bounds"`
+	SourceBounds fakeBounds             `json:"source_bounds"`
+	Placement    SnapshotModelPlacement `json:"placement"`
+	Positions    []float64              `json:"positions"`
 }
 
 type fakeProbeResult struct {
@@ -58,6 +74,13 @@ type fakeProbeResult struct {
 	Machine fakeVec3
 	Source  string
 	At      time.Time
+}
+
+type ModelPlacementUpdate struct {
+	XMinMM      *float64 `json:"x_min_mm,omitempty"`
+	YMinMM      *float64 `json:"y_min_mm,omitempty"`
+	TopZMM      *float64 `json:"top_z_mm,omitempty"`
+	RotationDeg *float64 `json:"rotation_deg,omitempty"`
 }
 
 func (m *FakeMachine) applyProbeMoveLocked(command string, values map[byte]float64, has map[byte]bool, hasG53 bool) {
@@ -164,24 +187,305 @@ func (m *FakeMachine) firstProbeContactLocked(start, end fakeVec3) (fakeVec3, bo
 	bestT := math.Inf(1)
 	best := end
 	source := ""
-	if m.probeModel != nil {
+	contactStart, contactEnd, contactOffsetZ, useToolTip := m.probeContactSegmentLocked(start, end)
+	if useToolTip {
+		if t, p, src, ok := m.firstProbeShapeContactLocked(contactStart, contactEnd); ok && t < bestT {
+			bestT = t
+			best = fakeVec3{X: p.X, Y: p.Y, Z: p.Z + contactOffsetZ}
+			source = src
+		}
+	} else if m.probeModel != nil {
 		for _, tri := range m.probeModel.Triangles {
-			if t, p, ok := segmentTriangleIntersection(start, end, tri); ok && t < bestT {
+			if t, p, ok := segmentTriangleIntersection(contactStart, contactEnd, tri); ok && t < bestT {
 				bestT = t
-				best = p
+				best = fakeVec3{X: p.X, Y: p.Y, Z: p.Z + contactOffsetZ}
 				source = m.probeModel.Name
 			}
 		}
 	}
-	if t, p, ok := m.bedPlaneContactLocked(start, end); ok && t < bestT {
+	if t, p, ok := m.bedPlaneContactLocked(contactStart, contactEnd); ok && t < bestT {
 		bestT = t
-		best = p
+		best = fakeVec3{X: p.X, Y: p.Y, Z: p.Z + contactOffsetZ}
 		source = "bed"
 	}
 	if math.IsInf(bestT, 1) {
 		return end, false, ""
 	}
 	return best, true, source
+}
+
+type fakeProbeSection struct {
+	RadiusMM    float64
+	TipOffsetMM float64
+	Description string
+}
+
+func (m *FakeMachine) firstProbeShapeContactLocked(startTip, endTip fakeVec3) (float64, fakeVec3, string, bool) {
+	section := fakeProbeSection{RadiusMM: fakeProbeTipDiameterMM / 2, TipOffsetMM: 0, Description: "probe tip"}
+	return m.firstProbeSectionContactLocked(startTip, endTip, section)
+}
+
+func (m *FakeMachine) firstProbeSectionContactLocked(startTip, endTip fakeVec3, section fakeProbeSection) (float64, fakeVec3, string, bool) {
+	if math.Hypot(endTip.X-startTip.X, endTip.Y-startTip.Y) <= 1e-7 {
+		return m.probeSectionContactAtXYLocked(startTip, endTip, startTip.X, startTip.Y, section)
+	}
+	const samples = 160
+	prevT := 0.0
+	prevOverlap := false
+	for i := 0; i <= samples; i++ {
+		t := float64(i) / samples
+		p := lerpVec(startTip, endTip, t)
+		surfaceZ, source, ok := m.maxProbeSurfaceZLocked(p.X, p.Y, section.RadiusMM)
+		if !ok {
+			prevOverlap = false
+			prevT = t
+			continue
+		}
+		overlap := p.Z <= surfaceZ-section.TipOffsetMM+1e-9
+		if overlap {
+			if !prevOverlap {
+				lo, hi := prevT, t
+				for n := 0; n < 32; n++ {
+					mid := (lo + hi) / 2
+					mp := lerpVec(startTip, endTip, mid)
+					mz, _, ok := m.maxProbeSurfaceZLocked(mp.X, mp.Y, section.RadiusMM)
+					if ok && mp.Z <= mz-section.TipOffsetMM+1e-9 {
+						hi = mid
+					} else {
+						lo = mid
+					}
+				}
+				p = lerpVec(startTip, endTip, hi)
+				if surfaceZ, source, ok = m.maxProbeSurfaceZLocked(p.X, p.Y, section.RadiusMM); ok {
+					p.Z = surfaceZ - section.TipOffsetMM
+				}
+				return hi, p, source, true
+			}
+			p.Z = surfaceZ - section.TipOffsetMM
+			return t, p, source, true
+		}
+		prevOverlap = false
+		prevT = t
+	}
+	return 0, fakeVec3{}, "", false
+}
+
+func (m *FakeMachine) probeSectionContactAtXYLocked(startTip, endTip fakeVec3, x, y float64, section fakeProbeSection) (float64, fakeVec3, string, bool) {
+	surfaceZ, source, ok := m.maxProbeSurfaceZLocked(x, y, section.RadiusMM)
+	if !ok {
+		return 0, fakeVec3{}, "", false
+	}
+	contactTipZ := surfaceZ - section.TipOffsetMM
+	if startTip.Z <= contactTipZ+1e-9 {
+		p := startTip
+		p.Z = contactTipZ
+		return 0, p, source, true
+	}
+	dz := endTip.Z - startTip.Z
+	if math.Abs(dz) < 1e-9 {
+		return 0, fakeVec3{}, "", false
+	}
+	t := (contactTipZ - startTip.Z) / dz
+	if t < -1e-9 || t > 1+1e-9 {
+		return 0, fakeVec3{}, "", false
+	}
+	p := lerpVec(startTip, endTip, clamp01(t))
+	p.Z = contactTipZ
+	return clamp01(t), p, source, true
+}
+
+func (m *FakeMachine) maxProbeSurfaceZLocked(x, y, radius float64) (float64, string, bool) {
+	best := math.Inf(-1)
+	source := ""
+	useStock := m.stock != nil && m.stock.RemovedVolumeMM3 > 1e-9
+	if useStock {
+		if z, ok := m.stock.maxSurfaceZInDisk(x, y, radius); ok && z > best {
+			best = z
+			source = m.stock.Name
+		}
+	} else if m.probeModel != nil {
+		if z, ok := m.probeModel.maxSurfaceZInDisk(x, y, radius); ok && z > best {
+			best = z
+			source = m.probeModel.Name
+		}
+	}
+	if !fakeFinite(best) && m.stock != nil {
+		if z, ok := m.stock.maxSurfaceZInDisk(x, y, radius); ok && z > best {
+			best = z
+			source = m.stock.Name
+		}
+	}
+	if z, ok := m.bedSurfaceZInDiskLocked(x, y, radius); ok && z > best {
+		best = z
+		source = "bed"
+	}
+	if !fakeFinite(best) {
+		return 0, "", false
+	}
+	return best, source, true
+}
+
+func (m *FakeMachine) bedSurfaceZInDiskLocked(x, y, radius float64) (float64, bool) {
+	xMax := configFloat(m.config, "soft_endstop.x_max", 0)
+	yMax := configFloat(m.config, "soft_endstop.y_max", 0)
+	xMin := xMax - configFloat(m.config, "coordinate.worksize_x", 300)
+	yMin := yMax - configFloat(m.config, "coordinate.worksize_y", 200)
+	if x+radius < xMin-1e-6 || x-radius > xMax+1e-6 || y+radius < yMin-1e-6 || y-radius > yMax+1e-6 {
+		return 0, false
+	}
+	return configFloat(m.config, "soft_endstop.z_min", -121), true
+}
+
+func (m *FakeMachine) probeContactSegmentLocked(start, end fakeVec3) (fakeVec3, fakeVec3, float64, bool) {
+	if m.insertedTool == nil || !m.insertedTool.Probe || !m.insertedTool.Calibrated {
+		return start, end, 0, false
+	}
+	offset := m.insertedTool.StickoutMM
+	tipStart := start
+	tipStart.Z -= offset
+	tipEnd := end
+	tipEnd.Z -= offset
+	return tipStart, tipEnd, offset, true
+}
+
+func (pm *fakeProbeModel) maxSurfaceZInDisk(x, y, radius float64) (float64, bool) {
+	if pm == nil || radius < 0 || !fakeFinite(radius) {
+		return 0, false
+	}
+	best := math.Inf(-1)
+	for _, tri := range pm.Triangles {
+		if !triangleXYMayOverlapDisk(tri, x, y, radius) {
+			continue
+		}
+		if z, ok := triangleMaxZInDisk(tri, x, y, radius); ok && z > best {
+			best = z
+		}
+	}
+	if !fakeFinite(best) {
+		return 0, false
+	}
+	return best, true
+}
+
+func triangleXYMayOverlapDisk(tri fakeTriangle, x, y, radius float64) bool {
+	minX := math.Min(tri.A.X, math.Min(tri.B.X, tri.C.X)) - radius
+	maxX := math.Max(tri.A.X, math.Max(tri.B.X, tri.C.X)) + radius
+	minY := math.Min(tri.A.Y, math.Min(tri.B.Y, tri.C.Y)) - radius
+	maxY := math.Max(tri.A.Y, math.Max(tri.B.Y, tri.C.Y)) + radius
+	return x >= minX && x <= maxX && y >= minY && y <= maxY
+}
+
+func triangleMaxZInDisk(tri fakeTriangle, cx, cy, radius float64) (float64, bool) {
+	best := math.Inf(-1)
+	addCandidate := func(p fakeVec3) {
+		if math.Hypot(p.X-cx, p.Y-cy) <= radius+1e-8 && pointInTriangleXY(tri, p.X, p.Y) {
+			if p.Z > best {
+				best = p.Z
+			}
+		}
+	}
+	for _, p := range []fakeVec3{tri.A, tri.B, tri.C} {
+		addCandidate(p)
+	}
+	if z, ok := triangleZAtXY(tri, cx, cy); ok {
+		addCandidate(fakeVec3{X: cx, Y: cy, Z: z})
+	}
+	for _, edge := range [][2]fakeVec3{{tri.A, tri.B}, {tri.B, tri.C}, {tri.C, tri.A}} {
+		for _, p := range edgeDiskCandidates(edge[0], edge[1], cx, cy, radius) {
+			addCandidate(p)
+		}
+	}
+	if p, ok := triangleDiskGradientCandidate(tri, cx, cy, radius); ok {
+		addCandidate(p)
+	}
+	if !fakeFinite(best) {
+		return 0, false
+	}
+	return best, true
+}
+
+func edgeDiskCandidates(a, b fakeVec3, cx, cy, radius float64) []fakeVec3 {
+	out := make([]fakeVec3, 0, 4)
+	addAt := func(t float64) {
+		if t < -1e-8 || t > 1+1e-8 {
+			return
+		}
+		out = append(out, lerpVec(a, b, clamp01(t)))
+	}
+	addAt(0)
+	addAt(1)
+	dx := b.X - a.X
+	dy := b.Y - a.Y
+	den := dx*dx + dy*dy
+	if den <= 1e-12 {
+		return out
+	}
+	addAt(((cx-a.X)*dx + (cy-a.Y)*dy) / den)
+	fx := a.X - cx
+	fy := a.Y - cy
+	A := den
+	B := 2 * (fx*dx + fy*dy)
+	C := fx*fx + fy*fy - radius*radius
+	disc := B*B - 4*A*C
+	if disc >= -1e-9 {
+		if disc < 0 {
+			disc = 0
+		}
+		root := math.Sqrt(disc)
+		addAt((-B - root) / (2 * A))
+		addAt((-B + root) / (2 * A))
+	}
+	return out
+}
+
+func triangleDiskGradientCandidate(tri fakeTriangle, cx, cy, radius float64) (fakeVec3, bool) {
+	n := crossVec(subVec(tri.B, tri.A), subVec(tri.C, tri.A))
+	if math.Abs(n.Z) < 1e-12 {
+		return fakeVec3{}, false
+	}
+	gx := -n.X / n.Z
+	gy := -n.Y / n.Z
+	g := math.Hypot(gx, gy)
+	if g <= 1e-12 {
+		return fakeVec3{}, false
+	}
+	x := cx + radius*gx/g
+	y := cy + radius*gy/g
+	z, ok := triangleZAtXY(tri, x, y)
+	if !ok {
+		return fakeVec3{}, false
+	}
+	return fakeVec3{X: x, Y: y, Z: z}, true
+}
+
+func pointInTriangleXY(tri fakeTriangle, x, y float64) bool {
+	x1, y1 := tri.A.X, tri.A.Y
+	x2, y2 := tri.B.X, tri.B.Y
+	x3, y3 := tri.C.X, tri.C.Y
+	den := (y2-y3)*(x1-x3) + (x3-x2)*(y1-y3)
+	if math.Abs(den) < 1e-12 {
+		return pointOnSegmentXY(tri.A, tri.B, x, y) || pointOnSegmentXY(tri.B, tri.C, x, y) || pointOnSegmentXY(tri.C, tri.A, x, y)
+	}
+	a := ((y2-y3)*(x-x3) + (x3-x2)*(y-y3)) / den
+	b := ((y3-y1)*(x-x3) + (x1-x3)*(y-y3)) / den
+	c := 1 - a - b
+	return a >= -1e-8 && b >= -1e-8 && c >= -1e-8
+}
+
+func pointOnSegmentXY(a, b fakeVec3, x, y float64) bool {
+	dx := b.X - a.X
+	dy := b.Y - a.Y
+	length2 := dx*dx + dy*dy
+	if length2 <= 1e-12 {
+		return math.Hypot(x-a.X, y-a.Y) <= 1e-8
+	}
+	t := ((x-a.X)*dx + (y-a.Y)*dy) / length2
+	if t < -1e-8 || t > 1+1e-8 {
+		return false
+	}
+	px := a.X + clamp01(t)*dx
+	py := a.Y + clamp01(t)*dy
+	return math.Hypot(x-px, y-py) <= 1e-7
 }
 
 func segmentZPlaneContact(start, end fakeVec3, z float64) (float64, fakeVec3, bool) {
@@ -291,8 +595,13 @@ func (m *FakeMachine) LoadProbeModel(name string, data []byte) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	model.applyPlacement(m.defaultModelPlacementLocked(model))
 	m.probeModel = model
 	m.lastProbe = nil
+	if err := m.resetStockFromModelLocked(model); err != nil {
+		m.probeModel = nil
+		return err
+	}
 	return nil
 }
 
@@ -301,6 +610,80 @@ func (m *FakeMachine) ClearProbeModel() {
 	defer m.mu.Unlock()
 	m.probeModel = nil
 	m.lastProbe = nil
+	m.stock = nil
+	m.stockSegments = nil
+}
+
+func (m *FakeMachine) SetModelPlacement(update ModelPlacementUpdate) (*SnapshotProbeModel, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.probeModel == nil {
+		return nil, errors.New("no stock model loaded")
+	}
+	if !m.fileOpsIdleLocked(time.Now()) {
+		return nil, errors.New("machine is not idle")
+	}
+	placement := m.probeModel.Placement
+	offset := placement.Offset
+	rotationDeg := placement.RotationDeg
+	oldCenter := boundsCenterXY(m.probeModel.Bounds)
+	src := m.probeModel.SourceBounds
+	if update.RotationDeg != nil {
+		if !fakeFinite(*update.RotationDeg) {
+			return nil, errors.New("rotation_deg must be finite")
+		}
+		rotationDeg = normalizePlacementRotationDeg(*update.RotationDeg)
+	}
+	if update.RotationDeg != nil && update.XMinMM == nil && update.YMinMM == nil {
+		b := transformedSourceBounds(src, offset, rotationDeg)
+		nextCenter := boundsCenterXY(b)
+		offset.X += oldCenter.X - nextCenter.X
+		offset.Y += oldCenter.Y - nextCenter.Y
+	}
+	if update.XMinMM != nil {
+		if !fakeFinite(*update.XMinMM) {
+			return nil, errors.New("x_min_mm must be finite")
+		}
+		b := transformedSourceBounds(src, offset, rotationDeg)
+		offset.X += *update.XMinMM - b.Min.X
+	}
+	if update.YMinMM != nil {
+		if !fakeFinite(*update.YMinMM) {
+			return nil, errors.New("y_min_mm must be finite")
+		}
+		b := transformedSourceBounds(src, offset, rotationDeg)
+		offset.Y += *update.YMinMM - b.Min.Y
+	}
+	if update.TopZMM != nil {
+		if !fakeFinite(*update.TopZMM) {
+			return nil, errors.New("top_z_mm must be finite")
+		}
+		offset.Z = *update.TopZMM - src.Max.Z
+	}
+	m.probeModel.applyPlacement(fakeModelPlacement{Offset: offset, RotationDeg: rotationDeg})
+	m.lastProbe = nil
+	if err := m.resetStockFromModelLocked(m.probeModel); err != nil {
+		return nil, err
+	}
+	return snapshotProbeModelLocked(m.probeModel), nil
+}
+
+func (m *FakeMachine) defaultModelPlacementLocked(model *fakeProbeModel) fakeModelPlacement {
+	if model == nil {
+		return fakeModelPlacement{}
+	}
+	xMax := configFloat(m.config, "soft_endstop.x_max", 0)
+	yMax := configFloat(m.config, "soft_endstop.y_max", 0)
+	xMin := xMax - configFloat(m.config, "coordinate.worksize_x", 300)
+	yMin := yMax - configFloat(m.config, "coordinate.worksize_y", 200)
+	bedZ := configFloat(m.config, "soft_endstop.z_min", -121)
+	return fakeModelPlacement{
+		Offset: fakeVec3{
+			X: xMin - model.SourceBounds.Min.X,
+			Y: yMin - model.SourceBounds.Min.Y,
+			Z: bedZ - model.SourceBounds.Min.Z,
+		},
+	}
 }
 
 func (m *FakeMachine) ProbeModelMesh() (ProbeModelMesh, bool) {
@@ -322,12 +705,14 @@ func (pm *fakeProbeModel) mesh() ProbeModelMesh {
 		)
 	}
 	return ProbeModelMesh{
-		ID:        pm.ID,
-		Name:      pm.Name,
-		Format:    pm.Format,
-		Triangles: len(pm.Triangles),
-		Bounds:    pm.Bounds,
-		Positions: positions,
+		ID:           pm.ID,
+		Name:         pm.Name,
+		Format:       pm.Format,
+		Triangles:    len(pm.Triangles),
+		Bounds:       pm.Bounds,
+		SourceBounds: pm.SourceBounds,
+		Placement:    snapshotModelPlacement(pm),
+		Positions:    positions,
 	}
 }
 
@@ -364,13 +749,103 @@ func newProbeModel(name, format string, triangles []fakeTriangle) (*fakeProbeMod
 	bounds := trianglesBounds(triangles)
 	now := time.Now()
 	return &fakeProbeModel{
-		ID:        strconv.FormatInt(now.UnixNano(), 36),
-		Name:      name,
-		Format:    format,
-		Triangles: triangles,
-		Bounds:    bounds,
-		LoadedAt:  now,
+		ID:              strconv.FormatInt(now.UnixNano(), 36),
+		Name:            name,
+		Format:          format,
+		SourceTriangles: append([]fakeTriangle(nil), triangles...),
+		SourceBounds:    bounds,
+		Triangles:       append([]fakeTriangle(nil), triangles...),
+		Bounds:          bounds,
+		LoadedAt:        now,
 	}, nil
+}
+
+func (pm *fakeProbeModel) applyPlacement(placement fakeModelPlacement) {
+	if pm == nil {
+		return
+	}
+	placement.RotationDeg = normalizePlacementRotationDeg(placement.RotationDeg)
+	pm.Placement = placement
+	pm.Triangles = transformTriangles(pm.SourceTriangles, pm.SourceBounds, placement)
+	pm.Bounds = transformedSourceBounds(pm.SourceBounds, placement.Offset, placement.RotationDeg)
+	pm.ID = strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+func transformTriangles(src []fakeTriangle, bounds fakeBounds, placement fakeModelPlacement) []fakeTriangle {
+	out := make([]fakeTriangle, len(src))
+	for i, tri := range src {
+		out[i] = fakeTriangle{
+			A: transformSourcePoint(tri.A, bounds, placement.Offset, placement.RotationDeg),
+			B: transformSourcePoint(tri.B, bounds, placement.Offset, placement.RotationDeg),
+			C: transformSourcePoint(tri.C, bounds, placement.Offset, placement.RotationDeg),
+		}
+	}
+	return out
+}
+
+func transformedSourceBounds(bounds fakeBounds, offset fakeVec3, rotationDeg float64) fakeBounds {
+	corners := []fakeVec3{
+		{X: bounds.Min.X, Y: bounds.Min.Y, Z: bounds.Min.Z},
+		{X: bounds.Max.X, Y: bounds.Min.Y, Z: bounds.Min.Z},
+		{X: bounds.Max.X, Y: bounds.Max.Y, Z: bounds.Min.Z},
+		{X: bounds.Min.X, Y: bounds.Max.Y, Z: bounds.Min.Z},
+		{X: bounds.Min.X, Y: bounds.Min.Y, Z: bounds.Max.Z},
+		{X: bounds.Max.X, Y: bounds.Min.Y, Z: bounds.Max.Z},
+		{X: bounds.Max.X, Y: bounds.Max.Y, Z: bounds.Max.Z},
+		{X: bounds.Min.X, Y: bounds.Max.Y, Z: bounds.Max.Z},
+	}
+	out := fakeBounds{
+		Min: fakeVec3{X: math.Inf(1), Y: math.Inf(1), Z: math.Inf(1)},
+		Max: fakeVec3{X: math.Inf(-1), Y: math.Inf(-1), Z: math.Inf(-1)},
+	}
+	placement := fakeModelPlacement{Offset: offset, RotationDeg: rotationDeg}
+	for _, corner := range corners {
+		p := transformSourcePoint(corner, bounds, placement.Offset, placement.RotationDeg)
+		out.Min.X = math.Min(out.Min.X, p.X)
+		out.Min.Y = math.Min(out.Min.Y, p.Y)
+		out.Min.Z = math.Min(out.Min.Z, p.Z)
+		out.Max.X = math.Max(out.Max.X, p.X)
+		out.Max.Y = math.Max(out.Max.Y, p.Y)
+		out.Max.Z = math.Max(out.Max.Z, p.Z)
+	}
+	return out
+}
+
+func transformSourcePoint(p fakeVec3, bounds fakeBounds, offset fakeVec3, rotationDeg float64) fakeVec3 {
+	center := boundsCenterXY(bounds)
+	theta := normalizePlacementRotationDeg(rotationDeg) * math.Pi / 180
+	c, s := math.Cos(theta), math.Sin(theta)
+	dx := p.X - center.X
+	dy := p.Y - center.Y
+	return fakeVec3{
+		X: center.X + dx*c - dy*s + offset.X,
+		Y: center.Y + dx*s + dy*c + offset.Y,
+		Z: p.Z + offset.Z,
+	}
+}
+
+func boundsCenterXY(bounds fakeBounds) fakeVec3 {
+	return fakeVec3{
+		X: (bounds.Min.X + bounds.Max.X) / 2,
+		Y: (bounds.Min.Y + bounds.Max.Y) / 2,
+	}
+}
+
+func normalizePlacementRotationDeg(v float64) float64 {
+	if !fakeFinite(v) {
+		return 0
+	}
+	v = math.Mod(v, 360)
+	if v >= 180 {
+		v -= 360
+	}
+	if v < -180 {
+		v += 360
+	}
+	if math.Abs(v) < 0.0000001 {
+		return 0
+	}
+	return v
 }
 
 func parseProbeSTL(name string, data []byte) (*fakeProbeModel, error) {

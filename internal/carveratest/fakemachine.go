@@ -30,6 +30,7 @@ type FakeMachine struct {
 	ftype              string            // advertised upload type ("lz" enables compression)
 	compressDownloads  bool              // if set, downloads send a .lz container
 	downloadPacketSize int               // packet size reported/sent for downloads
+	downloadPacketDelay time.Duration    // optional test hook: pace download FILE_DATA packets
 	config             map[string]string // firmware config-get-all key/value surface
 	modelName          string            // SimpleShell model name ("C1", "CA1")
 	machineModel       int               // Kernel FACTORY_SET MachineModel
@@ -52,11 +53,26 @@ type FakeMachine struct {
 	holdStarted        time.Time
 	holdResumeState    string
 	absolute           bool    // simulated modal distance mode for ordinary G0/G1 moves
+	arcAbsolute        bool    // simulated modal arc-center mode, G90.1/G91.1
+	plane              int     // simulated modal arc plane, G17/G18/G19
 	unit               float64 // simulated modal unit scale, mm per gcode unit
 	motionMode         int     // simulated modal motion mode for ordinary axis words
+	motionCode         int     // simulated modal G motion code, including G2/G3 arcs
 	feedMMMin          float64 // simulated modal G1 feed, in mm/min
+	cycleStarted       bool
+	cycleRetractInit   bool
+	cycleInitialZ      float64
+	cycleSticky        fakeCycleSticky
 	motion             []fakeMotionSegment
 	program            *fakeProgramRun
+	simEnabled         bool
+	simShowVectors     bool
+	simSpeedScale      float64
+	simResolutionMM    float64
+	simToolShape       string
+	simToolAngleDeg    float64
+	stock              *fakeStock
+	stockSegments      []fakeStockSegment
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when
@@ -85,8 +101,18 @@ func NewOn(addr string) (*FakeMachine, error) {
 		refToolMZ:          math.NaN(),
 		curToolMZ:          math.NaN(),
 		absolute:           true,
+		plane:              fakePlaneXY,
 		unit:               1,
 		motionMode:         fakeMotionRapid,
+		motionCode:         0,
+		feedMMMin:          1000,
+		cycleRetractInit:   true,
+		simEnabled:         true,
+		simShowVectors:     true,
+		simSpeedScale:      1,
+		simResolutionMM:    defaultStockResolutionMM,
+		simToolShape:       fakeToolShapeFlat,
+		simToolAngleDeg:    defaultFakeVBitAngleDeg,
 	}
 	go m.serve()
 	return m, nil
@@ -105,6 +131,11 @@ func (m *FakeMachine) SetStatus(s string) {
 	m.status = s
 	m.motion = nil
 	m.program = nil
+	m.stockSegments = nil
+	m.cycleStarted = false
+	m.cycleSticky = fakeCycleSticky{}
+	m.motionMode = fakeMotionRapid
+	m.motionCode = 0
 	m.holdActive = false
 	m.holdStarted = time.Time{}
 	m.holdResumeState = ""
@@ -151,6 +182,15 @@ func (m *FakeMachine) SetDownloadPacketSize(n int) {
 	if n > 0 {
 		m.downloadPacketSize = n
 	}
+}
+
+// SetDownloadPacketDelay delays each download FILE_DATA packet by d, analogous
+// to SetStatusReplyDelay. It is a test hook for exercising slow downloads —
+// e.g. a concurrent local write landing while a fetch is still in flight.
+func (m *FakeMachine) SetDownloadPacketDelay(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.downloadPacketDelay = d
 }
 
 // FailCommand makes management commands with the given prefix return LOAD_ERROR.
@@ -448,6 +488,12 @@ func (m *FakeMachine) handle(c net.Conn) {
 					} else if mode == modeDownload && len(f.Data) >= 4 {
 						// Controller is requesting packet `seq`; send it.
 						seq := uint32(f.Data[0])<<24 | uint32(f.Data[1])<<16 | uint32(f.Data[2])<<8 | uint32(f.Data[3])
+						m.mu.Lock()
+						delay := m.downloadPacketDelay
+						m.mu.Unlock()
+						if delay > 0 {
+							time.Sleep(delay)
+						}
 						m.sendDownloadPacket(c, sendData, pktSize, seq)
 					}
 				case protocol.CmdFileEnd:
@@ -574,6 +620,12 @@ func (m *FakeMachine) applyControlLocked(ctrl byte, now time.Time) string {
 				m.motion[i].end = m.motion[i].end.Add(heldFor)
 			}
 		}
+		for i := range m.stockSegments {
+			if m.stockSegments[i].end.After(m.holdStarted) {
+				m.stockSegments[i].start = m.stockSegments[i].start.Add(heldFor)
+				m.stockSegments[i].end = m.stockSegments[i].end.Add(heldFor)
+			}
+		}
 		if m.program != nil && m.program.end.After(m.holdStarted) {
 			m.program.start = m.program.start.Add(heldFor)
 			m.program.end = m.program.end.Add(heldFor)
@@ -592,7 +644,12 @@ func (m *FakeMachine) applyControlLocked(ctrl byte, now time.Time) string {
 	case protocol.CtrlHalt:
 		m.advanceMotionLocked(now)
 		m.motion = nil
+		m.stockSegments = nil
 		m.program = nil
+		m.cycleStarted = false
+		m.cycleSticky = fakeCycleSticky{}
+		m.motionMode = fakeMotionRapid
+		m.motionCode = 0
 		m.holdActive = false
 		m.holdStarted = time.Time{}
 		m.holdResumeState = ""
@@ -605,7 +662,12 @@ func (m *FakeMachine) applyControlLocked(ctrl byte, now time.Time) string {
 
 func (m *FakeMachine) clearAlarmLocked() {
 	m.motion = nil
+	m.stockSegments = nil
 	m.program = nil
+	m.cycleStarted = false
+	m.cycleSticky = fakeCycleSticky{}
+	m.motionMode = fakeMotionRapid
+	m.motionCode = 0
 	m.holdActive = false
 	m.holdStarted = time.Time{}
 	m.holdResumeState = ""
@@ -616,7 +678,12 @@ func (m *FakeMachine) clearAlarmLocked() {
 func (m *FakeMachine) homeLocked(now time.Time) {
 	m.advanceMotionLocked(now)
 	m.motion = nil
+	m.stockSegments = nil
 	m.program = nil
+	m.cycleStarted = false
+	m.cycleSticky = fakeCycleSticky{}
+	m.motionMode = fakeMotionRapid
+	m.motionCode = 0
 	bracketed, _, fields, ok := parseFakeStatus(m.status)
 	if !ok {
 		m.status = "<Idle|MPos:0.0000,0.0000,0.0000|WPos:0.0000,0.0000,0.0000|C:2,4,0,1|T:0,0.000>"
@@ -635,12 +702,12 @@ func (m *FakeMachine) startProgramLocked(path string, content []byte, now time.T
 	for _, line := range lines {
 		m.applySimulatedGcodeLocked(line)
 	}
-	end := now.Add(time.Duration(len(lines)) * 50 * time.Millisecond)
+	end := now.Add(m.scaleDurationLocked(time.Duration(len(lines)) * 50 * time.Millisecond))
 	if last := m.lastMotionSegmentLocked(); last != nil && last.end.After(end) {
 		end = last.end
 	}
 	if !end.After(now) {
-		end = now.Add(50 * time.Millisecond)
+		end = now.Add(m.scaleDurationLocked(50 * time.Millisecond))
 	}
 	if len(lines) == 0 && len(m.motion) == startMotionCount {
 		// Empty programs still briefly look like an active run to status
@@ -752,7 +819,18 @@ func (m *FakeMachine) defaultGcodeReplyLocked(line string, now time.Time) (strin
 
 func (m *FakeMachine) modalStateLocked() string {
 	motion := "G0"
-	if m.motionMode == fakeMotionFeed {
+	switch m.motionCode {
+	case 2:
+		motion = "G2"
+	case 3:
+		motion = "G3"
+	case 81:
+		motion = "G81"
+	case 82:
+		motion = "G82"
+	case 83:
+		motion = "G83"
+	case 1:
 		motion = "G1"
 	}
 	unit := "G21"
@@ -1062,6 +1140,14 @@ type fakeProgramRun struct {
 	lines int
 }
 
+type fakeCycleSticky struct {
+	z float64
+	r float64
+	f float64
+	q float64
+	p float64
+}
+
 const (
 	fakeFirmwareMaxXYMMMin = 3000.0
 	fakeFirmwareMaxZMMMin  = 2000.0
@@ -1098,9 +1184,10 @@ func defaultFakeMachineConfig() map[string]string {
 		"laser_module_offset_x":        "0",
 		"laser_module_offset_y":        "0",
 		"laser_module_offset_z":        "-7.0",
-		"atc.probe.fast_rate_mm_m":     "500",
-		"atc.probe.slow_rate_mm_m":     "100",
+		"atc.probe.fast_rate_mm_m":     "300",
+		"atc.probe.slow_rate_mm_m":     "60",
 		"atc.probe.retract_mm":         "2",
+		"atc.probe.probe_height_mm":    "0",
 	}
 }
 
@@ -1156,6 +1243,12 @@ const (
 	fakeMotionFeed
 )
 
+const (
+	fakePlaneXY = iota
+	fakePlaneXZ
+	fakePlaneYZ
+)
+
 var fakeAxisLetters = []byte{'X', 'Y', 'Z', 'A', 'B', 'C'}
 
 var fakeAxisIndex = map[byte]int{
@@ -1195,11 +1288,17 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 		return
 	}
 	hasG10 := false
+	hasG92 := false
 	hasG53 := false
 	hasDwell := false
 	hasProbe := false
+	arcClockwise := false
+	hasArc := false
+	cycleCode := 0
+	cancelCycle := false
 	lineMotionMode := -1
 	var lineAbsolute *bool
+	var lineArcAbsolute *bool
 	unit := m.unit
 	if unit == 0 {
 		unit = 1
@@ -1218,10 +1317,28 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 			if subcode == 0 {
 				lineMotionMode = fakeMotionFeed
 			}
+		case 2:
+			if subcode == 0 {
+				lineMotionMode = fakeMotionFeed
+				arcClockwise = true
+				hasArc = true
+			}
+		case 3:
+			if subcode == 0 {
+				lineMotionMode = fakeMotionFeed
+				arcClockwise = false
+				hasArc = true
+			}
 		case 4:
 			hasDwell = true
 		case 10:
 			hasG10 = true
+		case 17:
+			m.plane = fakePlaneXY
+		case 18:
+			m.plane = fakePlaneXZ
+		case 19:
+			m.plane = fakePlaneYZ
 		case 20:
 			unit = 25.4
 		case 21:
@@ -1231,16 +1348,44 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 			lineMotionMode = fakeMotionFeed
 		case 53:
 			hasG53 = true
+		case 80:
+			cancelCycle = true
+			lineMotionMode = -1
+		case 81, 82, 83:
+			cycleCode = code
+			lineMotionMode = fakeMotionFeed
 		case 90:
-			if subcode == 0 {
+			if subcode == 1 {
+				v := true
+				lineArcAbsolute = &v
+			} else if subcode == 0 {
 				v := true
 				lineAbsolute = &v
 			}
 		case 91:
-			if subcode == 0 {
+			if subcode == 1 {
+				v := false
+				lineArcAbsolute = &v
+			} else if subcode == 0 {
 				v := false
 				lineAbsolute = &v
 			}
+		case 92:
+			if subcode == 0 {
+				hasG92 = true
+			}
+		case 98:
+			m.cycleRetractInit = true
+			if !m.cycleStarted {
+				m.cycleInitialZ = m.currentMPosZLocked()
+			}
+			m.cycleStarted = true
+		case 99:
+			m.cycleRetractInit = false
+			if !m.cycleStarted {
+				m.cycleInitialZ = m.currentMPosZLocked()
+			}
+			m.cycleStarted = true
 		}
 	}
 
@@ -1249,15 +1394,36 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 	if lineAbsolute != nil {
 		m.absolute = *lineAbsolute
 	}
+	if lineArcAbsolute != nil {
+		m.arcAbsolute = *lineArcAbsolute
+	}
 	if lineMotionMode >= 0 {
 		m.motionMode = lineMotionMode
+	}
+	if hasArc {
+		if arcClockwise {
+			m.motionCode = 2
+		} else {
+			m.motionCode = 3
+		}
+	} else if cycleCode != 0 {
+		m.motionCode = cycleCode
+		m.motionMode = fakeMotionFeed
+	} else if lineMotionMode == fakeMotionRapid {
+		m.motionCode = 0
+	} else if lineMotionMode == fakeMotionFeed {
+		m.motionCode = 1
 	}
 	if has['F'] && values['F'] > 0 {
 		m.feedMMMin = values['F']
 	}
 
 	if hasDwell {
-		m.appendDwellLocked(fakeDwellDuration(words))
+		m.appendDwellLocked(m.scaleDurationLocked(fakeDwellDuration(words)))
+		return
+	}
+	if cancelCycle {
+		m.cancelCycleLocked()
 		return
 	}
 	if hasG10 && fakeNear(values['L'], 20) && fakeNear(values['P'], 0) {
@@ -1268,20 +1434,41 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 		m.applyWorkPositionLocked(fakeAxisValues(values, has))
 		return
 	}
+	if hasG92 {
+		m.advanceMotionLocked(time.Now())
+		m.applyWorkPositionLocked(fakeAxisValues(values, has))
+		return
+	}
 	if hasProbe {
 		m.applyProbeMoveLocked(line, values, has, hasG53)
 		return
 	}
 	axes := fakeAxisValues(values, has)
-	if len(axes) == 0 {
+	hasArcCenter := has['I'] || has['J'] || has['K'] || has['R']
+	if !hasArc && (m.motionCode == 2 || m.motionCode == 3) && (len(axes) > 0 || hasArcCenter) {
+		hasArc = true
+		arcClockwise = m.motionCode == 2
+	}
+	if cycleCode == 0 && (m.motionCode == 81 || m.motionCode == 82 || m.motionCode == 83) && len(axes) > 0 {
+		cycleCode = m.motionCode
+	}
+	if cycleCode != 0 {
+		m.applyCycleLocked(cycleCode, values, has)
+		return
+	}
+	if len(axes) == 0 && !(hasArc && hasArcCenter) {
 		return
 	}
 	feedMMMin := 0.0
 	if m.motionMode == fakeMotionFeed || hasProbe {
 		feedMMMin = m.feedMMMin
 	}
+	if hasArc {
+		m.applyArcMoveLocked(axes, values, has, hasG53, arcClockwise, feedMMMin)
+		return
+	}
 	if hasG53 || m.absolute {
-		m.applyAbsoluteMoveLocked(axes, feedMMMin)
+		m.applyAbsoluteMoveLocked(axes, feedMMMin, hasG53)
 		return
 	}
 	m.applyRelativeMoveLocked(axes, feedMMMin)
@@ -1316,6 +1503,9 @@ func (m *FakeMachine) applyToolGcodeLocked(line string) bool {
 		return true
 	case mcode == 491:
 		m.calibrateActiveToolLocked("M491")
+		return true
+	case mcode == 495 && subcode == 0:
+		m.applyAutoZProbeLocked(words)
 		return true
 	case mcode == 493 && (subcode == 0 || subcode == 1):
 		m.setToolOffsetFromProbeLocked()
@@ -1393,10 +1583,10 @@ func (m *FakeMachine) applyRelativeMoveLocked(delta map[byte]float64, feedMMMin 
 			wpos[idx] += d
 		}
 	}
-	m.appendMotionLocked(bracketed, state, fields, start, fromM, mpos, fromW, wpos, fakeMoveDuration(delta, feedMMMin))
+	m.appendMotionLocked(bracketed, state, fields, start, fromM, mpos, fromW, wpos, m.fakeMoveDurationLocked(delta, feedMMMin), feedMMMin)
 }
 
-func (m *FakeMachine) applyAbsoluteMoveLocked(targets map[byte]float64, feedMMMin float64) {
+func (m *FakeMachine) applyAbsoluteMoveLocked(targets map[byte]float64, feedMMMin float64, machineCoords bool) {
 	if len(targets) == 0 {
 		return
 	}
@@ -1442,19 +1632,392 @@ func (m *FakeMachine) applyAbsoluteMoveLocked(targets map[byte]float64, feedMMMi
 			continue
 		}
 		mpos = ensureFakeAxisLen(mpos, idx+1)
-		d := target - mpos[idx]
-		mpos[idx] = target
+		d := 0.0
+		if machineCoords || !haveWPos {
+			d = target - mpos[idx]
+			mpos[idx] = target
+		} else {
+			wpos = ensureFakeAxisLen(wpos, idx+1)
+			d = target - wpos[idx]
+			wpos[idx] = target
+			mpos[idx] += d
+		}
 		delta[axis] = d
-		if haveWPos {
+		if haveWPos && machineCoords {
 			wpos = ensureFakeAxisLen(wpos, idx+1)
 			wpos[idx] += d
 		}
 	}
-	m.appendMotionLocked(bracketed, state, fields, start, fromM, mpos, fromW, wpos, fakeMoveDuration(delta, feedMMMin))
+	m.appendMotionLocked(bracketed, state, fields, start, fromM, mpos, fromW, wpos, m.fakeMoveDurationLocked(delta, feedMMMin), feedMMMin)
+}
+
+func (m *FakeMachine) applyArcMoveLocked(targets map[byte]float64, values map[byte]float64, has map[byte]bool, hasG53 bool, clockwise bool, feedMMMin float64) {
+	now := time.Now()
+	m.advanceMotionLocked(now)
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	mi := findFakeStatusField(fields, "MPos")
+	if mi < 0 {
+		return
+	}
+	mpos, ok := parseFakeAxisList(fields[mi].value)
+	if !ok {
+		return
+	}
+	wi := findFakeStatusField(fields, "WPos")
+	wpos, haveWPos := []float64(nil), false
+	if wi >= 0 {
+		if vals, ok := parseFakeAxisList(fields[wi].value); ok {
+			wpos, haveWPos = vals, true
+		}
+	}
+	start := now
+	if last := m.lastMotionSegmentLocked(); last != nil && last.end.After(now) {
+		start = last.end
+		mpos = append([]float64(nil), last.toM...)
+		if haveWPos {
+			wpos = append([]float64(nil), last.toW...)
+		}
+	}
+	fromM := append([]float64(nil), ensureFakeAxisLen(mpos, 3)...)
+	fromW := []float64(nil)
+	if haveWPos {
+		fromW = append([]float64(nil), ensureFakeAxisLen(wpos, 3)...)
+	}
+	targetM := append([]float64(nil), fromM...)
+	targetW := []float64(nil)
+	if haveWPos {
+		targetW = append([]float64(nil), fromW...)
+	}
+	for axis, target := range targets {
+		idx, ok := fakeAxisIndex[axis]
+		if !ok || idx >= 3 || !fakeFinite(target) {
+			continue
+		}
+		targetM = ensureFakeAxisLen(targetM, idx+1)
+		if hasG53 {
+			d := target - targetM[idx]
+			targetM[idx] = target
+			if haveWPos {
+				targetW = ensureFakeAxisLen(targetW, idx+1)
+				targetW[idx] += d
+			}
+		} else if m.absolute {
+			if haveWPos {
+				targetW = ensureFakeAxisLen(targetW, idx+1)
+				d := target - targetW[idx]
+				targetW[idx] = target
+				targetM[idx] += d
+			} else {
+				targetM[idx] = target
+			}
+		} else {
+			targetM[idx] += target
+			if haveWPos {
+				targetW = ensureFakeAxisLen(targetW, idx+1)
+				targetW[idx] += target
+			}
+		}
+	}
+	segments := m.arcInterpolatedTargetsLocked(fromM, targetM, values, has, clockwise)
+	if len(segments) == 0 {
+		return
+	}
+	prevM := fromM
+	prevW := fromW
+	cursorStart := start
+	for i, nextM := range segments {
+		nextW := []float64(nil)
+		if haveWPos {
+			nextW = append([]float64(nil), targetW...)
+			if i < len(segments)-1 {
+				nextW = interpolateFakeAxes(fromW, targetW, float64(i+1)/float64(len(segments)))
+			}
+		}
+		delta := fakeDeltaForAxes(prevM, nextM)
+		dur := m.fakeMoveDurationLocked(delta, feedMMMin)
+		m.appendMotionLocked(bracketed, state, fields, cursorStart, prevM, nextM, prevW, nextW, dur, feedMMMin)
+		cursorStart = cursorStart.Add(dur)
+		prevM = nextM
+		prevW = nextW
+	}
+}
+
+func (m *FakeMachine) arcInterpolatedTargetsLocked(start, target []float64, values map[byte]float64, has map[byte]bool, clockwise bool) [][]float64 {
+	u, v, w := m.arcPlaneAxesLocked()
+	start = ensureFakeAxisLen(start, 3)
+	target = ensureFakeAxisLen(target, 3)
+	offset, ok := m.arcOffsetLocked(start, target, values, has, clockwise)
+	if !ok {
+		return [][]float64{append([]float64(nil), target...)}
+	}
+	radius := math.Hypot(offset[u], offset[v])
+	if radius <= 0.000001 {
+		return [][]float64{append([]float64(nil), target...)}
+	}
+	centerU := start[u] + offset[u]
+	centerV := start[v] + offset[v]
+	r0U := -offset[u]
+	r0V := -offset[v]
+	rtU := target[u] - centerU
+	rtV := target[v] - centerV
+	angularTravel := 0.0
+	if fakeNear(start[u], target[u]) && fakeNear(start[v], target[v]) {
+		if clockwise {
+			angularTravel = -2 * math.Pi
+		} else {
+			angularTravel = 2 * math.Pi
+		}
+	} else {
+		angularTravel = math.Atan2(r0U*rtV-r0V*rtU, r0U*rtU+r0V*rtV)
+		effectiveClockwise := clockwise
+		if w == 1 {
+			effectiveClockwise = !effectiveClockwise
+		}
+		if effectiveClockwise {
+			if angularTravel > 0 {
+				angularTravel -= 2 * math.Pi
+			}
+		} else if angularTravel < 0 {
+			angularTravel += 2 * math.Pi
+		}
+	}
+	travel := math.Hypot(angularTravel*radius, math.Abs(target[w]-start[w]))
+	if travel <= 0.000001 {
+		return nil
+	}
+	segments := int(math.Ceil(travel / 0.5))
+	if segments < 1 {
+		segments = 1
+	}
+	if segments > 2000 {
+		segments = 2000
+	}
+	startAngle := math.Atan2(start[v]-centerV, start[u]-centerU)
+	out := make([][]float64, 0, segments)
+	for i := 1; i <= segments; i++ {
+		t := float64(i) / float64(segments)
+		next := append([]float64(nil), start...)
+		angle := startAngle + angularTravel*t
+		next[u] = centerU + radius*math.Cos(angle)
+		next[v] = centerV + radius*math.Sin(angle)
+		next[w] = start[w] + (target[w]-start[w])*t
+		if i == segments {
+			next = append([]float64(nil), target...)
+		}
+		out = append(out, next)
+	}
+	return out
+}
+
+func (m *FakeMachine) arcOffsetLocked(start, target []float64, values map[byte]float64, has map[byte]bool, clockwise bool) ([3]float64, bool) {
+	var offset [3]float64
+	if has['R'] {
+		return m.arcOffsetFromRadiusLocked(start, target, values['R'], clockwise)
+	}
+	seen := false
+	for _, word := range []struct {
+		letter byte
+		axis   int
+	}{
+		{'I', 0},
+		{'J', 1},
+		{'K', 2},
+	} {
+		if !has[word.letter] {
+			continue
+		}
+		seen = true
+		if m.arcAbsolute {
+			offset[word.axis] = values[word.letter] - start[word.axis]
+		} else {
+			offset[word.axis] = values[word.letter]
+		}
+	}
+	return offset, seen
+}
+
+func (m *FakeMachine) arcOffsetFromRadiusLocked(start, target []float64, radiusWord float64, clockwise bool) ([3]float64, bool) {
+	var offset [3]float64
+	u, v, _ := m.arcPlaneAxesLocked()
+	startU, startV := start[u], start[v]
+	targetU, targetV := target[u], target[v]
+	du := targetU - startU
+	dv := targetV - startV
+	chord := math.Hypot(du, dv)
+	if chord <= 0.000001 {
+		return offset, false
+	}
+	radius := math.Abs(radiusWord)
+	if radius <= 0.000001 {
+		return offset, false
+	}
+	halfChord := chord / 2
+	if radius < halfChord {
+		radius = halfChord
+	}
+	oc := math.Sqrt(math.Max(radius*radius-halfChord*halfChord, 0))
+	if clockwise {
+		oc = -oc
+	}
+	if radiusWord < 0 {
+		oc = -oc
+	}
+	centerU := 0.5*(startU+targetU) - oc*dv/chord
+	centerV := 0.5*(startV+targetV) + oc*du/chord
+	offset[u] = centerU - startU
+	offset[v] = centerV - startV
+	return offset, true
+}
+
+func (m *FakeMachine) arcPlaneAxesLocked() (int, int, int) {
+	switch m.plane {
+	case fakePlaneXZ:
+		return 0, 2, 1
+	case fakePlaneYZ:
+		return 1, 2, 0
+	default:
+		return 0, 1, 2
+	}
+}
+
+func fakeDeltaForAxes(from, to []float64) map[byte]float64 {
+	out := map[byte]float64{}
+	n := len(from)
+	if len(to) > n {
+		n = len(to)
+	}
+	for i := 0; i < n && i < len(fakeAxisLetters); i++ {
+		f, t := 0.0, 0.0
+		if i < len(from) {
+			f = from[i]
+		}
+		if i < len(to) {
+			t = to[i]
+		}
+		if d := t - f; math.Abs(d) > 0.000001 {
+			out[fakeAxisLetters[i]] = d
+		}
+	}
+	return out
+}
+
+func (m *FakeMachine) applyCycleLocked(code int, values map[byte]float64, has map[byte]bool) {
+	if !m.absolute {
+		return
+	}
+	m.ensureCycleStartedLocked()
+	m.updateCycleStickyLocked(values, has)
+	current := m.currentMPosPointLocked()
+	xy := map[byte]float64{
+		'X': current.X,
+		'Y': current.Y,
+	}
+	if has['X'] {
+		xy['X'] = values['X']
+	}
+	if has['Y'] {
+		xy['Y'] = values['Y']
+	}
+	m.applyAbsoluteMoveLocked(xy, 0, false)
+
+	if fakeFinite(m.cycleSticky.r) {
+		m.applyAbsoluteMoveLocked(map[byte]float64{'Z': m.cycleSticky.r}, 0, false)
+	}
+	switch code {
+	case 83:
+		m.applyPeckCycleLocked()
+	default:
+		m.applyAbsoluteMoveLocked(map[byte]float64{'Z': m.cycleSticky.z}, m.feedMMMin, false)
+		if code == 82 && m.cycleSticky.p > 0 {
+			m.appendDwellLocked(m.scaleDurationLocked(time.Duration(m.cycleSticky.p * float64(time.Second))))
+		}
+	}
+	retractZ := m.cycleSticky.r
+	if m.cycleRetractInit {
+		retractZ = m.cycleInitialZ
+	}
+	m.applyAbsoluteMoveLocked(map[byte]float64{'Z': retractZ}, 0, false)
+}
+
+func (m *FakeMachine) ensureCycleStartedLocked() {
+	if m.cycleStarted {
+		return
+	}
+	m.cycleStarted = true
+	m.cycleRetractInit = true
+	m.cycleInitialZ = m.currentMPosZLocked()
+	m.cycleSticky = fakeCycleSticky{
+		z: m.currentMPosZLocked(),
+		r: m.currentMPosZLocked(),
+		f: m.feedMMMin,
+	}
+}
+
+func (m *FakeMachine) updateCycleStickyLocked(values map[byte]float64, has map[byte]bool) {
+	if has['Z'] {
+		m.cycleSticky.z = values['Z']
+	}
+	if has['R'] {
+		m.cycleSticky.r = values['R']
+	}
+	if has['F'] && values['F'] > 0 {
+		m.cycleSticky.f = values['F']
+		m.feedMMMin = values['F']
+	}
+	if has['Q'] {
+		m.cycleSticky.q = values['Q']
+	}
+	if has['P'] {
+		m.cycleSticky.p = values['P']
+	}
+	if m.cycleSticky.f > 0 {
+		m.feedMMMin = m.cycleSticky.f
+	}
+}
+
+func (m *FakeMachine) applyPeckCycleLocked() {
+	q := m.cycleSticky.q
+	if q <= 0 || !fakeFinite(q) {
+		m.applyAbsoluteMoveLocked(map[byte]float64{'Z': m.cycleSticky.z}, m.feedMMMin, false)
+		return
+	}
+	r := m.cycleSticky.r
+	for z := r - q; z > m.cycleSticky.z; z -= q {
+		m.applyAbsoluteMoveLocked(map[byte]float64{'Z': z}, m.feedMMMin, false)
+		m.applyAbsoluteMoveLocked(map[byte]float64{'Z': r}, 0, false)
+	}
+	m.applyAbsoluteMoveLocked(map[byte]float64{'Z': m.cycleSticky.z}, m.feedMMMin, false)
+}
+
+func (m *FakeMachine) cancelCycleLocked() {
+	m.cycleStarted = false
+	m.cycleInitialZ = 0
+	m.cycleSticky = fakeCycleSticky{}
+	m.motionCode = 0
+	m.motionMode = fakeMotionRapid
 }
 
 func (m *FakeMachine) applyWorkPositionLocked(targets map[byte]float64) {
 	if len(targets) == 0 {
+		return
+	}
+	if last := m.lastMotionSegmentLocked(); last != nil && last.end.After(time.Now()) {
+		wpos := append([]float64(nil), last.toW...)
+		if len(wpos) == 0 {
+			wpos = append([]float64(nil), last.toM...)
+		}
+		for axis, target := range targets {
+			idx, ok := fakeAxisIndex[axis]
+			if !ok || !fakeFinite(target) {
+				continue
+			}
+			wpos = ensureFakeAxisLen(wpos, idx+1)
+			wpos[idx] = target
+		}
+		last.toW = wpos
 		return
 	}
 	bracketed, state, fields, ok := parseFakeStatus(m.status)
@@ -1506,6 +2069,7 @@ func (m *FakeMachine) statusAtLocked(now time.Time) string {
 }
 
 func (m *FakeMachine) advanceMotionLocked(now time.Time) {
+	m.advanceStockSimulationLocked(now)
 	if len(m.motion) == 0 {
 		return
 	}
@@ -1541,20 +2105,42 @@ func (m *FakeMachine) advanceMotionLocked(now time.Time) {
 	m.status = formatFakeStatus(bracketed, state, fields)
 }
 
-func (m *FakeMachine) appendMotionLocked(bracketed bool, state string, fields []fakeStatusField, start time.Time, fromM, toM, fromW, toW []float64, dur time.Duration) {
+func (m *FakeMachine) finishMotionLocked() {
+	if len(m.motion) == 0 {
+		return
+	}
+	last := m.motion[len(m.motion)-1]
+	m.advanceStockSimulationLocked(last.end)
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		m.motion = nil
+		return
+	}
+	applyFakeAxesToFields(&fields, last.toM, last.toW)
+	m.motion = nil
+	if state == "Run" && m.program == nil {
+		state = "Idle"
+	}
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) appendMotionLocked(bracketed bool, state string, fields []fakeStatusField, start time.Time, fromM, toM, fromW, toW []float64, dur time.Duration, feedMMMin float64) {
 	if dur <= 0 {
+		m.maybeQueueStockCutLocked(start, start, fromM, toM, feedMMMin)
 		applyFakeAxesToFields(&fields, toM, toW)
 		m.status = formatFakeStatus(bracketed, state, fields)
 		return
 	}
+	end := start.Add(dur)
 	m.motion = append(m.motion, fakeMotionSegment{
 		start: start,
-		end:   start.Add(dur),
+		end:   end,
 		fromM: append([]float64(nil), fromM...),
 		toM:   append([]float64(nil), toM...),
 		fromW: append([]float64(nil), fromW...),
 		toW:   append([]float64(nil), toW...),
 	})
+	m.maybeQueueStockCutLocked(start, end, fromM, toM, feedMMMin)
 	state = "Run"
 	m.status = formatFakeStatus(bracketed, state, fields)
 }
@@ -1591,7 +2177,7 @@ func (m *FakeMachine) appendDwellLocked(dur time.Duration) {
 			wpos = append([]float64(nil), last.toW...)
 		}
 	}
-	m.appendMotionLocked(bracketed, state, fields, start, mpos, mpos, wpos, wpos, dur)
+	m.appendMotionLocked(bracketed, state, fields, start, mpos, mpos, wpos, wpos, dur, 0)
 }
 
 func (m *FakeMachine) advanceProgramLocked(now time.Time) {
@@ -1997,6 +2583,9 @@ func fakeWordValues(words []fakeGcodeWord, unit float64) (map[byte]float64, map[
 			values[w.letter] = w.value * unit
 			has[w.letter] = true
 		case 'F':
+			values[w.letter] = w.value * unit
+			has[w.letter] = true
+		case 'I', 'J', 'K', 'R', 'Q':
 			values[w.letter] = w.value * unit
 			has[w.letter] = true
 		case 'L', 'P':

@@ -65,6 +65,147 @@ func TestServerNotifyRequiresTokenAndRecordsNotification(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsCrossSiteMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script as the supervised proxy")
+	}
+	dir := t.TempDir()
+	proxy := filepath.Join(dir, "proxy.sh")
+	if err := os.WriteFile(proxy, []byte("#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile true; do sleep 1 & wait $!; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ProxyBinary = proxy
+	sup := NewSupervisor(cfg, "")
+	if err := sup.Start(); err != nil {
+		t.Fatalf("start proxy script: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = sup.Stop(ctx)
+	})
+	srv := NewServer(filepath.Join(dir, "tray.json"), sup, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Cross-site fetch metadata must be rejected and must not stop the proxy.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy/stop", nil)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-site stop status = %d, want 403", resp.StatusCode)
+	}
+	if !sup.State().Running {
+		t.Fatal("cross-site request stopped the supervised proxy")
+	}
+
+	// A foreign Origin must be rejected and must not stop the proxy.
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/proxy/stop", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin stop status = %d, want 403", resp.StatusCode)
+	}
+	if !sup.State().Running {
+		t.Fatal("cross-origin request stopped the supervised proxy")
+	}
+
+	// A same-origin request (matching Origin) still works.
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/proxy/stop", nil)
+	req.Header.Set("Origin", ts.URL)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("same-origin stop status = %d, want 200", resp.StatusCode)
+	}
+	if sup.State().Running {
+		t.Fatal("same-origin stop request left the proxy running")
+	}
+}
+
+func TestManagerRejectsForeignHost(t *testing.T) {
+	cfg := DefaultConfig()
+	configPath := filepath.Join(t.TempDir(), "tray.json")
+	sup := NewSupervisor(cfg, "")
+	srv := NewServer(configPath, sup, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy/stop", nil)
+	req.Host = "evil.example:8430"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign-host stop status = %d, want 403", resp.StatusCode)
+	}
+
+	// The loopback host used by httptest still works.
+	resp, err = http.Post(ts.URL+"/api/proxy/stop", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("loopback-host stop status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestManagerLogFileBounded(t *testing.T) {
+	cfg := DefaultConfig()
+	configPath := filepath.Join(t.TempDir(), "tray.json")
+	srv := NewServer(configPath, NewSupervisor(cfg, ""), nil)
+	for i := 0; i < 275; i++ {
+		srv.addManagerLog("info", "test", fmt.Sprintf("entry %d", i))
+	}
+
+	logPath := DefaultManagerLogPath(configPath)
+	f, err := os.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var onDisk []ManagerLogEntry
+	dec := json.NewDecoder(f)
+	for {
+		var entry ManagerLogEntry
+		if err := dec.Decode(&entry); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode manager log: %v", err)
+		}
+		onDisk = append(onDisk, entry)
+	}
+	if len(onDisk) > 200 {
+		t.Fatalf("on-disk manager log holds %d entries, want at most 200", len(onDisk))
+	}
+	if len(onDisk) == 0 || onDisk[len(onDisk)-1].Message != "entry 274" {
+		t.Fatalf("on-disk manager log tail = %+v, want most recent entry retained", onDisk[len(onDisk)-1:])
+	}
+
+	reloaded := NewServer(configPath, NewSupervisor(cfg, ""), nil)
+	got := reloaded.recentManagerLog()
+	if len(got) == 0 || len(got) > 200 || got[len(got)-1].Message != "entry 274" {
+		t.Fatalf("reloaded manager log len=%d tail=%+v", len(got), got[len(got)-1:])
+	}
+}
+
 func TestManagerLogPersistsAndIsReturnedByStatus(t *testing.T) {
 	cfg := DefaultConfig()
 	configPath := filepath.Join(t.TempDir(), "tray.json")
