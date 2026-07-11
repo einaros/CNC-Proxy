@@ -1306,30 +1306,6 @@ func selectedJogMachineMax(delta Axes) float64 {
 	return maxRate
 }
 
-func safetyLeadTooLarge(planned, observed machine.AxisValues, cfg Config) bool {
-	xy, z := safetyLead(cfg)
-	return math.Abs(planned["x"]-observed["x"]) > xy ||
-		math.Abs(planned["y"]-observed["y"]) > xy ||
-		math.Abs(planned["z"]-observed["z"]) > z
-}
-
-func safetyLead(cfg Config) (float64, float64) {
-	cfg = cfg.normalize()
-	budget := activeStatusMaxAge(cfg)
-	if budget > 750*time.Millisecond {
-		budget = 750 * time.Millisecond
-	}
-	xy := cfg.MaxXYMMMin * budget.Minutes()
-	if xy < baseMaxXYLeadMM {
-		xy = baseMaxXYLeadMM
-	}
-	z := cfg.MaxZMMMin * budget.Minutes()
-	if z < baseMaxZLeadMM {
-		z = baseMaxZLeadMM
-	}
-	return xy, z
-}
-
 func jogSegmentDuration(cfg Config) time.Duration {
 	cfg = cfg.normalize()
 	d := 4 * cfg.Tick

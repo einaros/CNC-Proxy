@@ -2,11 +2,13 @@ package session
 
 import (
 	"errors"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/protocol"
@@ -288,18 +290,71 @@ func TestConnReusedAcrossCalls(t *testing.T) {
 	}
 }
 
-func TestConnDroppedOnError(t *testing.T) {
+func TestSemanticErrorKeepsConnectionAndConnectionErrorDropsIt(t *testing.T) {
 	addr := miniMachine(t, func() string { return "<Idle>" })
 	a := newArbiter(t, addr, machine.NewTracker())
 
 	var c1 *client.Conn
 	a.WithMachine(false, func(c *client.Conn) error { c1 = c; return nil })
-	// Force an error; the arbiter should drop the connection.
-	a.WithMachine(false, func(c *client.Conn) error { return errors.New("boom") })
+	// A semantic failure came from a responsive machine and must not cause a
+	// reconnect (or a physical USB reset).
+	a.WithMachine(false, func(c *client.Conn) error { return errors.New("machine rejected operation") })
 	var c2 *client.Conn
 	a.WithMachine(false, func(c *client.Conn) error { c2 = c; return nil })
-	if c1 == c2 {
-		t.Error("expected a fresh connection after an error")
+	if c1 != c2 {
+		t.Error("semantic error unexpectedly dropped the connection")
+	}
+
+	// A real transport error still invalidates the connection.
+	a.WithMachine(false, func(c *client.Conn) error { return io.EOF })
+	var c3 *client.Conn
+	a.WithMachine(false, func(c *client.Conn) error { c3 = c; return nil })
+	if c2 == c3 {
+		t.Error("connection error did not force a fresh connection")
+	}
+}
+
+func TestModeNotBlockedBySlowDial(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	a := New(Config{
+		Dial: func() (*client.Conn, error) {
+			close(started)
+			<-release
+			return nil, io.EOF
+		},
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- a.WithMachine(false, func(*client.Conn) error { return nil })
+	}()
+	<-started
+
+	modeDone := make(chan Mode, 1)
+	go func() { modeDone <- a.Mode() }()
+	select {
+	case mode := <-modeDone:
+		if mode != ModeOwner {
+			t.Fatalf("mode = %q, want owner", mode)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Mode blocked behind slow dial")
+	}
+
+	relayDone := make(chan struct{})
+	go func() {
+		a.EnterRelay()
+		close(relayDone)
+	}()
+	select {
+	case <-relayDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("EnterRelay blocked behind slow dial")
+	}
+
+	close(release)
+	if err := <-done; !errors.Is(err, io.EOF) {
+		t.Fatalf("WithMachine = %v, want dial EOF", err)
 	}
 }
 
@@ -330,6 +385,33 @@ func TestPollTimeoutPreservesOwnerConnectionWhenConfigured(t *testing.T) {
 	}
 	if st, _ := tr.Snapshot(); st != machine.Idle {
 		t.Fatalf("state = %q, want Idle", st)
+	}
+}
+
+func TestPollTimeoutDoesNotMisattributeStaleStatus(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	m.SetStatus("<Idle|MPos:0,0,0>")
+	m.SetStatusReplyDelay(100 * time.Millisecond)
+	tr := machine.NewTracker()
+	a := New(Config{
+		Tracker:                   tr,
+		Dial:                      func() (*client.Conn, error) { return client.Dial(m.Addr(), time.Second) },
+		PreserveConnOnPollTimeout: true,
+	})
+
+	a.pollOnce(20 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond) // let the stale Idle reply reach the socket
+	m.SetStatusReplyDelay(0)
+	m.SetStatus("<Alarm|MPos:0,0,0|H:1>")
+	a.pollOnce(time.Second)
+
+	st, _ := tr.Current()
+	if st.State != machine.Alarm {
+		t.Fatalf("state = %q raw=%q, want current Alarm rather than stale Idle", st.State, st.Raw)
 	}
 }
 

@@ -107,6 +107,21 @@ func newConn(t machinetransport.Conn, opts ...Option) *Conn {
 // Close closes the underlying connection.
 func (k *Conn) Close() error { return k.c.Close() }
 
+// IsConnectionError reports whether err indicates that the underlying machine
+// transport can no longer be trusted. Firmware/protocol semantic errors (for
+// example, an rm command rejected by the machine) deliberately return false so
+// callers do not reconnect or reset a healthy transport.
+func IsConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
 func (k *Conn) writeFrame(b []byte) error {
 	k.writeMu.Lock()
 	defer k.writeMu.Unlock()
@@ -304,6 +319,11 @@ type GcodeOpts struct {
 	// considering a no-"ok" reply complete (ExpectReply) or how long to drain
 	// for a late error line (fire-and-forget). Defaults to defaultSettle.
 	Settle time.Duration
+	// FirstReplyTimeout optionally gives a reply-producing command longer to
+	// produce its first frame than the normal post-reply quiescence window. Slow
+	// physical probes use this; after the first [PRB:...] line, Settle remains
+	// short so the command completes promptly.
+	FirstReplyTimeout time.Duration
 	// Cap bounds the whole call as a safety net. Because the firmware replies
 	// promptly or never, this should never actually fire in normal operation;
 	// it only guards against a misbehaving peer. Defaults to defaultCap.
@@ -376,7 +396,11 @@ func (k *Conn) SendConsoleCommand(line string, opts GcodeOpts) (string, error) {
 	for {
 		// Read deadline: the settle window (so a quiescent reply terminates),
 		// capped by the overall hard deadline.
-		rd := time.Now().Add(opts.Settle)
+		wait := opts.Settle
+		if opts.ExpectReply && !observedReply && opts.FirstReplyTimeout > 0 {
+			wait = opts.FirstReplyTimeout
+		}
+		rd := time.Now().Add(wait)
 		if rd.After(hardDeadline) {
 			rd = hardDeadline
 		}
@@ -461,6 +485,13 @@ func isTimeout(err error) bool {
 // QueryState sends `?` and waits for the next STATUS_RES frame, returning its
 // payload (e.g. "<Idle|...>"). The caller parses it via the machine package.
 func (k *Conn) QueryState(timeout time.Duration) (string, error) {
+	// A transport preserved after a prior poll timeout may receive that poll's
+	// STATUS_RES late. The protocol has no sequence number, so discard frames
+	// already waiting at a short quiet boundary before sending a new `?`; otherwise
+	// the old state would be attributed to this query and timestamped fresh.
+	if err := k.drainAvailableFrames(2 * time.Millisecond); err != nil {
+		return "", err
+	}
 	if err := k.writeFrame(protocol.QueryStatus()); err != nil {
 		return "", err
 	}
@@ -473,6 +504,19 @@ func (k *Conn) QueryState(timeout time.Duration) (string, error) {
 		if f.Cmd == protocol.CmdStatusRes {
 			return string(f.Data), nil
 		}
+	}
+}
+
+func (k *Conn) drainAvailableFrames(quiet time.Duration) error {
+	for {
+		_, err := k.readFrame(time.Now().Add(quiet))
+		if err == nil {
+			continue
+		}
+		if isTimeout(err) {
+			return nil
+		}
+		return err
 	}
 }
 
@@ -629,16 +673,6 @@ func cleanUploadCancelReason(s string) string {
 		return ""
 	}
 	return s
-}
-
-// sendDataPacket reads the chunk for the requested 1-based sequence and sends a
-// FILE_DATA frame of seq(4 BE) + chunk.
-func (k *Conn) sendDataPacket(r io.ReaderAt, size, packetSize int64, seq uint32) error {
-	data, err := k.dataPacket(r, size, packetSize, seq)
-	if err != nil {
-		return err
-	}
-	return k.writeFrame(protocol.Encode(protocol.CmdFileData, data))
 }
 
 func (k *Conn) dataPacket(r io.ReaderAt, size, packetSize int64, seq uint32) ([]byte, error) {

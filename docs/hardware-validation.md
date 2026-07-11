@@ -51,6 +51,18 @@ Carvera, official controller, LAN discovery, and WebDAV clients.
 7. Confirm Finder/Explorer metadata files such as `.DS_Store` and `._*` do not
    appear in the catalog or on the machine.
 
+## Probe Timing
+
+1. Install the probe tool and prepare a safe probe surface with enough Z travel
+   for the configured depth and final safe-Z lift.
+2. From the web UI, run one Z probe at a deliberately slow feed so physical
+   contact takes longer than 400 ms.
+3. Confirm the request remains pending until the firmware reports `[PRB:...]`,
+   returns the observed contact position, and then performs the configured
+   safe-Z lift.
+4. Confirm a subsequent status query reports the current machine state and is
+   not contaminated by a late probe reply.
+
 ## Gamepad Jogging
 
 1. With no controller connected, confirm the web UI Gamepad Jog panel shows a

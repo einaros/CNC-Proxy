@@ -95,6 +95,99 @@ func TestPostFileRawBody(t *testing.T) {
 	}
 }
 
+func TestPostFileRejectsJunkFilename(t *testing.T) {
+	srv, svc := newTestServer(t)
+	req, _ := http.NewRequest("POST", srv.URL+"/api/files?path=._part.nc", strings.NewReader("junk"))
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if files := svc.Files(); len(files) != 0 {
+		t.Fatalf("junk leaked into catalog: %+v", files)
+	}
+}
+
+func TestInternalUploadFailureReturns500(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arb := session.New(session.Config{Dial: func() (*client.Conn, error) { return nil, io.EOF }})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(st.CacheDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.CacheDir(), []byte("blocks cache directory recreation"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(svc).Handler())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/api/files?path=part.nc", strings.NewReader("G0 X0\n"))
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 500: %s", resp.StatusCode, body)
+	}
+}
+
+func TestInvalidMachineActionsReturn400(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, tc := range []struct {
+		path string
+		body any
+	}{
+		{path: "/api/probe/z", body: map[string]any{"probe_depth_mm": 0, "probe_feed_mm_min": 50}},
+		{path: "/api/outline/trace", body: map[string]any{"machine_points": []any{}}},
+		{path: "/api/tool/current", body: map[string]any{"tool_id": 1000}},
+		{path: "/api/tool/change", body: map[string]any{"tool_id": -1}},
+	} {
+		resp := postJSON(t, srv.URL+tc.path, tc.body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST %s status=%d, want 400", tc.path, resp.StatusCode)
+		}
+	}
+}
+
+func TestUISettingsStoreFailureReturns500WithoutLeakingPath(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arb := session.New(session.Config{Dial: func() (*client.Conn, error) { return nil, io.EOF }})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(svc).Handler())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/ui/settings", strings.NewReader(`{"log":{"filter":"all"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := do(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d, want 500: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), statePath) {
+		t.Fatalf("internal path leaked in response: %s", body)
+	}
+}
+
 func TestMutatingAPIRejectsCrossOriginBrowserRequests(t *testing.T) {
 	srv, _ := newTestServer(t)
 	req, _ := http.NewRequest("POST", srv.URL+"/api/gcode", strings.NewReader(`{"line":"M114"}`))
@@ -114,6 +207,30 @@ func TestMutatingAPIRejectsCrossOriginBrowserRequests(t *testing.T) {
 	if resp.StatusCode == http.StatusForbidden {
 		t.Fatalf("same-origin request was rejected")
 	}
+}
+
+func TestAPIRejectsForeignHostForReadsAndMutations(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	readReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/files", nil)
+	readReq.Host = "evil.example:8420"
+	readReq.Header.Set("Origin", "http://evil.example:8420")
+	readResp := do(t, readReq)
+	readResp.Body.Close()
+	if readResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign-host read status=%d, want 403", readResp.StatusCode)
+	}
+
+	writeReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/control", strings.NewReader(`{"action":"halt"}`))
+	writeReq.Host = "evil.example:8420"
+	writeReq.Header.Set("Origin", "http://evil.example:8420")
+	writeReq.Header.Set("Content-Type", "application/json")
+	writeResp := do(t, writeReq)
+	writeResp.Body.Close()
+	if writeResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign-host mutation status=%d, want 403", writeResp.StatusCode)
+	}
+
 }
 
 func TestBackupExportRejectsCrossOriginBrowserRequests(t *testing.T) {
@@ -706,7 +823,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), `setNotice("Machine status unavailable: " + e.message, "error", "machine-status")`) || !strings.Contains(string(jsBody), `clearNotice("machine-status")`) {
 		t.Errorf("app.js missing machine status notice lifecycle")
 	}
-	if !strings.Contains(string(jsBody), "function setStatusMessage") || !strings.Contains(string(jsBody), "function clearVisibleNotices") || !strings.Contains(string(jsBody), "NOTICE_REPEAT_SUPPRESS_MS") || !strings.Contains(string(jsBody), `setStatusMessage("tap-move"`) || !strings.Contains(string(jsBody), `setStatusMessage("jog-availability"`) {
+	if !strings.Contains(string(jsBody), "function setStatusMessage") || !strings.Contains(string(jsBody), "function clearVisibleNotices") || !strings.Contains(string(jsBody), "NOTICE_REPEAT_SUPPRESS_MS") || !strings.Contains(string(jsBody), `consumeStatusFeedback("tap-move"`) || !strings.Contains(string(jsBody), `setStatusMessage("jog-availability"`) {
 		t.Errorf("app.js missing shared transient status message routing")
 	}
 	if !strings.Contains(string(jsBody), "refreshJobs") || !strings.Contains(string(jsBody), "/api/jobs") {
@@ -1351,7 +1468,9 @@ func TestProbeZEndpointSerializesSafeMoveProbeAndLift(t *testing.T) {
 		t.Fatal("failed to seed tracker status")
 	}
 	m.SetGcodeReply("G38.2 Z-5.0000 F50.0000", "[PRB:10.0000,-5.0000,-1.2500:1]")
+	m.SetProbeReplyDelay(800 * time.Millisecond)
 
+	started := time.Now()
 	resp := postJSON(t, srv.URL+"/api/probe/z", map[string]any{
 		"machine_x":         10,
 		"machine_y":         -5,
@@ -1360,6 +1479,9 @@ func TestProbeZEndpointSerializesSafeMoveProbeAndLift(t *testing.T) {
 		"probe_depth_mm":    5,
 		"probe_feed_mm_min": 50,
 	})
+	if elapsed := time.Since(started); elapsed < 700*time.Millisecond {
+		t.Fatalf("probe endpoint returned after %v, before delayed contact", elapsed)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

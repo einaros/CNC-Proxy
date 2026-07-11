@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -194,7 +195,7 @@ func (s *Server) doUpload(w http.ResponseWriter, remote string, r io.Reader) {
 			writeErr(w, http.StatusRequestEntityTooLarge, "upload too large")
 			return
 		}
-		writeErr(w, http.StatusBadRequest, err.Error())
+		s.mapError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, entry)
@@ -291,6 +292,8 @@ func (s *Server) postDir(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) mapError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, service.ErrInvalidArgument):
+		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrNotFound):
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrNotCached):
@@ -302,6 +305,8 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 	case errors.Is(err, service.ErrRetryUnavailable):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrDiscardUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrDirectoryNotEmpty):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrNoActiveGcode):
 		writeErr(w, http.StatusConflict, err.Error())
@@ -317,7 +322,8 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		// Machine busy / controller mid-transfer / not idle: try again later.
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	default:
-		writeErr(w, http.StatusBadRequest, err.Error())
+		log.Printf("api: internal service error: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal service error")
 	}
 }
 
@@ -502,7 +508,7 @@ func (s *Server) putUISettings(w http.ResponseWriter, r *http.Request) {
 	}
 	ui, err := s.svc.SetUISettings(body)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		s.mapError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, ui)
@@ -575,7 +581,7 @@ func (s *Server) postBackupImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.ImportBackup(backup); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		s.mapError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "imported"})
@@ -665,6 +671,7 @@ func sendEvent(w io.Writer, event string, v any) {
 func sameOriginGuard(next http.Handler) http.Handler {
 	return webguard.Handler(next, webguard.Options{
 		RequiresSameOrigin: requiresSameOrigin,
+		AllowHost:          webguard.AllowIPLiteralOrLocalhost,
 		Reject: func(w http.ResponseWriter, message string) {
 			writeErr(w, http.StatusForbidden, message)
 		},
@@ -681,11 +688,5 @@ func requiresSameOrigin(r *http.Request) bool {
 	if !strings.HasPrefix(r.URL.Path, "/api/") {
 		return false
 	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return false
-	default:
-		return true
-	}
+	return true
 }
-

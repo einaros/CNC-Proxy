@@ -733,6 +733,27 @@ func TestFakeMachineProbeHitsLoadedSTLAndTracksLaser(t *testing.T) {
 	waitForProbeLaser(t, m, false)
 }
 
+func TestProbeReplyIsDelayedUntilContact(t *testing.T) {
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	m.SetProbeReplyDelay(300 * time.Millisecond)
+	c := dialFakeMachine(t, m)
+	defer c.Close()
+
+	start := time.Now()
+	writeCtrlMulti(t, c, "G38.2 Z-5 F50\n")
+	f := readFakeFrame(t, c)
+	if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+		t.Fatalf("probe reply arrived after %v, want delayed contact", elapsed)
+	}
+	if f.Cmd != protocol.CmdNormalInfo || !strings.Contains(string(f.Data), "[PRB:") {
+		t.Fatalf("probe reply cmd=%s data=%q", protocol.CmdName(f.Cmd), f.Data)
+	}
+}
+
 func TestFakeMachineProbeNoHitLoadedModelOutsideXY(t *testing.T) {
 	m, err := New()
 	if err != nil {

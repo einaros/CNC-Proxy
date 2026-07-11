@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	maxPreviewSegments = 1000000
+	maxPreviewSegments = 50000
 	previewArcSegment  = 0.5
 	previewArcError    = 0.01
 
@@ -159,7 +159,7 @@ func (s *Service) SelectActiveGcode(remotePath string) (ActiveGcode, error) {
 	}
 	defer rc.Close()
 	if entry.IsDir {
-		return ActiveGcode{}, errors.New("service: active gcode must be a file")
+		return ActiveGcode{}, fmt.Errorf("%w: active gcode must be a file", ErrInvalidArgument)
 	}
 	preview, err := ParseGcodePreview(rc)
 	if err != nil {
@@ -391,7 +391,7 @@ func toolDisplayName(toolID int) string {
 // declaring which tool is currently installed.
 func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
 	if !validCurrentToolID(toolID) {
-		err := fmt.Errorf("service: tool_id must be Empty (-1), Probe (0), Laser (8888), or between 1 and 999")
+		err := fmt.Errorf("%w: tool_id must be Empty (-1), Probe (0), Laser (8888), or between 1 and 999", ErrInvalidArgument)
 		return MachineActionResult{Action: "set_tool", ToolID: toolID, Message: err.Error()}, err
 	}
 	display := strings.TrimSpace(protocol.SetCurrentToolLine(toolID))
@@ -414,7 +414,7 @@ func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
 // tool with the firmware's normal tool-change flow.
 func (s *Service) ChangeTool(toolID int) (MachineActionResult, error) {
 	if !validChangeToolID(toolID) {
-		err := fmt.Errorf("service: tool_id must be Probe (0), Laser (8888), or between 1 and 999")
+		err := fmt.Errorf("%w: tool_id must be Probe (0), Laser (8888), or between 1 and 999", ErrInvalidArgument)
 		return MachineActionResult{Action: "change_tool", ToolID: toolID, Message: err.Error()}, err
 	}
 	display := strings.TrimSpace(protocol.ChangeToolLine(toolID))

@@ -32,6 +32,9 @@ func setup(t *testing.T) (*carveratest.FakeMachine, *store.Store, *session.Arbit
 	t.Cleanup(m.Close)
 
 	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err := os.MkdirAll(st.CacheDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	tr := machine.NewTracker()
 	arb := session.New(session.Config{
 		Tracker: tr,
@@ -49,6 +52,9 @@ func newEngine(st *store.Store, arb *session.Arbiter) *Engine {
 // writeCache creates a cache file with random content and returns path+md5+size.
 func writeCache(t *testing.T, dir string, size int) (string, string, int64) {
 	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	content := make([]byte, size)
 	rand.Read(content)
 	p := filepath.Join(dir, "cache.bin")
@@ -90,7 +96,7 @@ func TestUploadJobSyncsWhenIdle(t *testing.T) {
 	m, st, arb, tr := setup(t)
 	eng := newEngine(st, arb)
 
-	cachePath, md5hex, size := writeCache(t, t.TempDir(), 9000)
+	cachePath, md5hex, size := writeCache(t, st.CacheDir(), 9000)
 	remote := "/sd/gcodes/part.nc"
 	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
@@ -143,7 +149,7 @@ func TestUploadJobRefreshesStaleStatusBeforeSyncing(t *testing.T) {
 	})
 	eng := newEngine(st, arb)
 
-	cachePath, md5hex, size := writeCache(t, t.TempDir(), client.USBPacketSize*2+17)
+	cachePath, md5hex, size := writeCache(t, st.CacheDir(), client.USBPacketSize*2+17)
 	remote := "/sd/gcodes/usb.nc"
 	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
@@ -174,7 +180,7 @@ func TestUploadCompressedWhenSupported(t *testing.T) {
 
 	// A large, highly compressible payload (> quicklz.BlockSize).
 	content := bytes.Repeat([]byte("G1 X10 Y10 Z0.5 F1000\n"), 2000)
-	dir := t.TempDir()
+	dir := st.CacheDir()
 	p := filepath.Join(dir, "big.nc")
 	if err := os.WriteFile(p, content, 0o644); err != nil {
 		t.Fatal(err)
@@ -211,7 +217,7 @@ func TestUploadUncompressedWhenUnsupported(t *testing.T) {
 	tr.Observe(machine.Idle)
 
 	content := bytes.Repeat([]byte("data\n"), 2000)
-	dir := t.TempDir()
+	dir := st.CacheDir()
 	p := filepath.Join(dir, "plain.nc")
 	os.WriteFile(p, content, 0o644)
 	sum := md5.Sum(content)
@@ -233,7 +239,7 @@ func TestBlockedWhileRelayActive(t *testing.T) {
 	tr.Observe(machine.Idle)
 	arb.EnterRelay() // controller connected
 
-	cachePath, md5hex, size := writeCache(t, t.TempDir(), 100)
+	cachePath, md5hex, size := writeCache(t, st.CacheDir(), 100)
 	remote := "/sd/gcodes/x.nc"
 	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
@@ -256,7 +262,7 @@ func TestDeleteJob(t *testing.T) {
 	tr.Observe(machine.Idle)
 
 	// Seed a file on the machine via an upload job first.
-	cachePath, md5hex, size := writeCache(t, t.TempDir(), 50)
+	cachePath, md5hex, size := writeCache(t, st.CacheDir(), 50)
 	remote := "/sd/gcodes/del.nc"
 	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
@@ -533,7 +539,7 @@ func TestTransientUploadFailureKeepsEntryPendingUntilAttemptsExhausted(t *testin
 	tr.Observe(machine.Idle)
 
 	remote := "/sd/gcodes/missing-cache.nc"
-	missingCachePath := filepath.Join(t.TempDir(), "missing-cache.bin")
+	missingCachePath := filepath.Join(st.CacheDir(), "missing-cache.bin")
 	st.PutEntry(store.Entry{Path: remote, Size: 123, MD5: "bad-md5", CachePath: missingCachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: missingCachePath, MD5: "bad-md5", Size: 123})
 
@@ -588,7 +594,7 @@ func TestPostUploadMD5TimeoutDoesNotHoldQueueForOperationTimeout(t *testing.T) {
 		Compress:               &compress,
 	})
 
-	cachePath, md5hex, size := writeCache(t, t.TempDir(), 5*1024)
+	cachePath, md5hex, size := writeCache(t, st.CacheDir(), 5*1024)
 	remote := "/sd/gcodes/slow-md5.nc"
 	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
@@ -681,7 +687,7 @@ func TestFailingJobDoesNotBlockOthers(t *testing.T) {
 	st.Enqueue(store.Job{Kind: store.JobDelete, Path: "/sd/gcodes/ghost.nc"})
 
 	// A legitimate upload queued AFTER the failing delete, different path.
-	cachePath, md5hex, size := writeCache(t, t.TempDir(), 100)
+	cachePath, md5hex, size := writeCache(t, st.CacheDir(), 100)
 	remote := "/sd/gcodes/real.nc"
 	st.PutEntry(store.Entry{Path: remote, Size: size, MD5: md5hex, CachePath: cachePath, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: cachePath, MD5: md5hex, Size: size})
@@ -702,7 +708,7 @@ func TestEmptyFileUploadSyncs(t *testing.T) {
 	eng := newEngine(st, arb)
 	tr.Observe(machine.Idle)
 
-	dir := t.TempDir()
+	dir := st.CacheDir()
 	p := filepath.Join(dir, "empty.bin")
 	os.WriteFile(p, nil, 0o644)
 	sum := md5.Sum(nil)
@@ -727,7 +733,7 @@ func TestZeroByteUploadWaitsForSettle(t *testing.T) {
 	now := time.Now()
 	eng.now = func() time.Time { return now }
 
-	dir := t.TempDir()
+	dir := st.CacheDir()
 	p := filepath.Join(dir, "empty.nc")
 	if err := os.WriteFile(p, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -760,7 +766,7 @@ func TestZeroByteUploadSupersededBeforeSettleUploadsContent(t *testing.T) {
 	now := time.Now()
 	eng.now = func() time.Time { return now }
 
-	dir := t.TempDir()
+	dir := st.CacheDir()
 	emptyPath := filepath.Join(dir, "empty.nc")
 	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -795,6 +801,50 @@ func TestZeroByteUploadSupersededBeforeSettleUploadsContent(t *testing.T) {
 	}
 }
 
+func TestUploadRefusesCachePathOutsideStoreCache(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	eng.maxAttempts = 1
+	tr.Observe(machine.Idle)
+	remote := "/sd/gcodes/leak.nc"
+	if err := st.PutEntry(store.Entry{Path: remote, Size: 1, CachePath: "/etc/hosts", CacheState: store.CacheReady, Sync: store.PendingUpload}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := st.Enqueue(store.Job{Kind: store.JobUpload, Path: remote, CachePath: "/etc/hosts", Size: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng.drain()
+	if _, ok := m.File(remote); ok {
+		t.Fatal("outside cache file was uploaded to the machine")
+	}
+	got, ok := st.GetJob(job.ID)
+	if !ok || got.State != store.Failed {
+		t.Fatalf("unsafe upload job = %+v ok=%v, want failed", got, ok)
+	}
+}
+
+func TestEngineRefusesJobOutsideGcodeRoot(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	eng.maxAttempts = 1
+	tr.Observe(machine.Idle)
+	job, err := st.Enqueue(store.Job{Kind: store.JobDelete, Path: "/sd/config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng.drain()
+	got, ok := st.GetJob(job.ID)
+	if !ok || got.State != store.Failed {
+		t.Fatalf("unsafe job = %+v ok=%v, want failed", got, ok)
+	}
+	if _, ok := m.File("/sd/config"); ok {
+		t.Fatal("unsafe job touched the machine")
+	}
+}
+
 func contentMD5(b []byte) string {
 	sum := md5.Sum(b)
 	return hex.EncodeToString(sum[:])
@@ -817,7 +867,7 @@ func TestRenameThenWriteToSourceKeepsNewerContent(t *testing.T) {
 	st.Enqueue(store.Job{Kind: store.JobRename, Path: src, DestPath: dst, MD5: contentMD5(oldContent), Size: int64(len(oldContent))})
 
 	// A newer write to the source path arrives before the queue drains.
-	newCache, newMD5, newSize := writeCache(t, t.TempDir(), 300)
+	newCache, newMD5, newSize := writeCache(t, st.CacheDir(), 300)
 	st.PutEntry(store.Entry{Path: src, Size: newSize, MD5: newMD5, CachePath: newCache, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: src, CachePath: newCache, MD5: newMD5, Size: newSize})
 
@@ -875,7 +925,7 @@ func TestDeferredRenameDoesNotClobberDestinationUpload(t *testing.T) {
 	}
 
 	// A fresh upload to the rename's DESTINATION arrives while it backs off.
-	freshCache, freshMD5, freshSize := writeCache(t, t.TempDir(), 250)
+	freshCache, freshMD5, freshSize := writeCache(t, st.CacheDir(), 250)
 	st.PutEntry(store.Entry{Path: dst, Size: freshSize, MD5: freshMD5, CachePath: freshCache, Sync: store.PendingUpload})
 	st.Enqueue(store.Job{Kind: store.JobUpload, Path: dst, CachePath: freshCache, MD5: freshMD5, Size: freshSize})
 

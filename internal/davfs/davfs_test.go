@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1061,6 +1062,23 @@ func TestRemoveAndRename(t *testing.T) {
 	}
 	if err := fs.RemoveAll(ctx, "/b.nc"); err != nil {
 		t.Errorf("remove renamed destination: %v", err)
+	}
+}
+
+func TestNonEmptyDirectoryMutationsReturnENOTEMPTY(t *testing.T) {
+	fs, svc := newFS(t)
+	ctx := context.Background()
+	if _, err := svc.Mkdir("full"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Upload("full/child.nc", strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.RemoveAll(ctx, "/full"); !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("RemoveAll(non-empty) = %v, want ENOTEMPTY", err)
+	}
+	if err := fs.Rename(ctx, "/full", "/renamed"); !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("Rename(non-empty) = %v, want ENOTEMPTY", err)
 	}
 }
 

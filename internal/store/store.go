@@ -501,12 +501,16 @@ func (b *Batch) Enqueue(j Job) Job {
 	return cp
 }
 
-// SupersedeQueuedUploads marks still-queued upload jobs for path as done.
+// SupersedeQueuedUploads marks queued or failed upload jobs for path as done.
+// A failed upload is just as stale as a queued one once newer content has
+// replaced the cache entry; leaving it retryable could later revert the entry
+// to the old content's pending state.
 func (b *Batch) SupersedeQueuedUploads(path string) int {
 	n := 0
 	for _, j := range b.s.jobs {
-		if j.Kind == JobUpload && j.Path == path && j.State == Queued {
+		if j.Kind == JobUpload && j.Path == path && (j.State == Queued || j.State == Failed) {
 			j.State = Done
+			j.LastError = ""
 			j.UpdatedAt = b.now
 			n++
 			b.markDirty()
@@ -514,6 +518,19 @@ func (b *Batch) SupersedeQueuedUploads(path string) int {
 		}
 	}
 	return n
+}
+
+// HasDescendants reports whether the catalog contains anything below path.
+// Callers use it inside a Batch so checking a directory and mutating that
+// directory are one atomic store operation.
+func (b *Batch) HasDescendants(path string) bool {
+	prefix := strings.TrimSuffix(path, "/") + "/"
+	for entryPath := range b.s.entries {
+		if strings.HasPrefix(entryPath, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateJob applies a mutation to a job by ID.
@@ -586,6 +603,45 @@ func (b *Batch) PruneDoneJobs(cutoff time.Time) int {
 		return 0
 	}
 	b.s.jobs = kept
+	b.markDirty()
+	b.publishReset()
+	return removed
+}
+
+// PruneFailedJobs keeps only the newest maxPerPath failed jobs for each path.
+// Queued/running jobs are never removed, so live per-path FIFO ordering is
+// unchanged while repeated terminal failures cannot grow the durable queue
+// without bound.
+func (b *Batch) PruneFailedJobs(maxPerPath int) int {
+	if maxPerPath < 0 {
+		maxPerPath = 0
+	}
+	keep := make([]bool, len(b.s.jobs))
+	counts := make(map[string]int)
+	removed := 0
+	for i := len(b.s.jobs) - 1; i >= 0; i-- {
+		job := b.s.jobs[i]
+		if job.State != Failed {
+			keep[i] = true
+			continue
+		}
+		if counts[job.Path] < maxPerPath {
+			counts[job.Path]++
+			keep[i] = true
+		} else {
+			removed++
+		}
+	}
+	if removed == 0 {
+		return 0
+	}
+	jobs := make([]*Job, 0, len(b.s.jobs)-removed)
+	for i, job := range b.s.jobs {
+		if keep[i] {
+			jobs = append(jobs, job)
+		}
+	}
+	b.s.jobs = jobs
 	b.markDirty()
 	b.publishReset()
 	return removed
@@ -777,11 +833,11 @@ func (s *Store) Enqueue(j Job) (Job, error) {
 	return out, err
 }
 
-// SupersedeQueuedUploads marks any still-queued upload job for path as Done
+// SupersedeQueuedUploads marks any queued or failed upload job for path as Done
 // without running it. A newer upload of the same path has replaced its content,
-// so the older queued transfer is obsolete (it would upload superseded bytes
-// under a stale MD5). Running jobs are not touched — they hold an open fd to the
-// cache file and complete consistently. Returns the count superseded.
+// so an older queued transfer or retry is obsolete (it would upload superseded
+// bytes under a stale MD5). Running jobs are not touched — they hold an open fd
+// to the cache file and complete consistently. Returns the count superseded.
 func (s *Store) SupersedeQueuedUploads(path string) (int, error) {
 	n := 0
 	err := s.Batch(func(b *Batch) error {
@@ -879,6 +935,16 @@ func (s *Store) PruneDoneJobs(olderThan time.Duration) (int, error) {
 		return 0, err
 	}
 	return removed, nil
+}
+
+// PruneFailedJobs bounds retained terminal failures per path.
+func (s *Store) PruneFailedJobs(maxPerPath int) (int, error) {
+	removed := 0
+	err := s.Batch(func(b *Batch) error {
+		removed = b.PruneFailedJobs(maxPerPath)
+		return nil
+	})
+	return removed, err
 }
 
 // UISettings returns a copy of the durable operator UI settings.

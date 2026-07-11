@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/client"
+	"github.com/uwin/cnc-proxy/internal/filepolicy"
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/protocol"
@@ -43,23 +44,24 @@ import (
 const GcodeRoot = "/sd/gcodes"
 
 const (
-	maxUIMacros       = 48
-	maxMacroLines     = 40
-	maxMacroLineLen   = 240
-	maxMacroNameLen   = 80
-	maxMacroDescLen   = 240
-	maxMacroButtons   = 96
-	maxMacroColorLen  = 32
-	maxGamepadAxis    = 31
-	maxGamepadButton  = 63
-	maxGamepadMacros  = 32
-	maxMachineSpanMM  = 5000
-	maxTapFeedMMMin   = 10000
-	maxSavedOrigins   = 48
-	maxOriginLabelLen = 80
-	maxProbeDepthMM   = 200
-	maxProbeFeedMM    = 1000
-	maxTracePoints    = 4000
+	maxUIMacros          = 48
+	maxMacroLines        = 40
+	maxMacroLineLen      = 240
+	maxMacroNameLen      = 80
+	maxMacroDescLen      = 240
+	maxMacroButtons      = 96
+	maxMacroColorLen     = 32
+	maxGamepadAxis       = 31
+	maxGamepadButton     = 63
+	maxGamepadMacros     = 32
+	maxMachineSpanMM     = 5000
+	maxTapFeedMMMin      = 10000
+	maxSavedOrigins      = 48
+	maxOriginLabelLen    = 80
+	maxProbeDepthMM      = 200
+	maxProbeFeedMM       = 1000
+	maxTracePoints       = 4000
+	maxFailedJobsPerPath = 20
 )
 
 // Service wires the store, arbiter (for machine state), and local cache.
@@ -420,13 +422,75 @@ func (s *Service) ExportBackup() Backup {
 // local proxy state; machine I/O remains governed by the sync queue and arbiter.
 func (s *Service) ImportBackup(b Backup) error {
 	if b.Version != 1 {
-		return fmt.Errorf("service: unsupported backup version %d", b.Version)
+		return fmt.Errorf("%w: unsupported backup version %d", ErrInvalidArgument, b.Version)
+	}
+	if err := validateBackupState(b.State); err != nil {
+		return err
+	}
+	for i := range b.State.Jobs {
+		if b.State.Jobs[i].State == store.Running {
+			b.State.Jobs[i].State = store.Failed
+			b.State.Jobs[i].LastError = "backup was captured while this job was running; inspect the machine state and retry manually"
+		}
 	}
 	if err := s.store.Restore(b.State); err != nil {
 		return err
 	}
 	s.gcodeLog.Replace(b.GcodeLog)
 	s.runHistory.Replace(b.RunHistory)
+	return nil
+}
+
+func validateBackupState(state store.Snapshot) error {
+	for key, entry := range state.Entries {
+		if key != entry.Path || !filepolicy.IsGcodePath(entry.Path) {
+			return fmt.Errorf("%w: invalid catalog path %q", ErrInvalidArgument, entry.Path)
+		}
+		switch entry.Sync {
+		case store.Synced, store.LocalOnly, store.PendingUpload, store.Uploading,
+			store.PendingDelete, store.Deleting, store.PendingRename, store.RemoteOnly, store.Error:
+		default:
+			return fmt.Errorf("%w: invalid catalog sync state %q", ErrInvalidArgument, entry.Sync)
+		}
+		switch entry.CacheState {
+		case "", store.CacheNone, store.CacheReady, store.CacheValidating:
+		default:
+			return fmt.Errorf("%w: invalid cache state %q", ErrInvalidArgument, entry.CacheState)
+		}
+		if entry.IsDir && entry.CachePath != "" {
+			return fmt.Errorf("%w: directory %q has cached file content", ErrInvalidArgument, entry.Path)
+		}
+	}
+	if state.ActiveGcodePath != "" && !filepolicy.IsGcodePath(state.ActiveGcodePath) {
+		return fmt.Errorf("%w: invalid active gcode path %q", ErrInvalidArgument, state.ActiveGcodePath)
+	}
+	seenIDs := make(map[int64]bool, len(state.Jobs))
+	for _, job := range state.Jobs {
+		if job.ID <= 0 || seenIDs[job.ID] {
+			return fmt.Errorf("%w: invalid or duplicate job id %d", ErrInvalidArgument, job.ID)
+		}
+		seenIDs[job.ID] = true
+		if !filepolicy.IsGcodePath(job.Path) {
+			return fmt.Errorf("%w: invalid job path %q", ErrInvalidArgument, job.Path)
+		}
+		switch job.Kind {
+		case store.JobUpload, store.JobDelete, store.JobMkdir:
+			if job.DestPath != "" {
+				return fmt.Errorf("%w: unexpected destination for %s job", ErrInvalidArgument, job.Kind)
+			}
+		case store.JobRename:
+			if !filepolicy.IsGcodePath(job.DestPath) {
+				return fmt.Errorf("%w: invalid rename destination %q", ErrInvalidArgument, job.DestPath)
+			}
+		default:
+			return fmt.Errorf("%w: invalid job kind %q", ErrInvalidArgument, job.Kind)
+		}
+		switch job.State {
+		case store.Queued, store.Running, store.Done, store.Failed:
+		default:
+			return fmt.Errorf("%w: invalid job state %q", ErrInvalidArgument, job.State)
+		}
+	}
 	return nil
 }
 
@@ -450,6 +514,7 @@ func (s *Service) RunMaintenance(ctx context.Context, interval, doneJobAge, cach
 			return
 		case <-ticker.C:
 			_, _ = s.store.PruneDoneJobs(doneJobAge)
+			_, _ = s.store.PruneFailedJobs(maxFailedJobsPerPath)
 			_, _ = s.PruneCache(cacheFileAge)
 		}
 	}
@@ -533,26 +598,26 @@ func (s *Service) UISettings() store.UISettings { return s.store.UISettings() }
 // SetUISettings validates and persists durable web UI preferences.
 func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
 	if len(ui.Macros) > maxUIMacros {
-		return store.UISettings{}, fmt.Errorf("service: at most %d macros are allowed", maxUIMacros)
+		return store.UISettings{}, fmt.Errorf("%w: at most %d macros are allowed", ErrInvalidArgument, maxUIMacros)
 	}
 	if len(ui.MacroButtons) > maxMacroButtons {
-		return store.UISettings{}, fmt.Errorf("service: at most %d macro buttons are allowed", maxMacroButtons)
+		return store.UISettings{}, fmt.Errorf("%w: at most %d macro buttons are allowed", ErrInvalidArgument, maxMacroButtons)
 	}
 	for i, m := range ui.Macros {
 		if strings.TrimSpace(m.Name) == "" {
-			return store.UISettings{}, fmt.Errorf("service: macro %d requires a name", i+1)
+			return store.UISettings{}, fmt.Errorf("%w: macro %d requires a name", ErrInvalidArgument, i+1)
 		}
 		if len(m.Name) > maxMacroNameLen {
-			return store.UISettings{}, fmt.Errorf("service: macro %q name is too long", m.Name)
+			return store.UISettings{}, fmt.Errorf("%w: macro %q name is too long", ErrInvalidArgument, m.Name)
 		}
 		if len(m.Description) > maxMacroDescLen {
-			return store.UISettings{}, fmt.Errorf("service: macro %q description is too long", m.Name)
+			return store.UISettings{}, fmt.Errorf("%w: macro %q description is too long", ErrInvalidArgument, m.Name)
 		}
 		if len(m.Color) > maxMacroColorLen {
-			return store.UISettings{}, fmt.Errorf("service: macro %q color is too long", m.Name)
+			return store.UISettings{}, fmt.Errorf("%w: macro %q color is too long", ErrInvalidArgument, m.Name)
 		}
 		if len(m.Lines) > maxMacroLines {
-			return store.UISettings{}, fmt.Errorf("service: macro %q has too many lines", m.Name)
+			return store.UISettings{}, fmt.Errorf("%w: macro %q has too many lines", ErrInvalidArgument, m.Name)
 		}
 		nonBlank := 0
 		for _, line := range m.Lines {
@@ -562,18 +627,18 @@ func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
 			}
 			nonBlank++
 			if len(line) > maxMacroLineLen {
-				return store.UISettings{}, fmt.Errorf("service: macro %q has a line longer than %d bytes", m.Name, maxMacroLineLen)
+				return store.UISettings{}, fmt.Errorf("%w: macro %q has a line longer than %d bytes", ErrInvalidArgument, m.Name, maxMacroLineLen)
 			}
 		}
 		if nonBlank == 0 {
-			return store.UISettings{}, fmt.Errorf("service: macro %q requires at least one line", m.Name)
+			return store.UISettings{}, fmt.Errorf("%w: macro %q requires at least one line", ErrInvalidArgument, m.Name)
 		}
 	}
 	if err := validateGamepadSettings(ui.Gamepad); err != nil {
-		return store.UISettings{}, err
+		return store.UISettings{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
 	if err := validateMachineUI(ui.Machine); err != nil {
-		return store.UISettings{}, err
+		return store.UISettings{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
 	if ui.Log.Filter == "" {
 		ui.Log.Filter = "all"
@@ -1070,7 +1135,10 @@ func normalizeRemote(p string) (string, error) {
 	}
 	clean := path.Clean(p)
 	if clean != GcodeRoot && !strings.HasPrefix(clean, GcodeRoot+"/") {
-		return "", fmt.Errorf("service: path %q escapes %s", p, GcodeRoot)
+		return "", fmt.Errorf("%w: path %q escapes %s", ErrInvalidArgument, p, GcodeRoot)
+	}
+	if filepolicy.IsJunk(clean) {
+		return "", fmt.Errorf("%w: OS metadata path %q is not accepted", ErrInvalidArgument, p)
 	}
 	return clean, nil
 }
@@ -1245,7 +1313,7 @@ func (s *Service) Upload(remotePath string, r io.Reader) (store.Entry, error) {
 // is queued only after the final byte has arrived.
 func (s *Service) UploadRange(remotePath string, start, end, total int64, r io.Reader) (store.Entry, bool, error) {
 	if start < 0 || end < start || total <= 0 || end >= total {
-		return store.Entry{}, false, fmt.Errorf("service: invalid upload range")
+		return store.Entry{}, false, fmt.Errorf("%w: invalid upload range", ErrInvalidArgument)
 	}
 	remote, err := normalizeRemote(remotePath)
 	if err != nil {
@@ -1492,7 +1560,7 @@ func (s *Service) SendGcode(line string) (string, error) {
 // final safe-Z lift so no other proxy operation can interleave with the probe.
 func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
 	if err := validateProbeZRequest(req); err != nil {
-		return ProbeZResult{}, err
+		return ProbeZResult{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
 	if err := s.arb.WithMachine(true, func(*client.Conn) error { return nil }); err != nil {
 		return ProbeZResult{}, err
@@ -1540,6 +1608,7 @@ func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
 // fails, so the operator is not left with an active laser after a partial trace.
 func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, error) {
 	if err := validateTraceOutlineRequest(req); err != nil {
+		err = fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 		return TraceOutlineResult{Action: "trace_outline", Message: err.Error()}, err
 	}
 	var res TraceOutlineResult
@@ -1723,10 +1792,16 @@ func (s *Service) waitTraceIdle(c *client.Conn, timeout time.Duration) (machine.
 func (s *Service) sendProbeLine(c *client.Conn, line string, expectReply bool) (string, error) {
 	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "probe "+line)
 	cap := gcodeReplyCap
+	firstReplyTimeout := time.Duration(0)
 	if expectReply {
 		cap = 2 * time.Minute
+		firstReplyTimeout = cap
 	}
-	out, err := c.SendGcodeLine(line, client.GcodeOpts{ExpectReply: expectReply, Cap: cap})
+	out, err := c.SendGcodeLine(line, client.GcodeOpts{
+		ExpectReply:       expectReply,
+		Cap:               cap,
+		FirstReplyTimeout: firstReplyTimeout,
+	})
 	if out != "" {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
 	}
@@ -1830,7 +1905,7 @@ const (
 func (s *Service) SendControl(c byte) error {
 	label, ok := protocol.ControlLabel(c)
 	if !ok {
-		return fmt.Errorf("service: unsupported control character %#x", c)
+		return fmt.Errorf("%w: unsupported control character %#x", ErrInvalidArgument, c)
 	}
 	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, label)
 	err := s.arb.SendControl(c)
@@ -1884,7 +1959,7 @@ func (s *Service) RecoverAlarm(action string) (RecoveryResult, error) {
 		}
 		return s.recoverAlarmReset(res)
 	default:
-		err := fmt.Errorf("service: recovery action must be one of: recover, unlock, home, reset")
+		err := fmt.Errorf("%w: recovery action must be one of: recover, unlock, home, reset", ErrInvalidArgument)
 		res.Message = err.Error()
 		return res, err
 	}
@@ -2084,11 +2159,23 @@ func (s *Service) Delete(remotePath string) error {
 		return ErrNotFound
 	}
 	if s.shouldDiscardLocalEntry(remote, entry) {
-		discarded, ok, err := s.store.DiscardEntry(remote, store.JobUpload, store.JobMkdir, store.JobDelete, store.JobRename)
+		var discarded store.Entry
+		var discardedOK bool
+		err := s.store.Batch(func(b *store.Batch) error {
+			current, ok := b.GetEntry(remote)
+			if !ok {
+				return ErrNotFound
+			}
+			if current.IsDir && b.HasDescendants(remote) {
+				return ErrDirectoryNotEmpty
+			}
+			discarded, discardedOK = b.DiscardEntry(remote, store.JobUpload, store.JobMkdir, store.JobDelete, store.JobRename)
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		if !ok {
+		if !discardedOK {
 			return ErrNotFound
 		}
 		if discarded.CachePath != "" {
@@ -2097,6 +2184,13 @@ func (s *Service) Delete(remotePath string) error {
 		return nil
 	}
 	return s.store.Batch(func(b *store.Batch) error {
+		current, ok := b.GetEntry(remote)
+		if !ok {
+			return ErrNotFound
+		}
+		if current.IsDir && b.HasDescendants(remote) {
+			return ErrDirectoryNotEmpty
+		}
 		if _, ok := b.SetEntrySync(remote, store.PendingDelete, ""); !ok {
 			return ErrNotFound
 		}
@@ -2140,16 +2234,11 @@ func (s *Service) RetryJob(id int64) (store.Job, error) {
 	return retried, nil
 }
 
-func (s *Service) restoreEntryStateForRetry(job store.Job) error {
-	return s.store.Batch(func(b *store.Batch) error {
-		return s.restoreEntryStateForRetryBatch(b, job)
-	})
-}
-
 func (s *Service) restoreEntryStateForRetryBatch(b *store.Batch, job store.Job) error {
 	switch job.Kind {
 	case store.JobUpload:
-		if _, ok := b.GetEntry(job.Path); !ok {
+		entry, ok := b.GetEntry(job.Path)
+		if !ok {
 			b.PutEntry(store.Entry{
 				Path:       job.Path,
 				Size:       job.Size,
@@ -2161,7 +2250,9 @@ func (s *Service) restoreEntryStateForRetryBatch(b *store.Batch, job store.Job) 
 			})
 			return nil
 		}
-		b.SetEntrySync(job.Path, store.PendingUpload, "")
+		if !entry.IsDir && entry.CachePath == job.CachePath && entry.MD5 == job.MD5 && entry.Size == job.Size {
+			b.SetEntrySync(job.Path, store.PendingUpload, "")
+		}
 		return nil
 	case store.JobMkdir:
 		if _, ok := b.GetEntry(job.Path); !ok {
@@ -2352,10 +2443,22 @@ func (s *Service) renameLocalUpload(from, to string, entry store.Entry) error {
 
 func (s *Service) enqueueRemoteRename(from, to string) error {
 	return s.store.Batch(func(b *store.Batch) error {
-		if _, ok := b.SetEntrySync(from, store.PendingRename, ""); !ok {
+		entry, ok := b.GetEntry(from)
+		if !ok {
 			return ErrNotFound
 		}
-		b.Enqueue(store.Job{Kind: store.JobRename, Path: from, DestPath: to})
+		if entry.IsDir && b.HasDescendants(from) {
+			return ErrDirectoryNotEmpty
+		}
+		b.SetEntrySync(from, store.PendingRename, "")
+		b.Enqueue(store.Job{
+			Kind:      store.JobRename,
+			Path:      from,
+			DestPath:  to,
+			CachePath: entry.CachePath,
+			MD5:       entry.MD5,
+			Size:      entry.Size,
+		})
 		return nil
 	})
 }
@@ -2388,6 +2491,9 @@ func (s *Service) ReadCache(remotePath string) (io.ReadCloser, store.Entry, erro
 		return nil, store.Entry{}, ErrNotFound
 	}
 	if entry.CachePath == "" || entry.CacheState == store.CacheNone {
+		return nil, entry, ErrNotCached
+	}
+	if !filepolicy.IsWithinDir(s.cacheDir, entry.CachePath) {
 		return nil, entry, ErrNotCached
 	}
 	if entry.CacheState == store.CacheValidating || (entry.CacheState == "" && entry.Sync == store.Synced) {
@@ -2546,11 +2652,20 @@ func (s *Service) FetchToCache(remotePath string) error {
 		return err
 	}
 	defer replacement.Rollback()
+	committed := false
 	if err := s.store.Batch(func(b *store.Batch) error {
+		current, ok := b.GetEntry(remote)
+		if !ok || current.Sync != store.RemoteOnly || current.UpdatedAt != entry.UpdatedAt {
+			return nil
+		}
 		b.PutEntry(entry)
+		committed = true
 		return nil
 	}); err != nil {
 		return err
+	}
+	if !committed {
+		return nil
 	}
 	replacement.Commit()
 	return nil
@@ -2564,6 +2679,7 @@ func md5hex(b []byte) string {
 
 // Errors returned by the service.
 var (
+	ErrInvalidArgument        = errors.New("service: invalid argument")
 	ErrNotFound               = errors.New("service: not found")
 	ErrNotCached              = errors.New("service: content not cached locally")
 	ErrCacheValidationPending = errors.New("service: cache validation pending")

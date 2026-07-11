@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -161,6 +162,21 @@ func TestPathTraversalRejected(t *testing.T) {
 	}
 	if _, err := svc.Upload("/etc/passwd", bytes.NewReader([]byte("x"))); err == nil {
 		t.Error("expected absolute path outside root to be rejected")
+	}
+}
+
+func TestUploadRejectsJunkFilename(t *testing.T) {
+	svc, st := newService(t)
+	for _, name := range []string{"._part.nc", ".DS_Store", "sub/Thumbs.db"} {
+		if _, err := svc.Upload(name, bytes.NewReader([]byte("junk"))); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("Upload(%q) = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+	if entries := st.ListEntries(); len(entries) != 0 {
+		t.Fatalf("junk leaked into catalog: %+v", entries)
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("junk leaked into queue: %+v", jobs)
 	}
 }
 
@@ -1053,6 +1069,20 @@ func TestSelectActiveGcodeParsesPreview(t *testing.T) {
 	}
 }
 
+func TestActiveGcodePreviewIsBounded(t *testing.T) {
+	var gcode strings.Builder
+	for i := 0; i < maxPreviewSegments+100; i++ {
+		fmt.Fprintf(&gcode, "G1 X%d\n", i&1)
+	}
+	preview, err := ParseGcodePreview(strings.NewReader(gcode.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Truncated || len(preview.Segments) != maxPreviewSegments {
+		t.Fatalf("preview truncated=%v segments=%d, want true/%d", preview.Truncated, len(preview.Segments), maxPreviewSegments)
+	}
+}
+
 func TestActiveGcodeSelectionPersistsAcrossServiceRestart(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
@@ -1887,6 +1917,54 @@ func TestBackupExportImportRoundTrip(t *testing.T) {
 	}
 	if runs := restored.RunHistory(); len(runs) != 1 || runs[0].File != "part.nc" {
 		t.Fatalf("restored runs = %+v", runs)
+	}
+}
+
+func TestImportBackupRejectsUnsafeState(t *testing.T) {
+	svc, _ := newService(t)
+	for _, state := range []store.Snapshot{
+		{Entries: map[string]store.Entry{"/etc/passwd": {Path: "/etc/passwd", Sync: store.RemoteOnly}}},
+		{Jobs: []store.Job{{ID: 1, Kind: store.JobDelete, Path: "/sd/config", State: store.Queued}}},
+		{Jobs: []store.Job{{ID: 1, Kind: store.JobRename, Path: "/sd/gcodes/a.nc", DestPath: "/sd/config", State: store.Queued}}},
+		{Jobs: []store.Job{{ID: 1, Kind: "execute", Path: "/sd/gcodes/a.nc", State: store.Queued}}},
+		{Entries: map[string]store.Entry{"/sd/gcodes/a.nc": {Path: "/sd/gcodes/a.nc", Sync: "impossible"}}},
+	} {
+		err := svc.ImportBackup(Backup{Version: 1, State: state})
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("ImportBackup(%+v) = %v, want ErrInvalidArgument", state, err)
+		}
+	}
+}
+
+func TestImportBackupConvertsRunningJobsToFailed(t *testing.T) {
+	svc, st := newService(t)
+	backup := Backup{Version: 1, State: store.Snapshot{
+		Jobs: []store.Job{{ID: 1, Kind: store.JobDelete, Path: "/sd/gcodes/a.nc", State: store.Running}},
+	}}
+	if err := svc.ImportBackup(backup); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := st.GetJob(1)
+	if !ok || job.State != store.Failed || job.LastError == "" {
+		t.Fatalf("restored running job = %+v ok=%v, want visible failed job", job, ok)
+	}
+}
+
+func TestReadCacheRejectsPathOutsideCacheDirectory(t *testing.T) {
+	svc, st := newService(t)
+	if err := st.PutEntry(store.Entry{
+		Path:       "/sd/gcodes/leak.nc",
+		CachePath:  "/etc/hosts",
+		CacheState: store.CacheReady,
+		Sync:       store.Synced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rc, _, err := svc.ReadCache("leak.nc"); !errors.Is(err, ErrNotCached) {
+		if rc != nil {
+			rc.Close()
+		}
+		t.Fatalf("ReadCache outside cache = %v, want ErrNotCached", err)
 	}
 }
 

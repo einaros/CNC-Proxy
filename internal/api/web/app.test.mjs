@@ -148,3 +148,44 @@ test("consumeStatusFeedback emits a terminal result once and clears it", () => {
   assert.equal(emitted.length, 2, "a new terminal result is emitted");
   assert.equal(emitted[1].text, "Move failed: machine is not ready.");
 });
+
+test("file row ownership preserves pointer and pending action nodes", () => {
+  const active = {};
+  const fileActions = new Map();
+  const row = {
+    dataset: { filePath: "/sd/gcodes/part.nc", fileAction: "" },
+    contains: (node) => node === active,
+    querySelector: () => null,
+  };
+  const ctx = buildContext(["fileRowLocallyOwned"], [], {
+    document: { activeElement: null },
+    state: { fileActions },
+    row,
+    active,
+  });
+  assert.equal(vm.runInContext("fileRowLocallyOwned(row)", ctx), false);
+  vm.runInContext("document.activeElement = active", ctx);
+  assert.equal(vm.runInContext("fileRowLocallyOwned(row)", ctx), true, "focused action owns its row");
+  vm.runInContext("document.activeElement = null; state.fileActions.set(row.dataset.filePath, 'Deleting...'); row.dataset.fileAction = 'Deleting...'", ctx);
+  assert.equal(vm.runInContext("fileRowLocallyOwned(row)", ctx), true, "rendered pending action owns its row");
+  vm.runInContext("state.fileActions.clear()", ctx);
+  assert.equal(vm.runInContext("fileRowLocallyOwned(row)", ctx), false, "terminal action releases its row");
+});
+
+test("file action lifecycle exposes pending state and releases it", () => {
+  const renders = [];
+  const notices = [];
+  const state = { fileActions: new Map() };
+  const ctx = buildContext(["beginFileAction", "endFileAction"], [], {
+    state,
+    renderFiles: () => renders.push("render"),
+    setNotice: (...args) => notices.push(args),
+  });
+  vm.runInContext("beginFileAction('/sd/gcodes/part.nc', 'Deleting...', 'Deleting: part.nc')", ctx);
+  assert.equal(state.fileActions.get("/sd/gcodes/part.nc"), "Deleting...");
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0][3].timeoutMs, 0, "pending feedback remains until terminal result");
+  vm.runInContext("endFileAction('/sd/gcodes/part.nc')", ctx);
+  assert.equal(state.fileActions.size, 0);
+  assert.equal(renders.length, 2);
+});

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/client"
+	"github.com/uwin/cnc-proxy/internal/filepolicy"
 	"github.com/uwin/cnc-proxy/internal/quicklz"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -142,13 +143,13 @@ func (e *Engine) drain() {
 	// jobs for those paths must wait to preserve per-path ordering.
 	deferredPaths := make(map[string]bool)
 	for _, job := range e.store.QueuedJobs() {
-		if deferredPaths[job.Path] {
+		if jobTouchesDeferredPath(job, deferredPaths) {
 			continue // an earlier job for this path is pending; keep order
 		}
 		if !e.shouldAttempt(job) {
 			// Backing off after a failure; skip it (and later same-path jobs)
 			// this pass — the next tick retries once its backoff elapses.
-			deferredPaths[job.Path] = true
+			deferJobPaths(job, deferredPaths)
 			continue
 		}
 		ran, err := e.runJob(job)
@@ -161,8 +162,19 @@ func (e *Engine) drain() {
 			// Attempted but failed: defer this path (don't busy-retry within the
 			// pass) but keep draining other paths.
 			log.Printf("synceng: job %d (%s %s) failed: %v", job.ID, job.Kind, job.Path, err)
-			deferredPaths[job.Path] = true
+			deferJobPaths(job, deferredPaths)
 		}
+	}
+}
+
+func jobTouchesDeferredPath(job store.Job, deferred map[string]bool) bool {
+	return deferred[job.Path] || (job.DestPath != "" && deferred[job.DestPath])
+}
+
+func deferJobPaths(job store.Job, deferred map[string]bool) {
+	deferred[job.Path] = true
+	if job.DestPath != "" {
+		deferred[job.DestPath] = true
 	}
 }
 
@@ -230,9 +242,23 @@ func isMachineCompletedError(err error) bool {
 
 // execute performs the actual protocol operation and updates catalog state.
 func (e *Engine) execute(c *client.Conn, job store.Job) error {
+	if !filepolicy.IsGcodePath(job.Path) {
+		return fmt.Errorf("synceng: refusing job path outside /sd/gcodes: %q", job.Path)
+	}
+	if job.Kind == store.JobRename && !filepolicy.IsGcodePath(job.DestPath) {
+		return fmt.Errorf("synceng: refusing rename destination outside /sd/gcodes: %q", job.DestPath)
+	}
 	switch job.Kind {
 	case store.JobMkdir:
-		return c.Mkdir(job.Path, e.opTimeout)
+		if err := c.Mkdir(job.Path, e.opTimeout); err != nil {
+			return err
+		}
+		if _, _, err := e.store.SetEntrySyncIfMatch(job.Path, store.Synced, "", func(entry store.Entry) bool {
+			return entry.IsDir && entry.Sync == store.PendingUpload
+		}); err != nil {
+			return machineCompletedError{job: job, err: err}
+		}
+		return nil
 
 	case store.JobDelete:
 		if _, _, err := e.store.SetEntrySyncIf(job.Path, store.Deleting, "", store.PendingDelete, store.Deleting); err != nil {
@@ -252,15 +278,16 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 		return nil
 
 	case store.JobRename:
-		if err := e.store.SetEntrySync(job.Path, store.PendingRename, ""); err != nil {
-			return err
-		}
 		if err := c.Rename(job.Path, job.DestPath, e.opTimeout); err != nil {
 			return err
 		}
 		// Move the catalog entry to the new path.
 		if err := e.store.Batch(func(b *store.Batch) error {
-			if entry, ok := b.GetEntry(job.Path); ok {
+			if entry, ok := b.GetEntry(job.Path); ok && renameEntryMatchesJob(entry, job) {
+				if dest, exists := b.GetEntry(job.DestPath); exists && hasLocalIntent(dest.Sync) {
+					b.DeleteEntry(job.Path)
+					return nil
+				}
 				entry.Path = job.DestPath
 				entry.Sync = store.Synced
 				entry.Error = ""
@@ -305,6 +332,28 @@ func (e *Engine) execute(c *client.Conn, job store.Job) error {
 	}
 }
 
+func renameEntryMatchesJob(entry store.Entry, job store.Job) bool {
+	if entry.Sync != store.PendingRename {
+		return false
+	}
+	if job.CachePath != "" && entry.CachePath != job.CachePath {
+		return false
+	}
+	if job.MD5 != "" && entry.MD5 != job.MD5 {
+		return false
+	}
+	return job.Size == 0 || entry.Size == job.Size
+}
+
+func hasLocalIntent(state store.SyncState) bool {
+	switch state {
+	case store.LocalOnly, store.PendingUpload, store.Uploading, store.PendingDelete, store.Deleting, store.PendingRename, store.Error:
+		return true
+	default:
+		return false
+	}
+}
+
 func (e *Engine) setUploadJobSync(job store.Job, state store.SyncState, errMsg string) (bool, error) {
 	_, ok, err := e.store.SetEntrySyncIfMatch(job.Path, state, errMsg, func(entry store.Entry) bool {
 		if entry.IsDir {
@@ -323,6 +372,9 @@ func (e *Engine) setUploadJobSync(job store.Job, state store.SyncState, errMsg s
 // and later verified is always of the UNCOMPRESSED content (the firmware
 // decompresses on receipt and stores that MD5), so verification is unchanged.
 func (e *Engine) doUpload(c *client.Conn, job store.Job) error {
+	if !filepolicy.IsWithinDir(e.store.CacheDir(), job.CachePath) {
+		return fmt.Errorf("synceng: refusing upload cache path outside cache directory")
+	}
 	// .bin firmware images are never compressed (matches the controller).
 	if e.compress && job.Size > quicklz.BlockSize && !strings.HasSuffix(job.Path, ".bin") && e.lzSupported(c) {
 		return e.uploadCompressed(c, job)

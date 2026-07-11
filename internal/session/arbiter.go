@@ -282,9 +282,8 @@ func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) err
 		}
 		return a.withInjection(inj, requireIdle, needStatusRefresh, fn)
 	}
-
-	conn, err := a.acquireConnLocked()
 	a.mu.Unlock()
+	conn, err := a.acquireOwnerConn()
 	if err != nil {
 		return err
 	}
@@ -298,8 +297,9 @@ func (a *Arbiter) WithMachine(requireIdle bool, fn func(*client.Conn) error) err
 		}
 	}
 	if err := fn(conn); err != nil {
-		// On any connection-level error, drop it so the next call reconnects.
-		a.dropOwnerConn(conn)
+		if client.IsConnectionError(err) {
+			a.dropOwnerConn(conn)
+		}
 		return err
 	}
 	return nil
@@ -357,8 +357,8 @@ func (a *Arbiter) AcquireJog(ctx context.Context) (*JogLease, error) {
 		}, nil
 	}
 
-	conn, err := a.acquireConnLocked()
 	a.mu.Unlock()
+	conn, err := a.acquireOwnerConn()
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +367,7 @@ func (a *Arbiter) AcquireJog(ctx context.Context) (*JogLease, error) {
 		Conn: conn,
 		Mode: mode,
 		release: func(err error) {
-			if err != nil {
+			if client.IsConnectionError(err) {
 				a.mu.Lock()
 				if a.ownerConn == conn {
 					a.ownerConn.Close()
@@ -519,12 +519,22 @@ func (a *Arbiter) sendControlRelay(c byte) error {
 	return cw.SendControl(c)
 }
 
-// acquireConnLocked returns the cached owner connection, dialing if needed. The
-// caller must hold a.mu.
-func (a *Arbiter) acquireConnLocked() (*client.Conn, error) {
-	if a.ownerConn != nil {
-		return a.ownerConn, nil
+// acquireOwnerConn returns the cached owner connection, dialing if needed.
+// Dialing occurs without a.mu so Mode, EnterRelay, and out-of-band controls
+// remain responsive while the machine is unreachable.
+func (a *Arbiter) acquireOwnerConn() (*client.Conn, error) {
+	a.mu.Lock()
+	if a.mode != ModeOwner {
+		a.mu.Unlock()
+		return nil, ErrRelayActive
 	}
+	if a.ownerConn != nil {
+		conn := a.ownerConn
+		a.mu.Unlock()
+		return conn, nil
+	}
+	a.mu.Unlock()
+
 	conn, err := a.dial()
 	if err != nil {
 		return nil, err
@@ -533,8 +543,23 @@ func (a *Arbiter) acquireConnLocked() (*client.Conn, error) {
 	// STATUS_RES frames keep state fresh even while another command holds opMu
 	// and starves the periodic poll loop.
 	conn.SetStatusObserver(func(payload string) { a.tracker.ObserveStatusPayload(payload) })
-	a.ownerConn = conn
-	return conn, nil
+
+	a.mu.Lock()
+	switch {
+	case a.mode != ModeOwner:
+		a.mu.Unlock()
+		conn.Close()
+		return nil, ErrRelayActive
+	case a.ownerConn != nil:
+		existing := a.ownerConn
+		a.mu.Unlock()
+		conn.Close()
+		return existing, nil
+	default:
+		a.ownerConn = conn
+		a.mu.Unlock()
+		return conn, nil
+	}
 }
 
 // Poll runs the owner-mode state poll loop until ctx is canceled. It queries

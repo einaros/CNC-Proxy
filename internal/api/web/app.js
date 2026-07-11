@@ -46,7 +46,9 @@ const state = {
   machineLearnFeedbackKind: "",
   macroRunning: false,
   activeTab: "active-job",
-  filesLoaded: false,
+	filesLoaded: false,
+	fileActions: new Map(),
+	fileRenderTimer: null,
   currentDir: "",
   controlPendingAction: "",
   lastControlResult: null,
@@ -3237,6 +3239,10 @@ function normalizeGamepadMacroOrder() {
 }
 
 function renderFiles() {
+	if (state.fileRenderTimer) {
+		clearTimeout(state.fileRenderTimer);
+		state.fileRenderTimer = null;
+	}
   renderFileSummary();
   renderFolderChrome();
   renderFolderTree();
@@ -3259,11 +3265,15 @@ function renderFiles() {
     const key = (f.virtual ? "virtual:" : "entry:") + relPath(f.path);
     const signature = fileRowSignature(f, q);
     let tr = existing.get(key);
-    if (tr) {
-      existing.delete(key);
-      if (tr.dataset.fileSignature !== signature) {
-        buildFileRow(tr, f, q);
-        tr.dataset.fileSignature = signature;
+		if (tr) {
+			existing.delete(key);
+			if (tr.dataset.fileSignature !== signature) {
+				if (fileRowLocallyOwned(tr)) {
+					scheduleFileRender();
+				} else {
+					buildFileRow(tr, f, q);
+					tr.dataset.fileSignature = signature;
+				}
       }
     } else {
       tr = document.createElement("tr");
@@ -3275,6 +3285,19 @@ function renderFiles() {
     if (ref !== tr) tbody.insertBefore(tr, ref);
   });
   for (const tr of existing.values()) tr.remove();
+}
+
+function fileRowLocallyOwned(tr) {
+	const action = state.fileActions.get(tr.dataset.filePath) || "";
+	return tr.contains(document.activeElement) || !!tr.querySelector(":active") || (!!action && tr.dataset.fileAction === action);
+}
+
+function scheduleFileRender() {
+	if (state.fileRenderTimer) return;
+	state.fileRenderTimer = setTimeout(() => {
+		state.fileRenderTimer = null;
+		renderFiles();
+	}, 250);
 }
 
 function fileRowSignature(f, q) {
@@ -3291,11 +3314,14 @@ function fileRowSignature(f, q) {
     retry ? retry.id + "/" + retryButtonText(retry) : "",
     canDiscardFile(f) ? 1 : 0,
     canSelectGcodeFile(f) ? 1 : 0,
-    state.activeSelectPendingPath === f.path ? 1 : 0,
+		state.activeSelectPendingPath === f.path ? 1 : 0,
+		state.fileActions.get(f.path) || "",
   ]);
 }
 
 function buildFileRow(tr, f, q) {
+	tr.dataset.filePath = f.path;
+	tr.dataset.fileAction = state.fileActions.get(f.path) || "";
   const label = SYNC_LABEL[f.sync] || f.sync || "-";
   const type = f.is_dir ? (f.virtual ? "folder" : "dir") : "file";
   tr.innerHTML = `
@@ -3334,6 +3360,16 @@ function buildFileRow(tr, f, q) {
 }
 
 function appendFileActions(actions, f) {
+	const pending = state.fileActions.get(f.path);
+	if (pending) {
+		const btn = document.createElement("button");
+		btn.type = "button";
+		btn.textContent = pending;
+		btn.disabled = true;
+		btn.setAttribute("aria-busy", "true");
+		actions.append(btn);
+		return;
+	}
   const failed = failedJobsForPath(f.path);
   const retry = preferredRetryJob(failed);
   if (retry) {
@@ -4601,59 +4637,82 @@ async function doMkdir() {
 }
 
 async function doDelete(path) {
-  if (!confirm("Delete " + relPath(path) + "?")) return;
-  try {
+	if (!confirm("Delete " + relPath(path) + "?")) return;
+	beginFileAction(path, "Deleting...", "Deleting: " + relPath(path));
+	try {
     await request(apiFileURL(path), { method: "DELETE" });
     setNotice("Delete accepted: " + relPath(path), "ok", "files-action");
-  } catch (e) {
-    setNotice("Delete failed: " + e.message, "error", "files-action");
-  }
+	} catch (e) {
+		setNotice("Delete failed: " + e.message, "error", "files-action");
+	} finally {
+		endFileAction(path);
+	}
 }
 
 async function retryJob(job) {
-  if (!job) return;
-  try {
+	if (!job) return;
+	beginFileAction(job.path, "Retrying...", retryButtonText(job) + ": " + relPath(job.path));
+	try {
     await request("/api/files/retry", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ job_id: job.id }),
     });
     setNotice(retryButtonText(job) + " queued: " + relPath(job.path), "ok", "files-action");
-  } catch (e) {
-    setNotice("Retry failed: " + e.message, "error", "files-action");
-  }
+	} catch (e) {
+		setNotice("Retry failed: " + e.message, "error", "files-action");
+	} finally {
+		endFileAction(job.path);
+	}
 }
 
 async function discardFile(path) {
-  if (!confirm("Discard local state for " + relPath(path) + "? This does not delete anything from the machine.")) return;
-  try {
+	if (!confirm("Discard local state for " + relPath(path) + "? This does not delete anything from the machine.")) return;
+	beginFileAction(path, "Discarding...", "Discarding local state: " + relPath(path));
+	try {
     await request("/api/files/discard", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
     setNotice("Discarded local state: " + relPath(path), "ok", "files-action");
-  } catch (e) {
-    setNotice("Discard failed: " + e.message, "error", "files-action");
-  }
+	} catch (e) {
+		setNotice("Discard failed: " + e.message, "error", "files-action");
+	} finally {
+		endFileAction(path);
+	}
 }
 
 async function doRename(path) {
   const currentName = basename(path);
   const nextName = prompt("Rename to:", currentName);
   if (!nextName || nextName === currentName) return;
-  const dir = dirname(path);
-  const to = dir ? dir + "/" + nextName : nextName;
-  try {
+	const dir = dirname(path);
+	const to = dir ? dir + "/" + nextName : nextName;
+	beginFileAction(path, "Renaming...", "Renaming: " + relPath(path));
+	try {
     await request("/api/files/rename", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ from: path, to }),
     });
     setNotice("Rename queued: " + relPath(path) + " -> " + to, "ok", "files-action");
-  } catch (e) {
-    setNotice("Rename failed: " + e.message, "error", "files-action");
-  }
+	} catch (e) {
+		setNotice("Rename failed: " + e.message, "error", "files-action");
+	} finally {
+		endFileAction(path);
+	}
+}
+
+function beginFileAction(path, buttonLabel, notice) {
+	state.fileActions.set(path, buttonLabel);
+	setNotice(notice, "info", "files-action", { timeoutMs: 0, force: true });
+	renderFiles();
+}
+
+function endFileAction(path) {
+	state.fileActions.delete(path);
+	renderFiles();
 }
 
 function submitGcode(line) {

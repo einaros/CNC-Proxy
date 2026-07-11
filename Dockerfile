@@ -1,6 +1,6 @@
 # Build stage: static binary, no cgo (the proxy has no cgo deps; only the
 # optional tray app does, and it is not part of the image).
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.5-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

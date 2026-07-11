@@ -25,6 +25,7 @@ type FakeMachine struct {
 	dirs                map[string]bool   // created directories
 	status              string            // payload for "?" (e.g. "<Idle|...>")
 	statusReplyDelay    time.Duration     // optional test hook: delay "?" replies
+	probeReplyDelay     time.Duration     // optional test hook: delay G30/G38 replies
 	dropStatusReplies   bool              // optional test hook: ignore "?" replies
 	failCmd             map[string]bool   // command prefixes to fail (for error-path tests)
 	ftype               string            // advertised upload type ("lz" enables compression)
@@ -147,6 +148,14 @@ func (m *FakeMachine) SetStatusReplyDelay(d time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statusReplyDelay = d
+}
+
+// SetProbeReplyDelay delays G30/G38 contact replies. It keeps the fake from
+// unrealistically answering a physical probe synchronously.
+func (m *FakeMachine) SetProbeReplyDelay(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.probeReplyDelay = d
 }
 
 // SetDropStatusReplies makes the fake ignore `?` status polls. It is a test
@@ -1076,9 +1085,16 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		if !ok {
 			reply, ok = m.defaultGcodeReplyLocked(line, time.Now())
 		}
+		delay := time.Duration(0)
+		if isFakeProbeCommand(line) {
+			delay = m.probeReplyDelay
+		}
 		m.mu.Unlock()
 		resp, _ := protocol.ClassifyGcode(line)
 		if ok {
+			if delay > 0 {
+				time.Sleep(delay)
+			}
 			m.send(c, protocol.CmdNormalInfo, reply+"\r\n")
 		} else if resp == protocol.ReplyExpected {
 			// A reply-expected command with no explicitly-configured reply still
@@ -1089,6 +1105,22 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 	default:
 		m.send(c, protocol.CmdLoadError, "unknown\r\n")
 	}
+}
+
+func isFakeProbeCommand(line string) bool {
+	norm := strings.ToLower(strings.TrimSpace(protocol.Unescape(line)))
+	if strings.HasPrefix(norm, "n") && len(norm) > 1 && norm[1] >= '0' && norm[1] <= '9' {
+		if i := strings.IndexAny(norm, " \t"); i >= 0 {
+			norm = strings.TrimSpace(norm[i+1:])
+		}
+	}
+	if i := strings.IndexAny(norm, " \t"); i >= 0 {
+		norm = norm[:i]
+	}
+	if i := strings.IndexByte(norm, '.'); i >= 0 {
+		norm = norm[:i]
+	}
+	return norm == "g30" || norm == "g38"
 }
 
 // isGcodeLine reports whether a console line is a gcode/MDI command (G/M/T/S
@@ -2596,11 +2628,6 @@ func fakeWordValues(words []fakeGcodeWord, unit float64) (map[byte]float64, map[
 	return values, has
 }
 
-func fakeAxisTargets(words []fakeGcodeWord, unit float64) map[byte]float64 {
-	values, has := fakeWordValues(words, unit)
-	return fakeAxisValues(values, has)
-}
-
 func fakeAxisValues(values map[byte]float64, has map[byte]bool) map[byte]float64 {
 	out := map[byte]float64{}
 	for _, axis := range fakeAxisLetters {
@@ -2702,15 +2729,6 @@ func formatFakeM114Axes(vals []float64) string {
 		return "X:0.0000 Y:0.0000 Z:0.0000"
 	}
 	return strings.Join(parts, " ")
-}
-
-func formatFakeProbeAxes(vals []float64) string {
-	vals = ensureFakeAxisLen(append([]float64(nil), vals...), 3)
-	parts := make([]string, 3)
-	for i := 0; i < 3; i++ {
-		parts[i] = strconv.FormatFloat(vals[i], 'f', 4, 64)
-	}
-	return strings.Join(parts, ",")
 }
 
 func formatFakeProbePoint(p fakeVec3) string {

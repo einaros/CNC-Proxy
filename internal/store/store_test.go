@@ -141,26 +141,26 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 		}},
 		MacroButtons: []MacroSlot{{ID: "slot1", MacroID: "probe", Region: "toolbar", Order: 4}},
 		Log:          LogSettings{Filter: "jog", Autoscroll: false},
-			Machine: MachineUI{
-				WorkArea:      WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
-				Origin:        XYPoint{X: 1, Y: 2},
-				SavedOrigins:  []SavedOrigin{{ID: "fixture", Label: "Fixture", Origin: XYPoint{X: -12.5, Y: -20}}},
-				FeedMinMMMin:  100,
-				FeedMaxMMMin:  1800,
-				TapFeedMMMin:  700,
-				SafeZMM:       -1.5,
-				SafeZDisabled: true,
-				Learned: MachineLearned{
-					Source:        "firmware",
-					Identity:      MachineIdentity{Model: "CarveraAir", Version: "1.2.3", FileType: "lz"},
-					WorkArea:      WorkArea{XMin: -302, XMax: 0, YMin: -212, YMax: 0},
-					Feed:          MachineFeedProfile{MaxXYMMMin: 3000},
-					Config:        map[string]string{"soft_endstop.x_min": "-302.0"},
-					ConfigNumbers: map[string]float64{"alpha_max_rate": 3000},
-					ConfigBools:   map[string]bool{"soft_endstop.enable": false},
-					Diagnostics:   map[string][]float64{"E": {0, 1, 0, 1, 1, 0}},
-				},
+		Machine: MachineUI{
+			WorkArea:      WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
+			Origin:        XYPoint{X: 1, Y: 2},
+			SavedOrigins:  []SavedOrigin{{ID: "fixture", Label: "Fixture", Origin: XYPoint{X: -12.5, Y: -20}}},
+			FeedMinMMMin:  100,
+			FeedMaxMMMin:  1800,
+			TapFeedMMMin:  700,
+			SafeZMM:       -1.5,
+			SafeZDisabled: true,
+			Learned: MachineLearned{
+				Source:        "firmware",
+				Identity:      MachineIdentity{Model: "CarveraAir", Version: "1.2.3", FileType: "lz"},
+				WorkArea:      WorkArea{XMin: -302, XMax: 0, YMin: -212, YMax: 0},
+				Feed:          MachineFeedProfile{MaxXYMMMin: 3000},
+				Config:        map[string]string{"soft_endstop.x_min": "-302.0"},
+				ConfigNumbers: map[string]float64{"alpha_max_rate": 3000},
+				ConfigBools:   map[string]bool{"soft_endstop.enable": false},
+				Diagnostics:   map[string][]float64{"E": {0, 1, 0, 1, 1, 0}},
 			},
+		},
 		Gamepad: Gamepad{
 			Axes: GamepadAxes{
 				X: GamepadAxis{Axis: 2, Scale: 0.5},
@@ -193,12 +193,12 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	if got.Log.Filter != "jog" || got.Log.Autoscroll {
 		t.Fatalf("reopened log settings = %+v", got.Log)
 	}
-		if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.FeedMinMMMin != 100 || got.Machine.FeedMaxMMMin != 1800 || got.Machine.TapFeedMMMin != 700 || got.Machine.SafeZMM != -1.5 || !got.Machine.SafeZDisabled {
-			t.Fatalf("reopened machine settings = %+v", got.Machine)
-		}
-		if got.Machine.Learned.Identity.Model != "CarveraAir" || got.Machine.Learned.ConfigNumbers["alpha_max_rate"] != 3000 || len(got.Machine.Learned.Diagnostics["E"]) != 6 {
-			t.Fatalf("reopened learned machine profile = %+v", got.Machine.Learned)
-		}
+	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.FeedMinMMMin != 100 || got.Machine.FeedMaxMMMin != 1800 || got.Machine.TapFeedMMMin != 700 || got.Machine.SafeZMM != -1.5 || !got.Machine.SafeZDisabled {
+		t.Fatalf("reopened machine settings = %+v", got.Machine)
+	}
+	if got.Machine.Learned.Identity.Model != "CarveraAir" || got.Machine.Learned.ConfigNumbers["alpha_max_rate"] != 3000 || len(got.Machine.Learned.Diagnostics["E"]) != 6 {
+		t.Fatalf("reopened learned machine profile = %+v", got.Machine.Learned)
+	}
 	if len(got.Machine.SavedOrigins) != 1 || got.Machine.SavedOrigins[0].Label != "Fixture" || got.Machine.SavedOrigins[0].Origin.X != -12.5 {
 		t.Fatalf("reopened saved origins = %+v", got.Machine.SavedOrigins)
 	}
@@ -519,5 +519,49 @@ func TestPruneDoneJobs(t *testing.T) {
 	jobs := s.ListJobs()
 	if len(jobs) != 1 || jobs[0].State != Failed {
 		t.Errorf("after prune = %+v, want only the failed job", jobs)
+	}
+}
+
+func TestPruneFailedJobsBoundsEachPathAndPreservesLiveJobs(t *testing.T) {
+	s, _ := Open("")
+	for i := 0; i < 25; i++ {
+		job, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpdateJob(job.ID, func(j *Job) { j.State = Failed }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queued, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/a.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.Enqueue(Job{Kind: JobUpload, Path: "/sd/gcodes/b.nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateJob(other.ID, func(j *Job) { j.State = Failed }); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := s.PruneFailedJobs(20)
+	if err != nil || removed != 5 {
+		t.Fatalf("PruneFailedJobs removed=%d err=%v, want 5", removed, err)
+	}
+	failedA := 0
+	for _, job := range s.ListJobs() {
+		if job.Path == "/sd/gcodes/a.nc" && job.State == Failed {
+			failedA++
+		}
+	}
+	if failedA != 20 {
+		t.Fatalf("retained failed a.nc jobs = %d, want 20", failedA)
+	}
+	if job, ok := s.GetJob(queued.ID); !ok || job.State != Queued {
+		t.Fatalf("live queued job = %+v ok=%v, want preserved", job, ok)
+	}
+	if job, ok := s.GetJob(other.ID); !ok || job.State != Failed {
+		t.Fatalf("other-path failed job = %+v ok=%v, want preserved", job, ok)
 	}
 }

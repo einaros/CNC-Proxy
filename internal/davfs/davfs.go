@@ -29,10 +29,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/webdav"
 
+	"github.com/uwin/cnc-proxy/internal/filepolicy"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
@@ -240,8 +242,11 @@ func (fs *FS) RemoveAll(ctx context.Context, name string) error {
 		return nil // junk was never synced; deleting it is a no-op success
 	}
 	if err := fs.svc.Delete(svcPath(name)); err != nil {
-		if err == service.ErrNotFound {
+		if errors.Is(err, service.ErrNotFound) {
 			return os.ErrNotExist
+		}
+		if errors.Is(err, service.ErrDirectoryNotEmpty) {
+			return syscall.ENOTEMPTY
 		}
 		return err
 	}
@@ -253,8 +258,11 @@ func (fs *FS) Rename(ctx context.Context, oldName, newName string) error {
 		return nil // junk paths aren't tracked; renaming them is a no-op
 	}
 	if err := fs.svc.Rename(svcPath(oldName), svcPath(newName)); err != nil {
-		if err == service.ErrNotFound {
+		if errors.Is(err, service.ErrNotFound) {
 			return os.ErrNotExist
+		}
+		if errors.Is(err, service.ErrDirectoryNotEmpty) {
+			return syscall.ENOTEMPTY
 		}
 		return err
 	}
@@ -426,13 +434,7 @@ func isRoot(name string) bool {
 // Windows writes "Thumbs.db"/"desktop.ini". We treat these as nonexistent so
 // the OS believes its bookkeeping succeeded while nothing reaches the machine.
 func isJunk(name string) bool {
-	base := path.Base(strings.Trim(path.Clean("/"+name), "/"))
-	switch base {
-	case ".DS_Store", ".localized", "Thumbs.db", "desktop.ini", ".fseventsd",
-		".Spotlight-V100", ".Trashes", ".TemporaryItems", ".apdisk":
-		return true
-	}
-	return strings.HasPrefix(base, "._")
+	return filepolicy.IsJunk(name)
 }
 
 type requestMethodKey struct{}
