@@ -18,6 +18,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/protocol"
+	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
@@ -791,5 +792,184 @@ func TestZeroByteUploadSupersededBeforeSettleUploadsContent(t *testing.T) {
 		if j.Size == 0 && j.State != store.Done {
 			t.Fatalf("zero placeholder job = %+v, want done", j)
 		}
+	}
+}
+
+func contentMD5(b []byte) string {
+	sum := md5.Sum(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestRenameThenWriteToSourceKeepsNewerContent: a write to the rename's source
+// path that lands after the rename is queued must not be lost. The machine mv
+// still happens first (per-path FIFO), but the completion must not move the
+// NEWER source entry to the destination or silently drop its queued upload.
+func TestRenameThenWriteToSourceKeepsNewerContent(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	tr.Observe(machine.Idle)
+
+	src := "/sd/gcodes/src.nc"
+	dst := "/sd/gcodes/dst.nc"
+	oldContent := []byte("old source content\n")
+	m.PutFile(src, oldContent)
+	st.PutEntry(store.Entry{Path: src, Size: int64(len(oldContent)), MD5: contentMD5(oldContent), Sync: store.PendingRename})
+	st.Enqueue(store.Job{Kind: store.JobRename, Path: src, DestPath: dst, MD5: contentMD5(oldContent), Size: int64(len(oldContent))})
+
+	// A newer write to the source path arrives before the queue drains.
+	newCache, newMD5, newSize := writeCache(t, t.TempDir(), 300)
+	st.PutEntry(store.Entry{Path: src, Size: newSize, MD5: newMD5, CachePath: newCache, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: src, CachePath: newCache, MD5: newMD5, Size: newSize})
+
+	eng.drain()
+
+	// The rename moved the OLD content to the destination on the machine...
+	if got, ok := m.File(dst); !ok || !bytes.Equal(got, oldContent) {
+		t.Fatalf("machine %s = %d bytes ok=%v, want the pre-rename content", dst, len(got), ok)
+	}
+	// ...and the NEWER write to the source was uploaded, not silently dropped.
+	gotSrc, ok := m.File(src)
+	if !ok {
+		t.Fatalf("machine %s missing: the newer write was lost", src)
+	}
+	if contentMD5(gotSrc) != newMD5 {
+		t.Fatalf("machine %s md5 = %s, want the newer write's %s", src, contentMD5(gotSrc), newMD5)
+	}
+	srcEntry, ok := st.GetEntry(src)
+	if !ok || srcEntry.Sync != store.Synced || srcEntry.MD5 != newMD5 {
+		t.Fatalf("source entry = %+v ok=%v, want synced newer content", srcEntry, ok)
+	}
+	// No job may be left queued, and no entry may claim an MD5 the machine
+	// does not hold.
+	if j, ok := st.NextQueued(); ok {
+		t.Fatalf("job left queued after drain: %+v", j)
+	}
+	if dstEntry, ok := st.GetEntry(dst); ok {
+		if got, _ := m.File(dst); dstEntry.MD5 != "" && dstEntry.MD5 != contentMD5(got) {
+			t.Fatalf("destination entry md5 %s does not match machine content %s", dstEntry.MD5, contentMD5(got))
+		}
+	}
+}
+
+// TestDeferredRenameDoesNotClobberDestinationUpload: while a rename into B is
+// backing off, a fresh upload to B must not run ahead of it (deferral must key
+// on DestPath too) — otherwise the later mv would overwrite the fresh content.
+func TestDeferredRenameDoesNotClobberDestinationUpload(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	eng.baseBackoff = time.Hour // keep the failed rename backing off
+	tr.Observe(machine.Idle)
+
+	src := "/sd/gcodes/move-src.nc"
+	dst := "/sd/gcodes/move-dst.nc"
+	oldContent := []byte("content moved by rename\n")
+	m.PutFile(src, oldContent)
+	st.PutEntry(store.Entry{Path: src, Size: int64(len(oldContent)), MD5: contentMD5(oldContent), Sync: store.PendingRename})
+	renameJob, err := st.Enqueue(store.Job{Kind: store.JobRename, Path: src, DestPath: dst, MD5: contentMD5(oldContent), Size: int64(len(oldContent))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate one failed attempt so the rename is backing off.
+	if err := st.UpdateJob(renameJob.ID, func(j *store.Job) { j.Attempts = 1; j.LastError = "transient mv failure" }); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh upload to the rename's DESTINATION arrives while it backs off.
+	freshCache, freshMD5, freshSize := writeCache(t, t.TempDir(), 250)
+	st.PutEntry(store.Entry{Path: dst, Size: freshSize, MD5: freshMD5, CachePath: freshCache, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobUpload, Path: dst, CachePath: freshCache, MD5: freshMD5, Size: freshSize})
+
+	eng.drain()
+	if _, ok := m.File(dst); ok {
+		t.Fatal("upload to the destination ran ahead of the deferred rename into it")
+	}
+
+	// Let the backoff elapse; the rename then the fresh upload run in order.
+	eng.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	eng.drain()
+
+	got, ok := m.File(dst)
+	if !ok {
+		t.Fatalf("machine %s missing after drains", dst)
+	}
+	if contentMD5(got) != freshMD5 {
+		t.Fatalf("machine %s md5 = %s, want the fresh upload's %s (rename clobbered it)", dst, contentMD5(got), freshMD5)
+	}
+	dstEntry, ok := st.GetEntry(dst)
+	if !ok || dstEntry.Sync != store.Synced || dstEntry.MD5 != freshMD5 {
+		t.Fatalf("destination entry = %+v ok=%v, want synced fresh content", dstEntry, ok)
+	}
+	if _, ok := m.File(src); ok {
+		t.Fatalf("machine still has %s after rename drained", src)
+	}
+	if j, ok := st.NextQueued(); ok {
+		t.Fatalf("job left queued after drains: %+v", j)
+	}
+}
+
+// TestMkdirSettlesEntryToSynced: a successful JobMkdir must settle the catalog
+// entry to synced; leaving it pending_upload makes a later delete local-discard
+// (no machine rm) and reconcile then resurrects the directory.
+func TestMkdirSettlesEntryToSynced(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	tr.Observe(machine.Idle)
+
+	dir := "/sd/gcodes/newdir"
+	st.PutEntry(store.Entry{Path: dir, IsDir: true, Sync: store.PendingUpload})
+	st.Enqueue(store.Job{Kind: store.JobMkdir, Path: dir})
+
+	eng.drain()
+
+	if !m.HasDir(dir) {
+		t.Fatal("mkdir never reached the machine")
+	}
+	entry, ok := st.GetEntry(dir)
+	if !ok || entry.Sync != store.Synced {
+		t.Fatalf("dir entry after mkdir = %+v ok=%v, want synced", entry, ok)
+	}
+	if job := st.ListJobs()[0]; job.State != store.Done {
+		t.Fatalf("mkdir job = %+v, want done", job)
+	}
+}
+
+// TestDeleteProxyCreatedDirIsNotResurrected drives the full mkdir->sync->
+// delete->reconcile cycle through the service: deleting a proxy-created
+// directory must issue a real machine rm, and a reconcile sweep afterwards must
+// not resurrect it. (Lives here rather than service_test.go because it needs
+// the engine's drain/reconcile, and synceng already imports service.)
+func TestDeleteProxyCreatedDirIsNotResurrected(t *testing.T) {
+	m, st, arb, tr := setup(t)
+	eng := newEngine(st, arb)
+	tr.Observe(machine.Idle)
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Mkdir("newdir"); err != nil {
+		t.Fatal(err)
+	}
+	eng.drain()
+	if !m.HasDir("/sd/gcodes/newdir") {
+		t.Fatal("mkdir never reached the machine")
+	}
+	if entry, ok := st.GetEntry("/sd/gcodes/newdir"); !ok || entry.Sync != store.Synced {
+		t.Fatalf("dir entry after mkdir drain = %+v ok=%v, want synced", entry, ok)
+	}
+
+	if err := svc.Delete("newdir"); err != nil {
+		t.Fatalf("delete proxy-created dir: %v", err)
+	}
+	eng.drain()
+	if m.HasDir("/sd/gcodes/newdir") {
+		t.Fatal("no machine rm was issued: the directory still exists on the machine")
+	}
+
+	if err := eng.Reconcile(3); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if entry, ok := st.GetEntry("/sd/gcodes/newdir"); ok {
+		t.Fatalf("deleted directory resurrected by reconcile: %+v", entry)
 	}
 }

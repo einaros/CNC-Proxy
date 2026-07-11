@@ -2575,4 +2575,5 @@ var (
 	ErrActiveGcodeUnavailable = errors.New("service: active gcode is not runnable")
 	ErrProbeUnavailable       = errors.New("service: probe unavailable")
 	ErrToolChangeUnavailable  = errors.New("service: tool change is not awaiting confirmation")
+	ErrDirectoryNotEmpty      = errors.New("service: directory not empty")
 )

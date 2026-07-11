@@ -20,59 +20,59 @@ import (
 type FakeMachine struct {
 	ln net.Listener
 
-	mu                 sync.Mutex
-	files              map[string][]byte // remote path -> contents (from uploads)
-	dirs               map[string]bool   // created directories
-	status             string            // payload for "?" (e.g. "<Idle|...>")
-	statusReplyDelay   time.Duration     // optional test hook: delay "?" replies
-	dropStatusReplies  bool              // optional test hook: ignore "?" replies
-	failCmd            map[string]bool   // command prefixes to fail (for error-path tests)
-	ftype              string            // advertised upload type ("lz" enables compression)
-	compressDownloads  bool              // if set, downloads send a .lz container
-	downloadPacketSize int               // packet size reported/sent for downloads
-	downloadPacketDelay time.Duration    // optional test hook: pace download FILE_DATA packets
-	config             map[string]string // firmware config-get-all key/value surface
-	modelName          string            // SimpleShell model name ("C1", "CA1")
-	machineModel       int               // Kernel FACTORY_SET MachineModel
-	funcSetting        int               // Kernel FACTORY_SET FuncSetting
-	probeAddr          int               // model command probe address field
-	probeModel         *fakeProbeModel   // optional machine-coordinate mesh for probe collision
-	probeLaserActive   bool              // M841/M842 and M494.1/M494.2 probe laser state
-	lastProbe          *fakeProbeResult  // last G30/G38 contact result
-	insertedTool       *fakeInsertedTool // physical tool currently inserted in the fake spindle
-	refToolMZ          float64           // calibration reference tool machine Z, matching ATC REFMZ
-	curToolMZ          float64           // last calibrated current tool machine Z, matching ATC TOOLMZ
-	gcodes             []string          // CTRL_MULTI gcode lines received (motion/MDI)
-	controls           []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
-	gcodeReplies       map[string]string // exact line -> textual reply payload
-	uploadPacketSizes  []int             // packet sizes advertised by upload senders
-	unlockDoesNotClear bool              // test hook: $X replies but leaves status unchanged
-	m999DoesNotClear   bool              // test hook: M999 replies but leaves status unchanged
-	transferActive     bool              // firmware has one global upload/download conversation
-	holdActive         bool              // feed hold freezes simulated motion/program time
-	holdStarted        time.Time
-	holdResumeState    string
-	absolute           bool    // simulated modal distance mode for ordinary G0/G1 moves
-	arcAbsolute        bool    // simulated modal arc-center mode, G90.1/G91.1
-	plane              int     // simulated modal arc plane, G17/G18/G19
-	unit               float64 // simulated modal unit scale, mm per gcode unit
-	motionMode         int     // simulated modal motion mode for ordinary axis words
-	motionCode         int     // simulated modal G motion code, including G2/G3 arcs
-	feedMMMin          float64 // simulated modal G1 feed, in mm/min
-	cycleStarted       bool
-	cycleRetractInit   bool
-	cycleInitialZ      float64
-	cycleSticky        fakeCycleSticky
-	motion             []fakeMotionSegment
-	program            *fakeProgramRun
-	simEnabled         bool
-	simShowVectors     bool
-	simSpeedScale      float64
-	simResolutionMM    float64
-	simToolShape       string
-	simToolAngleDeg    float64
-	stock              *fakeStock
-	stockSegments      []fakeStockSegment
+	mu                  sync.Mutex
+	files               map[string][]byte // remote path -> contents (from uploads)
+	dirs                map[string]bool   // created directories
+	status              string            // payload for "?" (e.g. "<Idle|...>")
+	statusReplyDelay    time.Duration     // optional test hook: delay "?" replies
+	dropStatusReplies   bool              // optional test hook: ignore "?" replies
+	failCmd             map[string]bool   // command prefixes to fail (for error-path tests)
+	ftype               string            // advertised upload type ("lz" enables compression)
+	compressDownloads   bool              // if set, downloads send a .lz container
+	downloadPacketSize  int               // packet size reported/sent for downloads
+	downloadPacketDelay time.Duration     // optional test hook: pace download FILE_DATA packets
+	config              map[string]string // firmware config-get-all key/value surface
+	modelName           string            // SimpleShell model name ("C1", "CA1")
+	machineModel        int               // Kernel FACTORY_SET MachineModel
+	funcSetting         int               // Kernel FACTORY_SET FuncSetting
+	probeAddr           int               // model command probe address field
+	probeModel          *fakeProbeModel   // optional machine-coordinate mesh for probe collision
+	probeLaserActive    bool              // M841/M842 and M494.1/M494.2 probe laser state
+	lastProbe           *fakeProbeResult  // last G30/G38 contact result
+	insertedTool        *fakeInsertedTool // physical tool currently inserted in the fake spindle
+	refToolMZ           float64           // calibration reference tool machine Z, matching ATC REFMZ
+	curToolMZ           float64           // last calibrated current tool machine Z, matching ATC TOOLMZ
+	gcodes              []string          // CTRL_MULTI gcode lines received (motion/MDI)
+	controls            []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
+	gcodeReplies        map[string]string // exact line -> textual reply payload
+	uploadPacketSizes   []int             // packet sizes advertised by upload senders
+	unlockDoesNotClear  bool              // test hook: $X replies but leaves status unchanged
+	m999DoesNotClear    bool              // test hook: M999 replies but leaves status unchanged
+	transferActive      bool              // firmware has one global upload/download conversation
+	holdActive          bool              // feed hold freezes simulated motion/program time
+	holdStarted         time.Time
+	holdResumeState     string
+	absolute            bool    // simulated modal distance mode for ordinary G0/G1 moves
+	arcAbsolute         bool    // simulated modal arc-center mode, G90.1/G91.1
+	plane               int     // simulated modal arc plane, G17/G18/G19
+	unit                float64 // simulated modal unit scale, mm per gcode unit
+	motionMode          int     // simulated modal motion mode for ordinary axis words
+	motionCode          int     // simulated modal G motion code, including G2/G3 arcs
+	feedMMMin           float64 // simulated modal G1 feed, in mm/min
+	cycleStarted        bool
+	cycleRetractInit    bool
+	cycleInitialZ       float64
+	cycleSticky         fakeCycleSticky
+	motion              []fakeMotionSegment
+	program             *fakeProgramRun
+	simEnabled          bool
+	simShowVectors      bool
+	simSpeedScale       float64
+	simResolutionMM     float64
+	simToolShape        string
+	simToolAngleDeg     float64
+	stock               *fakeStock
+	stockSegments       []fakeStockSegment
 }
 
 // New starts a FakeMachine listening on a random loopback port. Call Close when

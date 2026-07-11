@@ -632,6 +632,196 @@ func TestDownloadCompressedSidecar(t *testing.T) {
 	}
 }
 
+// TestFetchToCacheDoesNotClobberConcurrentUpload guards the FetchToCache commit
+// against a local write that lands while the (slow) download is in flight. The
+// newer local write must win: its cache bytes, catalog entry, and queued upload
+// survive; the downloaded machine content is discarded.
+func TestFetchToCacheDoesNotClobberConcurrentUpload(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	tr.Observe(machine.Idle)
+
+	oldContent := bytes.Repeat([]byte("G0 X0 ; machine copy\n"), 400) // ~8.4 KB
+	seedOnMachine(t, m.Addr(), "/sd/gcodes/race-fetch.nc", oldContent)
+	if err := svc.PutRemoteOnly("race-fetch.nc", int64(len(oldContent)), time.Unix(0, 0), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the download slow enough that the concurrent write lands mid-fetch.
+	m.SetDownloadPacketSize(1024)
+	m.SetDownloadPacketDelay(60 * time.Millisecond) // ~9 packets => ~540ms
+
+	fetchDone := make(chan error, 1)
+	go func() { fetchDone <- svc.FetchToCache("race-fetch.nc") }()
+
+	// Let the fetch get in flight, then write new content to the same path.
+	time.Sleep(150 * time.Millisecond)
+	newContent := []byte("G1 X99 ; operator's newer write\n")
+	if _, err := svc.Upload("race-fetch.nc", bytes.NewReader(newContent)); err != nil {
+		t.Fatalf("concurrent upload: %v", err)
+	}
+
+	select {
+	case err := <-fetchDone:
+		if err != nil {
+			t.Fatalf("FetchToCache: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("FetchToCache did not finish")
+	}
+
+	entry, ok := svc.Lookup("race-fetch.nc")
+	if !ok {
+		t.Fatal("entry missing after fetch+upload")
+	}
+	if entry.Sync != store.PendingUpload {
+		t.Fatalf("entry sync = %q, want pending_upload (fetch must not revert the newer write)", entry.Sync)
+	}
+	if entry.MD5 != md5hex(newContent) {
+		t.Fatalf("entry md5 = %s, want the newer write's %s", entry.MD5, md5hex(newContent))
+	}
+	got, err := os.ReadFile(entry.CachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, newContent) {
+		t.Fatalf("cache = %d bytes (md5 %s), want the newer write's content", len(got), md5hex(got))
+	}
+	var queuedUploads int
+	for _, j := range svc.store.ListJobs() {
+		if j.Kind == store.JobUpload && j.Path == entry.Path && j.State == store.Queued && j.MD5 == md5hex(newContent) {
+			queuedUploads++
+		}
+	}
+	if queuedUploads != 1 {
+		t.Fatalf("jobs = %+v, want one queued upload of the newer content", svc.store.ListJobs())
+	}
+}
+
+// TestRetryStaleFailedUploadDoesNotStrandSyncedEntry guards RetryJob against a
+// Failed upload job whose content the catalog no longer holds: retrying it must
+// not drag a Synced entry back to pending_upload (where the requeued job's
+// IfMatch no-op would strand it forever).
+func TestRetryStaleFailedUploadDoesNotStrandSyncedEntry(t *testing.T) {
+	svc, st := newService(t)
+	oldContent := []byte("old content\n")
+	if _, err := svc.Upload("stale-retry.nc", bytes.NewReader(oldContent)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(1, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/stale-retry.nc", store.Error, "upload failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A newer upload of the same path replaces the content...
+	newContent := []byte("new content wins\n")
+	if _, err := svc.Upload("stale-retry.nc", bytes.NewReader(newContent)); err != nil {
+		t.Fatal(err)
+	}
+	// ...and the old failed job can never usefully run again: it must be
+	// superseded, not left Failed.
+	if job, ok := st.GetJob(1); !ok || job.State != store.Done {
+		t.Fatalf("old failed upload after replacement upload = %+v ok=%v, want superseded (done)", job, ok)
+	}
+	// Simulate the engine syncing the new upload.
+	if err := st.UpdateJob(2, func(j *store.Job) { j.State = store.Done }); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync("/sd/gcodes/stale-retry.nc", store.Synced, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retrying the stale job must not drag the entry backward. (Post-supersede
+	// it reports retry-unavailable; the entry must stay synced either way.)
+	if _, err := svc.RetryJob(1); err != nil && !errors.Is(err, ErrRetryUnavailable) {
+		t.Fatalf("RetryJob stale = %v, want nil or ErrRetryUnavailable", err)
+	}
+	entry, ok := st.GetEntry("/sd/gcodes/stale-retry.nc")
+	if !ok || entry.Sync != store.Synced || entry.MD5 != md5hex(newContent) {
+		t.Fatalf("entry after stale retry = %+v ok=%v, want synced with the new content", entry, ok)
+	}
+
+	// Same guard for a Failed job that supersede never saw (e.g. created before
+	// the entry was replaced through another path): retry may requeue it, but
+	// the mismatched entry must be left synced for the engine's IfMatch no-op.
+	staleJob, err := st.Enqueue(store.Job{
+		Kind:      store.JobUpload,
+		Path:      "/sd/gcodes/stale-retry.nc",
+		CachePath: filepath.Join(st.CacheDir(), "gone-cache"),
+		MD5:       "0123456789abcdef0123456789abcdef",
+		Size:      3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob(staleJob.ID, func(j *store.Job) {
+		j.State = store.Failed
+		j.Attempts = 8
+		j.LastError = "upload failed"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RetryJob(staleJob.ID); err != nil {
+		t.Fatalf("RetryJob mismatched stale job: %v", err)
+	}
+	entry, ok = st.GetEntry("/sd/gcodes/stale-retry.nc")
+	if !ok || entry.Sync != store.Synced || entry.MD5 != md5hex(newContent) {
+		t.Fatalf("entry after mismatched-job retry = %+v ok=%v, want untouched synced entry", entry, ok)
+	}
+}
+
+// TestDeleteNonEmptyDirRejected: deleting a directory that still has catalog
+// entries under it is rejected with a specific error and no queue/catalog
+// mutation (the chosen F4 strategy is rejection, consistent across API+davfs
+// because both go through the service boundary).
+func TestDeleteNonEmptyDirRejected(t *testing.T) {
+	svc, st := newService(t)
+	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/full", IsDir: true, Sync: store.Synced}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/full/child.nc", Sync: store.Synced}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete("full"); !errors.Is(err, ErrDirectoryNotEmpty) {
+		t.Fatalf("delete non-empty dir = %v, want ErrDirectoryNotEmpty", err)
+	}
+	if e, ok := st.GetEntry("/sd/gcodes/full"); !ok || e.Sync != store.Synced {
+		t.Fatalf("dir entry after rejected delete = %+v ok=%v, want unchanged synced", e, ok)
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("rejected delete queued jobs: %+v", jobs)
+	}
+}
+
+// TestRenameNonEmptyDirRejected mirrors TestDeleteNonEmptyDirRejected for the
+// rename surface.
+func TestRenameNonEmptyDirRejected(t *testing.T) {
+	svc, st := newService(t)
+	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/full", IsDir: true, Sync: store.Synced}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutEntry(store.Entry{Path: "/sd/gcodes/full/child.nc", Sync: store.Synced}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Rename("full", "renamed"); !errors.Is(err, ErrDirectoryNotEmpty) {
+		t.Fatalf("rename non-empty dir = %v, want ErrDirectoryNotEmpty", err)
+	}
+	if e, ok := st.GetEntry("/sd/gcodes/full"); !ok || e.Sync != store.Synced {
+		t.Fatalf("dir entry after rejected rename = %+v ok=%v, want unchanged synced", e, ok)
+	}
+	if _, ok := st.GetEntry("/sd/gcodes/renamed"); ok {
+		t.Fatal("destination entry leaked after rejected rename")
+	}
+	if jobs := st.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("rejected rename queued jobs: %+v", jobs)
+	}
+}
+
 func TestReadCacheBlocksValidationPending(t *testing.T) {
 	svc, st := newService(t)
 	content := []byte("G0 X0\n")
