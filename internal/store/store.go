@@ -1071,7 +1071,7 @@ func defaultMachineUI() MachineUI {
 		FeedMinMMMin: 1,
 		FeedMaxMMMin: 3000,
 		TapFeedMMMin: 600,
-		SafeZMM:      0,
+		SafeZMM:      -3,
 	}
 }
 
@@ -1150,6 +1150,7 @@ func normalizeMachineLearned(in MachineLearned) MachineLearned {
 		CMax:        normalizeFinite(in.CMax, 0),
 		Feed:        normalizeMachineFeedProfile(in.Feed),
 		SoftEndstop: normalizeMachineSoftEndstopProfile(in.SoftEndstop),
+		Anchors:     normalizeMachineAnchorProfile(in.Anchors),
 		Clearance:   normalizeMachineClearanceProfile(in.Clearance),
 		Probe:       normalizeMachineProbeProfile(in.Probe),
 		RawDiagnose: strings.TrimSpace(in.RawDiagnose),
@@ -1165,6 +1166,17 @@ func normalizeMachineLearned(in MachineLearned) MachineLearned {
 		out.RawDiagnose = out.RawDiagnose[:2000]
 	}
 	return out
+}
+
+func normalizeMachineAnchorProfile(in MachineAnchorProfile) MachineAnchorProfile {
+	if !in.Available || math.IsNaN(in.Anchor1.X) || math.IsInf(in.Anchor1.X, 0) || math.IsNaN(in.Anchor1.Y) || math.IsInf(in.Anchor1.Y, 0) || math.IsNaN(in.Anchor2.X) || math.IsInf(in.Anchor2.X, 0) || math.IsNaN(in.Anchor2.Y) || math.IsInf(in.Anchor2.Y, 0) {
+		return MachineAnchorProfile{}
+	}
+	return MachineAnchorProfile{
+		Available: true,
+		Anchor1:   XYPoint{X: in.Anchor1.X, Y: in.Anchor1.Y},
+		Anchor2:   XYPoint{X: in.Anchor2.X, Y: in.Anchor2.Y},
+	}
 }
 
 func normalizeLearnedWorkArea(in WorkArea) WorkArea {

@@ -172,6 +172,7 @@ type MachineLearned struct {
 	CMax          float64                   `json:"c_max,omitempty"`
 	Feed          MachineFeedProfile        `json:"feed,omitempty"`
 	SoftEndstop   MachineSoftEndstopProfile `json:"soft_endstop,omitempty"`
+	Anchors       MachineAnchorProfile      `json:"anchors,omitempty"`
 	Clearance     MachineClearanceProfile   `json:"clearance,omitempty"`
 	Probe         MachineProbeProfile       `json:"probe,omitempty"`
 	Config        map[string]string         `json:"config,omitempty"`
@@ -207,6 +208,15 @@ type MachineSoftEndstopProfile struct {
 	XMin    float64 `json:"x_min,omitempty"`
 	YMin    float64 `json:"y_min,omitempty"`
 	ZMin    float64 `json:"z_min,omitempty"`
+}
+
+// MachineAnchorProfile contains the fixed XY reference points reported by the
+// firmware. They are read-only machine metadata used when setting a work
+// origin; changing them is intentionally not supported by the proxy.
+type MachineAnchorProfile struct {
+	Available bool    `json:"available,omitempty"`
+	Anchor1   XYPoint `json:"anchor1,omitempty"`
+	Anchor2   XYPoint `json:"anchor2,omitempty"`
 }
 
 // MachineClearanceProfile contains known machine-coordinate clearance points.

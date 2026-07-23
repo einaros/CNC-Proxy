@@ -6,6 +6,9 @@ const GCODE_HISTORY_KEY = "cnc-proxy.gcode-history.v1";
 const PROBE_SPOT_DIAMETER_MM = 2;
 const PROBE_SPOT_RADIUS_MM = PROBE_SPOT_DIAMETER_MM / 2;
 const DEFAULT_FIELD_SPOT_GAP_MM = 8;
+const DEFAULT_FIELD_SAFE_Z_MM = 5;
+const DEFAULT_SAFE_Z_MM = -3;
+const SAFE_Z_LIMIT_MARGIN_MM = 3;
 const MAX_FIELD_PROBE_POINTS = 1500;
 const OUTLINE_CURVE_TOLERANCE_MM = 0.25;
 const MAX_EFFECTIVE_OUTLINE_POINTS = 4000;
@@ -56,7 +59,6 @@ const state = {
   activeGcodePending: "",
   activeSelectPendingPath: "",
   toolPending: "",
-  toolChangeAwaitingContinue: false,
   gamepadMacroBindingDirty: false,
   noticeKey: "",
   noticeSeq: 0,
@@ -90,6 +92,7 @@ const state = {
     targetLabel: "",
     zStepPending: 0,
     zStepLabel: "",
+    commandDisarm: null,
     zProbePending: false,
     originPending: 0,
     originPendingAxis: "",
@@ -392,7 +395,7 @@ function defaultMachineSettings() {
     feed_min_mm_min: DEFAULT_MACHINE_FEED_MIN_MM_MIN,
     feed_max_mm_min: DEFAULT_MACHINE_FEED_MAX_MM_MIN,
     tap_feed_mm_min: 600,
-    safe_z_mm: 0,
+    safe_z_mm: DEFAULT_SAFE_Z_MM,
     safe_z_disabled: false,
     learned: {},
   };
@@ -410,6 +413,7 @@ function defaultOutlineState() {
     probeEachPoint: false,
     pointProbePending: false,
     fieldSpotGapMM: DEFAULT_FIELD_SPOT_GAP_MM,
+    fieldSafeZMM: DEFAULT_FIELD_SAFE_Z_MM,
     fieldProbePreview: [],
     fieldProbeResults: [],
     fieldProbePending: false,
@@ -493,6 +497,7 @@ function normalizeMachineSettings(machine) {
   out.feed_max_mm_min = clampNumber(out.feed_max_mm_min, out.feed_min_mm_min, MAX_MACHINE_FEED_MM_MIN);
   const bounds = feedBoundsFor(out);
   out.tap_feed_mm_min = clampNumber(out.tap_feed_mm_min || d.tap_feed_mm_min, bounds.min, bounds.max);
+  out.safe_z_mm = safeZForTapMove(out);
   return out;
 }
 
@@ -510,6 +515,12 @@ function normalizeMachineLearned(learned) {
     Number.isFinite(work.y_min) && Number.isFinite(work.y_max) && work.x_min < work.x_max && work.y_min < work.y_max ? work : {};
   out.feed = learned.feed && typeof learned.feed === "object" ? { ...learned.feed } : {};
   out.soft_endstop = learned.soft_endstop && typeof learned.soft_endstop === "object" ? { ...learned.soft_endstop } : {};
+  const anchors = learned.anchors && typeof learned.anchors === "object" ? learned.anchors : {};
+  const anchorPoint = (point) => ({ x: finiteOr(point?.x, NaN), y: finiteOr(point?.y, NaN) });
+  const anchor1 = anchorPoint(anchors.anchor1);
+  const anchor2 = anchorPoint(anchors.anchor2);
+  out.anchors = !!anchors.available && Number.isFinite(anchor1.x) && Number.isFinite(anchor1.y) &&
+    Number.isFinite(anchor2.x) && Number.isFinite(anchor2.y) ? { available: true, anchor1, anchor2 } : {};
   out.clearance = learned.clearance && typeof learned.clearance === "object" ? { ...learned.clearance } : {};
   out.probe = learned.probe && typeof learned.probe === "object" ? { ...learned.probe } : {};
   out.config = learned.config && typeof learned.config === "object" ? { ...learned.config } : {};
@@ -524,6 +535,27 @@ function feedBoundsFor(machine) {
   const configuredMin = clampNumber(finiteOr(machine?.feed_min_mm_min, d.feed_min_mm_min), DEFAULT_MACHINE_FEED_MIN_MM_MIN, MAX_MACHINE_FEED_MM_MIN);
   const configuredMax = clampNumber(finiteOr(machine?.feed_max_mm_min, d.feed_max_mm_min), configuredMin, MAX_MACHINE_FEED_MM_MIN);
   return { min: configuredMin, max: configuredMax, configuredMin, configuredMax };
+}
+
+function safeZForTapMove(machine) {
+  const safeZ = finiteOr(machine?.safe_z_mm, DEFAULT_SAFE_Z_MM);
+  return Math.min(safeZ, safeZCeiling(machine));
+}
+
+// The server repeats this policy authoritatively for every proxy-managed safe
+// move. Keeping the browser mirror here makes the configured target visible
+// before a command is sent, without trusting the browser for enforcement.
+function safeZCeiling(machine) {
+  const learned = normalizeMachineLearned(machine?.learned);
+  const zMin = finiteOr(learned.z_min_mm, NaN);
+  const zMax = finiteOr(learned.z_max_mm, NaN);
+  const clearance = finiteOr(learned.config_numbers?.["coordinate.clearance_z"], NaN);
+  let ceiling = DEFAULT_SAFE_Z_MM;
+  if (Number.isFinite(clearance)) ceiling = Math.min(ceiling, clearance);
+  if (Number.isFinite(zMin) && Number.isFinite(zMax) && zMax - zMin > 2 * SAFE_Z_LIMIT_MARGIN_MM) {
+    ceiling = Math.min(ceiling, zMax - SAFE_Z_LIMIT_MARGIN_MM);
+  }
+  return ceiling;
 }
 
 function normalizeSavedOrigins(origins) {
@@ -1223,6 +1255,17 @@ function renderOriginButtons() {
   if (del) {
     del.disabled = busy || !selected;
   }
+	const anchorAvailable = machineAnchorPoints() !== null;
+	for (const id of ["anchor-origin-anchor", "anchor-origin-offset-x", "anchor-origin-offset-y"]) {
+		const input = document.getElementById(id);
+		if (input) input.disabled = busy;
+	}
+	const anchorApply = document.getElementById("anchor-origin-apply");
+	if (anchorApply) {
+		anchorApply.disabled = busy;
+		setSoftDisabled(anchorApply, !busy && (!ready || !anchorAvailable));
+		setTextIfChanged(anchorApply, pendingAxis ? "Applying..." : "Set Origin");
+	}
 }
 
 function hasPendingOriginOperation() {
@@ -2121,6 +2164,7 @@ function renderOutlineCapture() {
   const exp = document.getElementById("outline-export");
   const fieldControls = document.getElementById("outline-field-controls");
   const spacing = document.getElementById("outline-field-spacing");
+  const fieldSafeZ = document.getElementById("outline-field-safe-z");
   const fieldProbe = document.getElementById("outline-field-probe");
   const exportControls = document.getElementById("outline-export-controls");
   const exportObj = document.getElementById("outline-export-obj");
@@ -2176,6 +2220,10 @@ function renderOutlineCapture() {
     if (!controlLocallyOwned(spacing)) spacing.value = pathNum(fieldProbeSpotGap());
     spacing.disabled = busy;
   }
+  if (fieldSafeZ) {
+    if (!controlLocallyOwned(fieldSafeZ)) fieldSafeZ.value = pathNum(fieldProbeSafeZ());
+    fieldSafeZ.disabled = busy;
+  }
   if (fieldProbe) {
     setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe field Z");
     fieldProbe.disabled = busy;
@@ -2230,6 +2278,28 @@ function updateOutlineFieldSpacing() {
 function fieldProbeSpotGap() {
   const v = Number(state.outline.fieldSpotGapMM);
   return Number.isFinite(v) ? Math.max(0, Math.min(250, v)) : DEFAULT_FIELD_SPOT_GAP_MM;
+}
+
+function fieldProbeSafeZ() {
+  const value = Number(state.outline.fieldSafeZMM);
+  return Number.isFinite(value) ? Math.max(0, Math.min(200, value)) : DEFAULT_FIELD_SAFE_Z_MM;
+}
+
+function updateOutlineFieldSafeZ() {
+  const input = document.getElementById("outline-field-safe-z");
+  const raw = String(input?.value ?? "").trim();
+  const value = Number(raw);
+  if (!input || raw === "" || !Number.isFinite(value) || value < 0 || value > 200) {
+    if (input) {
+      input.setCustomValidity("Enter a safe Z between 0 and 200 mm.");
+      input.reportValidity?.();
+    }
+    return;
+  }
+  input.setCustomValidity("");
+  state.outline.fieldSafeZMM = value;
+  clearControlDrafts(input);
+  renderOutlineCapture();
 }
 
 function fieldProbeCenterSpacing(gap = fieldProbeSpotGap()) {
@@ -2573,17 +2643,20 @@ async function probeZAtWorkPoint(workPoint, opts = {}) {
   const my = Number(workPoint.y) + oy;
   const depth = Math.max(0.1, Math.min(200, finiteOr(opts.depthMM, DEFAULT_PROBE_DEPTH_MM)));
   const feed = Math.max(1, Math.min(1000, finiteOr(opts.feedMMMin, DEFAULT_PROBE_FEED_MM)));
+  const body = {
+    machine_x: mx,
+    machine_y: my,
+    move_xy: opts.moveXY !== false,
+    safe_z_mm: finiteOr(opts.safeZMM, safeZForTapMove(machine)),
+    probe_depth_mm: depth,
+    probe_feed_mm_min: feed,
+  };
+  if (Number.isFinite(opts.retractZMM)) body.retract_z_mm = opts.retractZMM;
+  if (Number.isFinite(opts.retractAboveMM)) body.retract_above_mm = opts.retractAboveMM;
   const resp = await request("/api/probe/z", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      machine_x: mx,
-      machine_y: my,
-      move_xy: opts.moveXY !== false,
-      safe_z_mm: machine.safe_z_mm,
-      probe_depth_mm: depth,
-      probe_feed_mm_min: feed,
-    }),
+    body: JSON.stringify(body),
   });
   const result = await resp.json();
   const m = result.machine || {};
@@ -2598,6 +2671,7 @@ async function probeZAtWorkPoint(workPoint, opts = {}) {
     machine_x: px,
     machine_y: py,
     machine_z: pz,
+    retract_z_mm: finiteOr(result.retract_z_mm, NaN),
     output: result.output || "",
   };
 }
@@ -2624,6 +2698,13 @@ async function runFieldProbe() {
     return;
   }
   const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin());
+  let fieldSafeZMM;
+  try {
+    fieldSafeZMM = fieldProbeSafeZ();
+  } catch (e) {
+    setOutlineFeedback(e.message, "error");
+    return;
+  }
   o.fieldProbePending = true;
   o.fieldProbeResults = [];
   o.fieldProbeIndex = 0;
@@ -2632,12 +2713,23 @@ async function runFieldProbe() {
   renderOutlineCapture();
   renderWorkArea();
   try {
+    let travelZMM = null;
     for (let i = 0; i < o.fieldProbePreview.length; i++) {
       o.fieldProbeIndex = i;
       o.feedback = "Probing field point " + (i + 1) + " of " + o.fieldProbePreview.length + "...";
       renderOutlineCapture();
       const p = o.fieldProbePreview[i];
-      const probed = await probeZAtWorkPoint(p, { moveXY: true, origin });
+      const probed = await probeZAtWorkPoint(p, {
+        moveXY: true,
+        origin,
+        safeZMM: travelZMM === null ? safeZForTapMove(normalizeMachineSettings(state.ui.machine)) : travelZMM,
+        retractAboveMM: travelZMM === null ? fieldSafeZMM : undefined,
+        retractZMM: travelZMM === null ? undefined : travelZMM,
+      });
+      if (travelZMM === null) {
+        if (!Number.isFinite(probed.retract_z_mm)) throw new Error("first field probe did not report a safe Z");
+        travelZMM = probed.retract_z_mm;
+      }
       o.fieldProbeResults.push({
         id: p.id,
         x: probed.x,
@@ -2728,7 +2820,7 @@ async function traceOutline() {
       body: JSON.stringify({
         machine_points: machinePoints,
         machine_z: machineZ,
-        safe_z_mm: machine.safe_z_mm,
+        safe_z_mm: safeZForTapMove(machine),
         feed_mm_min: currentTapFeed(),
         closed: !!o.closed,
       }),
@@ -4293,7 +4385,6 @@ async function setCurrentTool(toolID = null) {
     });
     const result = await r.json();
     setToolFeedback(result.message || "Set-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    state.toolChangeAwaitingContinue = false;
     resetToolSelects();
     refreshMachineAfterToolAction();
   } catch (e) {
@@ -4323,11 +4414,9 @@ async function changeTool(toolID = null) {
     });
     const result = await r.json();
     setToolFeedback(result.message || "Change-tool command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    state.toolChangeAwaitingContinue = true;
     resetToolSelects();
     refreshMachineAfterToolAction();
   } catch (e) {
-    state.toolChangeAwaitingContinue = false;
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setToolFeedback("Change-tool failed: " + e.message, "error");
   } finally {
@@ -4336,7 +4425,7 @@ async function changeTool(toolID = null) {
 }
 
 async function continueToolChange() {
-  const continueAvailable = state.machine?.state === "Tool" || state.toolChangeAwaitingContinue;
+  const continueAvailable = state.machine?.state === "Tool";
   if (!continueAvailable) {
     setToolFeedback("Continue is only available while the machine is awaiting a tool.", "error");
     renderToolActions();
@@ -4348,7 +4437,6 @@ async function continueToolChange() {
     const r = await request("/api/tool/continue", { method: "POST" });
     const result = await r.json();
     setToolFeedback(result.message || "Tool-change continue command sent; machine confirmation was not available.", result.verified ? "ok" : "");
-    state.toolChangeAwaitingContinue = false;
     refreshMachineAfterToolAction();
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
@@ -4417,7 +4505,7 @@ function renderToolActions(m = state.machine || {}) {
   const continuePending = pendingAction === "continue";
   const calibratePending = pendingAction === "calibrate";
   const waitingForTool = m.state === "Tool";
-  const continueAvailable = waitingForTool || state.toolChangeAwaitingContinue;
+  const continueAvailable = waitingForTool;
   const row = document.getElementById("tool-wait-row");
   const label = document.getElementById("tool-wait-status");
   if (row) row.classList.toggle("is-waiting", waitingForTool);
@@ -4903,8 +4991,52 @@ async function runMacro(macro, opts = {}) {
   }
 }
 
+function completeCommandDisarm(seq, message = "") {
+  const pending = state.jog.commandDisarm;
+  if (!pending || pending.seq !== seq) return false;
+  state.jog.commandDisarm = null;
+  clearTimeout(pending.timer);
+  if (message) pending.reject(new Error(message));
+  else pending.resolve();
+  return true;
+}
+
+function disarmTapMoveForCommand() {
+  if (!state.jog.armed) return Promise.resolve();
+  if (state.jog.commandDisarm) return state.jog.commandDisarm.promise;
+  if (state.jog.link !== "online") return Promise.reject(new Error("Tap Move is not connected."));
+
+  const seq = state.jog.seq++;
+  let resolve;
+  let reject;
+  const promise = new Promise((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  const pending = { seq, resolve, reject, promise, timer: null };
+  state.jog.commandDisarm = pending;
+  pending.timer = setTimeout(() => {
+    if (completeCommandDisarm(seq, "Tap Move did not disarm before the command.")) {
+      state.jog.tapFeedback = "Tap Move did not disarm before the command.";
+      state.jog.tapFeedbackKind = "error";
+      renderJog();
+    }
+  }, 2000);
+  if (!sendJog({ type: "disarm", seq })) {
+    completeCommandDisarm(seq, "Tap Move is not connected.");
+    return promise;
+  }
+  state.jog.armPending = seq;
+  state.jog.armPendingAction = "disarm";
+  state.jog.tapFeedback = "Disarming Tap Move before command.";
+  state.jog.tapFeedbackKind = "";
+  renderJog();
+  return promise;
+}
+
 async function sendGcode(line) {
   try {
+    await disarmTapMoveForCommand();
     await request("/api/gcode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5162,6 +5294,7 @@ function connectJog() {
     state.jog.link = "offline";
     state.jog.armed = false;
     state.jog.sent.clear();
+    completeCommandDisarm(state.jog.commandDisarm?.seq, "Tap Move disconnected before the command.");
     if (state.jog.armQueuedAction) {
       const action = state.jog.armQueuedAction;
       state.jog.armQueuedAction = "";
@@ -5448,7 +5581,7 @@ function sendWorkCoordinateMove() {
   }
   const machine = normalizeMachineSettings(state.ui.machine);
   const safeZEnabled = !machine.safe_z_disabled;
-  const seq = sendJog({ type: "target", target: move.machineTargets, feed_mm_min: feed, safe_z_enabled: safeZEnabled, safe_z_mm: machine.safe_z_mm });
+  const seq = sendJog({ type: "target", target: move.machineTargets, feed_mm_min: feed, safe_z_enabled: safeZEnabled, safe_z_mm: safeZForTapMove(machine) });
   if (!seq) {
     setTapFeedback("Jog service is not connected.", "error");
     return;
@@ -5487,7 +5620,7 @@ function sendTapMove(target) {
   const machine = normalizeMachineSettings(state.ui.machine);
   const safeZEnabled = !machine.safe_z_disabled;
   const label = tapTargetLabel(target);
-  const seq = sendJog({ type: "target", target: { x: target.x, y: target.y }, feed_mm_min: feed, safe_z_enabled: safeZEnabled, safe_z_mm: machine.safe_z_mm });
+  const seq = sendJog({ type: "target", target: { x: target.x, y: target.y }, feed_mm_min: feed, safe_z_enabled: safeZEnabled, safe_z_mm: safeZForTapMove(machine) });
   if (!seq) {
     setTapFeedback("Jog service is not connected.", "error");
     return;
@@ -5600,6 +5733,38 @@ function originTargetsFromSaved(saved) {
   return {
     targets: { x: mx - saved.origin.x, y: my - saved.origin.y },
     label: saved.label,
+  };
+}
+
+function machineAnchorPoints() {
+  const anchors = normalizeMachineLearned(state.ui.machine?.learned).anchors;
+  const anchor1X = axisValue(anchors?.anchor1, "x");
+  const anchor1Y = axisValue(anchors?.anchor1, "y");
+  const anchor2X = axisValue(anchors?.anchor2, "x");
+  const anchor2Y = axisValue(anchors?.anchor2, "y");
+  if (!anchors?.available || anchor1X === null || anchor1Y === null || anchor2X === null || anchor2Y === null) return null;
+  return {
+    anchor1: { x: anchor1X, y: anchor1Y },
+    anchor2: { x: anchor2X, y: anchor2Y },
+  };
+}
+
+function originTargetsFromAnchor() {
+  const anchors = machineAnchorPoints();
+  if (!anchors) throw new Error("Machine anchor positions are unavailable. Learn machine parameters first.");
+  const selected = document.getElementById("anchor-origin-anchor")?.value === "anchor2" ? "anchor2" : "anchor1";
+  const offsetX = finiteOr(document.getElementById("anchor-origin-offset-x")?.value, NaN);
+  const offsetY = finiteOr(document.getElementById("anchor-origin-offset-y")?.value, NaN);
+  if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) throw new Error("Anchor offsets must be finite.");
+  const { mpos } = currentAxisValues();
+  const mx = axisValue(mpos, "x");
+  const my = axisValue(mpos, "y");
+  if (mx === null || my === null) throw new Error("Current machine XY position is unavailable.");
+  const anchor = anchors[selected];
+  const machineOrigin = { x: anchor.x + offsetX, y: anchor.y + offsetY };
+  return {
+    targets: { x: mx - machineOrigin.x, y: my - machineOrigin.y },
+    label: (selected === "anchor2" ? "Anchor 2" : "Anchor 1") + " origin",
   };
 }
 
@@ -5788,6 +5953,16 @@ function applyOriginAction() {
     applyOriginTargets(targets, label);
   } catch (e) {
     setTapFeedback(e.message, "error");
+  }
+}
+
+function applyAnchorOrigin() {
+  try {
+    const { targets, label } = originTargetsFromAnchor();
+    applyOriginTargets(targets, label);
+  } catch (e) {
+    setTapFeedback(e.message, "error");
+    renderJog();
   }
 }
 
@@ -6045,6 +6220,7 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = tapMoveArmSuccessText(action);
       state.jog.tapFeedbackKind = "ok";
     }
+    completeCommandDisarm(ev.seq);
     if (ev.seq && ev.seq === state.jog.targetPending) {
       state.jog.targetPending = 0;
       state.jog.tapFeedback = "Move command sent: " + state.jog.targetLabel;
@@ -6061,6 +6237,7 @@ function applyJogEvent(ev) {
     state.jog.error = "";
     state.jog.errorCode = "";
   } else if (ev.type === "error") {
+    completeCommandDisarm(ev.seq, ev.message || jogErrorText(ev.code));
     if (ev.seq && ev.seq === state.jog.armPending) {
       const action = state.jog.armPendingAction;
       state.jog.armPending = 0;
@@ -6253,7 +6430,6 @@ function applySnapshot(snap) {
   if (snap.machine) {
     state.jog.observed = snap.machine.mpos || state.jog.observed;
     state.machine = mergeMachineStatusForDisplay(snap.machine);
-    syncToolFlowFromMachineStatus(state.machine);
     clearNotice("machine-status");
   }
   if (Array.isArray(snap.files)) {
@@ -6331,7 +6507,11 @@ function showTab(name) {
   for (const tab of tabs) {
     const view = document.getElementById(tab + "-view");
     if (view) view.hidden = tab !== name;
-    document.getElementById("tab-" + tab)?.classList.toggle("active", tab === name);
+    const button = document.getElementById("tab-" + tab);
+    const active = tab === name;
+    button?.classList.toggle("active", active);
+    button?.setAttribute("aria-selected", String(active));
+    if (button) button.tabIndex = active ? 0 : -1;
   }
   if (name === "files") connectFilesSSE();
   if (name === "active-job") scheduleGcodeRender();
@@ -6345,7 +6525,6 @@ async function pollMachine() {
     const next = await r.json();
     state.jog.observed = next.mpos || state.jog.observed;
     state.machine = mergeMachineStatusForDisplay(next);
-    syncToolFlowFromMachineStatus(state.machine);
     clearNotice("machine-status");
     renderMachine();
   } catch (e) {
@@ -6355,17 +6534,6 @@ async function pollMachine() {
     await refreshJobs();
   } catch {
     // File SSE reports its own disconnect state; avoid duplicating it here.
-  }
-}
-
-function syncToolFlowFromMachineStatus(m) {
-  if (!m) return;
-  if (m.state === "Tool" || Number.isFinite(m.tool?.target)) {
-    state.toolChangeAwaitingContinue = true;
-    return;
-  }
-  if (state.toolPending !== "change" && state.toolPending !== "continue") {
-    state.toolChangeAwaitingContinue = false;
   }
 }
 
@@ -6407,10 +6575,23 @@ function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("notice-clear").onclick = () => clearNotice();
-  document.getElementById("tab-active-job").onclick = () => showTab("active-job");
-  document.getElementById("tab-gcode-console").onclick = () => showTab("gcode-console");
-  document.getElementById("tab-control").onclick = () => showTab("control");
-  document.getElementById("tab-files").onclick = () => showTab("files");
+  const viewTabs = ["active-job", "gcode-console", "control", "files"];
+  for (const [index, name] of viewTabs.entries()) {
+    const tab = document.getElementById("tab-" + name);
+    tab.onclick = () => showTab(name);
+    tab.onkeydown = (e) => {
+      let next = index;
+      if (e.key === "ArrowRight") next = (index + 1) % viewTabs.length;
+      else if (e.key === "ArrowLeft") next = (index - 1 + viewTabs.length) % viewTabs.length;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = viewTabs.length - 1;
+      else return;
+      e.preventDefault();
+      const nextTab = document.getElementById("tab-" + viewTabs[next]);
+      showTab(viewTabs[next]);
+      nextTab.focus();
+    };
+  }
   drop.onclick = () => input.click();
   input.onchange = () => { uploadFiles(input.files); input.value = ""; };
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
@@ -6536,6 +6717,15 @@ function init() {
   }
   document.getElementById("saved-origin-select").onchange = renderJog;
   bindButtonAction(document.getElementById("origin-apply"), applyOriginAction);
+  for (const id of ["anchor-origin-offset-x", "anchor-origin-offset-y"]) {
+    document.getElementById(id).onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyAnchorOrigin();
+      }
+    };
+  }
+  bindButtonAction(document.getElementById("anchor-origin-apply"), applyAnchorOrigin);
   bindButtonAction(document.getElementById("saved-origin-recall"), recallSelectedOrigin);
   bindButtonAction(document.getElementById("saved-origin-save"), saveCurrentOrigin);
   bindButtonAction(document.getElementById("saved-origin-delete"), deleteSelectedOrigin);
@@ -6556,6 +6746,9 @@ function init() {
   const outlineSpacing = document.getElementById("outline-field-spacing");
   outlineSpacing.oninput = () => markControlDirty(outlineSpacing);
   outlineSpacing.onchange = updateOutlineFieldSpacing;
+  const outlineSafeZ = document.getElementById("outline-field-safe-z");
+  outlineSafeZ.oninput = () => markControlDirty(outlineSafeZ);
+  outlineSafeZ.onchange = updateOutlineFieldSafeZ;
   bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);

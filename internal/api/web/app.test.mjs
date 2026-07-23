@@ -48,6 +48,8 @@ const settingsFunctions = [
   "normalizeMachineLearned",
   "normalizeSavedOrigins",
   "defaultMachineSettings",
+  "safeZForTapMove",
+  "safeZCeiling",
   "feedBoundsFor",
   "finiteOr",
   "clampNumber",
@@ -57,6 +59,8 @@ const settingsConsts = [
   "DEFAULT_MACHINE_FEED_MIN_MM_MIN",
   "DEFAULT_MACHINE_FEED_MAX_MM_MIN",
   "MAX_MACHINE_FEED_MM_MIN",
+  "DEFAULT_SAFE_Z_MM",
+  "SAFE_Z_LIMIT_MARGIN_MM",
 ];
 
 // F12: an operator feed_max of exactly 1200 (with feed_min 1 / tap 600) must
@@ -83,6 +87,52 @@ test("normalizeMachineSettings still defaults and clamps feed_max", () => {
     ctx,
   );
   assert.equal(belowMin.feed_max_mm_min, 500);
+});
+
+test("safeZForTapMove stays below a learned Z soft maximum", () => {
+  const ctx = buildContext(
+    ["safeZForTapMove", "safeZCeiling", "normalizeMachineLearned", "finiteOr"],
+    ["DEFAULT_MACHINE_FEED_MIN_MM_MIN", "DEFAULT_MACHINE_FEED_MAX_MM_MIN", "DEFAULT_SAFE_Z_MM", "SAFE_Z_LIMIT_MARGIN_MM"],
+  );
+  const target = vm.runInContext(
+    "safeZForTapMove({ safe_z_mm: 0, learned: { z_min_mm: -121, z_max_mm: 0 } })",
+    ctx,
+  );
+  assert.equal(target, -3, "the firmware clearance margin is never exceeded");
+  const configured = vm.runInContext(
+    "safeZForTapMove({ safe_z_mm: -5, learned: { z_min_mm: -121, z_max_mm: 0 } })",
+    ctx,
+  );
+  assert.equal(configured, -5, "an already-safe operator setting is preserved");
+  const clearance = vm.runInContext(
+    'safeZForTapMove({ safe_z_mm: -1, learned: { config_numbers: { "coordinate.clearance_z": -5 } } })',
+    ctx,
+  );
+  assert.equal(clearance, -5, "the learned firmware clearance is an authoritative stricter ceiling");
+  const legacy = vm.runInContext("safeZForTapMove({ safe_z_mm: 0 })", ctx);
+  assert.equal(legacy, -3, "a saved legacy value at the usual Carvera ceiling is kept below the limit");
+});
+
+test("anchor origin targets use learned machine anchors plus the requested offset", () => {
+  const values = {
+    "anchor-origin-anchor": { value: "anchor2" },
+    "anchor-origin-offset-x": { value: "10" },
+    "anchor-origin-offset-y": { value: "-3" },
+  };
+  const state = {
+    ui: { machine: { learned: { anchors: { available: true, anchor1: { x: -287.51, y: -202.11 }, anchor2: { x: -199.01, y: -157.11 } } } } },
+    jog: { armed: false, mpos: null, wpos: null, targetPending: 0, zStepPending: 0 },
+    machine: { mpos: { x: -100, y: -100 } },
+  };
+  const ctx = buildContext(
+    ["finiteOr", "axisValue", "normalizeMachineLearned", "currentAxisValues", "machineAnchorPoints", "originTargetsFromAnchor"],
+    [],
+    { state, document: { getElementById: (id) => values[id] || null } },
+  );
+  const out = vm.runInContext("originTargetsFromAnchor()", ctx);
+  assert.equal(out.label, "Anchor 2 origin");
+  assert.ok(Math.abs(out.targets.x - 89.01) < 1e-9);
+  assert.ok(Math.abs(out.targets.y - 60.11) < 1e-9);
 });
 
 // F21: fire-and-forget jog "input" messages are never acked by the server and
@@ -112,6 +162,29 @@ test("sendJog does not track fire-and-forget input messages", () => {
   assert.equal(sends.length, 4, "all messages still reach the socket");
   assert.equal(jog.sent.size, 1, "only the ack-expecting message is tracked");
   assert.ok(jog.sent.has(4), "the arm message seq is tracked");
+});
+
+test("commands wait for Tap Move to release its lease", async () => {
+  const sent = [];
+  const state = { jog: { armed: true, commandDisarm: null, link: "online", seq: 7 } };
+  const ctx = buildContext(["completeCommandDisarm", "disarmTapMoveForCommand"], [], {
+    state,
+    sendJog: (message) => {
+      sent.push(message);
+      return message.seq;
+    },
+    renderJog: () => {},
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+  });
+  const wait = vm.runInContext("disarmTapMoveForCommand()", ctx);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "disarm");
+  assert.equal(sent[0].seq, 7);
+  assert.equal(state.jog.commandDisarm.seq, 7, "the gcode request remains blocked until disarm is acknowledged");
+  vm.runInContext("completeCommandDisarm(7)", ctx);
+  await wait;
+  assert.equal(state.jog.commandDisarm, null);
 });
 
 // F13: terminal tap/outline feedback is displayed exactly once by the render

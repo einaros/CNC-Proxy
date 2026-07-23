@@ -129,7 +129,11 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 				sess.ReportError(msg.Seq, jog.CodeBadInput, "safe_z_mm must be finite")
 				continue
 			}
-			sess.Target(msg.Seq, target, msg.Feed, safeZEnabled, msg.SafeZ)
+			safeZ := msg.SafeZ
+			if safeZEnabled {
+				safeZ = s.svc.SafeZTargetMM(safeZ)
+			}
+			sess.Target(msg.Seq, target, msg.Feed, safeZEnabled, safeZ)
 		default:
 			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, target, step, origin, control, disarm")
 		}

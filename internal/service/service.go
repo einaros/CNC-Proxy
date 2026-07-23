@@ -62,6 +62,8 @@ const (
 	maxProbeFeedMM       = 1000
 	maxTracePoints       = 4000
 	maxFailedJobsPerPath = 20
+	defaultSafeZMM       = -3.0
+	safeZLimitMarginMM   = 3.0
 )
 
 // Service wires the store, arbiter (for machine state), and local cache.
@@ -170,18 +172,21 @@ type MachineStatus struct {
 // ProbeZRequest describes one serialized Z probe at the current XY or at a
 // supplied machine-coordinate XY location.
 type ProbeZRequest struct {
-	MachineX     float64 `json:"machine_x"`
-	MachineY     float64 `json:"machine_y"`
-	MoveXY       bool    `json:"move_xy"`
-	SafeZMM      float64 `json:"safe_z_mm"`
-	ProbeDepthMM float64 `json:"probe_depth_mm"`
-	ProbeFeedMM  float64 `json:"probe_feed_mm_min"`
+	MachineX       float64  `json:"machine_x"`
+	MachineY       float64  `json:"machine_y"`
+	MoveXY         bool     `json:"move_xy"`
+	SafeZMM        float64  `json:"safe_z_mm"`
+	RetractZMM     *float64 `json:"retract_z_mm,omitempty"`
+	RetractAboveMM *float64 `json:"retract_above_mm,omitempty"`
+	ProbeDepthMM   float64  `json:"probe_depth_mm"`
+	ProbeFeedMM    float64  `json:"probe_feed_mm_min"`
 }
 
 // ProbeZResult is the parsed firmware probe report.
 type ProbeZResult struct {
-	Machine machine.AxisValues `json:"machine"`
-	Output  string             `json:"output,omitempty"`
+	Machine    machine.AxisValues `json:"machine"`
+	RetractZMM float64            `json:"retract_z_mm"`
+	Output     string             `json:"output,omitempty"`
 }
 
 // TracePoint is one machine-coordinate XY point for a probe-laser outline trace.
@@ -640,6 +645,7 @@ func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
 	if err := validateMachineUI(ui.Machine); err != nil {
 		return store.UISettings{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
+	ui.Machine.SafeZMM = clampSafeZMM(ui.Machine.SafeZMM, ui.Machine.Learned)
 	if ui.Log.Filter == "" {
 		ui.Log.Filter = "all"
 		current := s.store.UISettings()
@@ -717,9 +723,7 @@ func applyLearnedMachineDefaults(m *store.MachineUI, learned store.MachineLearne
 	if validWorkArea(learned.WorkArea) {
 		m.WorkArea = learned.WorkArea
 	}
-	if learned.ZMaxMM != 0 || learned.ZMinMM != 0 {
-		m.SafeZMM = learned.ZMaxMM
-	}
+	m.SafeZMM = safeZCeilingMM(learned)
 	if learned.Feed.MaxXYMMMin > 0 {
 		m.FeedMaxMMMin = learned.Feed.MaxXYMMMin
 	} else if learned.Feed.SeekMMMin > 0 {
@@ -736,6 +740,33 @@ func applyLearnedMachineDefaults(m *store.MachineUI, learned store.MachineLearne
 			m.TapFeedMMMin = m.FeedMaxMMMin
 		}
 	}
+}
+
+// SafeZTargetMM returns the highest machine-coordinate Z that proxy-managed
+// safe-travel sequences may use. The firmware's clearance Z is authoritative
+// when learned; the upper soft limit is an additional hard ceiling. The
+// fallback remains three millimetres below the usual Carvera Z-zero boundary.
+// Explicit raw G-code is intentionally outside this policy.
+func (s *Service) SafeZTargetMM(requested float64) float64 {
+	return clampSafeZMM(requested, s.store.UISettings().Machine.Learned)
+}
+
+func clampSafeZMM(requested float64, learned store.MachineLearned) float64 {
+	if !finite(requested) {
+		return requested
+	}
+	return math.Min(requested, safeZCeilingMM(learned))
+}
+
+func safeZCeilingMM(learned store.MachineLearned) float64 {
+	ceiling := defaultSafeZMM
+	if clearance, ok := learned.ConfigNumbers["coordinate.clearance_z"]; ok && finite(clearance) {
+		ceiling = math.Min(ceiling, clearance)
+	}
+	if finite(learned.ZMinMM) && finite(learned.ZMaxMM) && learned.ZMaxMM-learned.ZMinMM > 2*safeZLimitMarginMM {
+		ceiling = math.Min(ceiling, learned.ZMaxMM-safeZLimitMarginMM)
+	}
+	return ceiling
 }
 
 func buildMachineLearned(modelOut, versionOut, ftypeOut, diagnoseOut, configOut string, now time.Time) (store.MachineLearned, error) {
@@ -1007,6 +1038,17 @@ func applyKnownMachineConfig(learned *store.MachineLearned) {
 	}
 	if v, ok := num("coordinate.clearance_z"); ok {
 		learned.Clearance.Z = v
+	}
+	anchor1X, anchor1XOK := num("coordinate.anchor1_x")
+	anchor1Y, anchor1YOK := num("coordinate.anchor1_y")
+	anchor2OffsetX, anchor2OffsetXOK := num("coordinate.anchor2_offset_x")
+	anchor2OffsetY, anchor2OffsetYOK := num("coordinate.anchor2_offset_y")
+	if anchor1XOK && anchor1YOK && anchor2OffsetXOK && anchor2OffsetYOK {
+		learned.Anchors = store.MachineAnchorProfile{
+			Available: true,
+			Anchor1:   store.XYPoint{X: anchor1X, Y: anchor1Y},
+			Anchor2:   store.XYPoint{X: anchor1X + anchor2OffsetX, Y: anchor1Y + anchor2OffsetY},
+		}
 	}
 	if v, ok := num("atc.probe.fast_rate_mm_m"); ok {
 		learned.Probe.FastRateMMMin = v
@@ -1559,6 +1601,7 @@ func (s *Service) SendGcode(line string) (string, error) {
 // operation lock across the safe-Z move, optional XY move, probe command, and
 // final safe-Z lift so no other proxy operation can interleave with the probe.
 func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
+	req.SafeZMM = s.SafeZTargetMM(req.SafeZMM)
 	if err := validateProbeZRequest(req); err != nil {
 		return ProbeZResult{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
@@ -1591,8 +1634,12 @@ func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
 		if !ok {
 			return fmt.Errorf("%w: probe did not report contact", ErrProbeUnavailable)
 		}
-		res = ProbeZResult{Machine: pos, Output: out}
-		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM), false); err != nil {
+		retractZ, err := probeRetractZ(req, pos)
+		if err != nil {
+			return err
+		}
+		res = ProbeZResult{Machine: pos, RetractZMM: retractZ, Output: out}
+		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", retractZ), false); err != nil {
 			return err
 		}
 		return nil
@@ -1607,6 +1654,7 @@ func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
 // outline. The probe laser is switched off again if any command after activation
 // fails, so the operator is not left with an active laser after a partial trace.
 func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, error) {
+	req.SafeZMM = s.SafeZTargetMM(req.SafeZMM)
 	if err := validateTraceOutlineRequest(req); err != nil {
 		err = fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 		return TraceOutlineResult{Action: "trace_outline", Message: err.Error()}, err
@@ -1705,7 +1753,43 @@ func validateProbeZRequest(req ProbeZRequest) error {
 	if req.ProbeFeedMM <= 0 || req.ProbeFeedMM > maxProbeFeedMM {
 		return fmt.Errorf("service: probe feed must be between 0 and %.0f mm/min", float64(maxProbeFeedMM))
 	}
+	if req.RetractZMM != nil && req.RetractAboveMM != nil {
+		return fmt.Errorf("service: probe retract_z_mm and retract_above_mm are mutually exclusive")
+	}
+	if req.RetractZMM != nil {
+		if !finite(*req.RetractZMM) {
+			return fmt.Errorf("service: probe retract_z_mm must be finite")
+		}
+		if *req.RetractZMM > req.SafeZMM {
+			return fmt.Errorf("service: probe retract_z_mm must not exceed safe_z_mm")
+		}
+	}
+	if req.RetractAboveMM != nil {
+		if !finite(*req.RetractAboveMM) {
+			return fmt.Errorf("service: probe retract_above_mm must be finite")
+		}
+		if *req.RetractAboveMM < 0 || *req.RetractAboveMM > maxProbeDepthMM {
+			return fmt.Errorf("service: probe retract_above_mm must be between 0 and %.0f mm", float64(maxProbeDepthMM))
+		}
+	}
 	return nil
+}
+
+func probeRetractZ(req ProbeZRequest, pos machine.AxisValues) (float64, error) {
+	if req.RetractZMM != nil {
+		return *req.RetractZMM, nil
+	}
+	if req.RetractAboveMM == nil {
+		return req.SafeZMM, nil
+	}
+	z, ok := finiteAxisValue(pos, "z")
+	if !ok {
+		return 0, fmt.Errorf("%w: probe result does not include a finite Z position", ErrProbeUnavailable)
+	}
+	// SafeZMM is the independently bounded machine-coordinate ceiling used to
+	// reach the first point. Never let the relative field-probe clearance rise
+	// above it, even if the first sample is close to the machine's soft limit.
+	return math.Min(z+*req.RetractAboveMM, req.SafeZMM), nil
 }
 
 func validateTraceOutlineRequest(req TraceOutlineRequest) error {

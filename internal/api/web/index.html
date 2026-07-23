@@ -55,8 +55,8 @@
   .command-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: var(--gap-xs); align-items: center; min-width: 0; }
   .command-panel form { margin: 0; }
   #command-toolbar > #ctl-halt { min-width: 84px; font-weight: 650; }
-  main { flex: 1 1 auto; width: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); padding: clamp(14px, 2vw, 22px) clamp(14px, 2vw, 22px) 76px; max-width: 1440px; margin: 0 auto; }
-  body[data-active-tab="gcode-console"] main { max-width: none; }
+  main { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); padding: clamp(14px, 2vw, 22px) clamp(14px, 2vw, 22px) 76px; }
+  main > *, .view > .page-section { width: 100%; min-width: 0; }
   #status-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; display: flex; gap: 10px; align-items: flex-end; padding: 8px 20px calc(8px + env(safe-area-inset-bottom)); background: rgba(16,19,22,.96); border-top: 1px solid var(--border); box-shadow: 0 -10px 24px rgba(0,0,0,.22); }
   #status-bar[hidden] { display: none !important; }
   #notice { flex: 1; min-width: 0; display: grid; gap: 5px; max-height: 30vh; overflow: auto; }
@@ -68,9 +68,9 @@
   .status-item.error { border-color: rgba(232,106,95,.5); color: var(--err); }
   .status-item.error .status-dot { background: var(--err); }
   #notice-clear { flex: 0 0 auto; }
-  .tabs { display: flex; gap: 4px; margin: 0 0 var(--gap-md); padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  .tabs { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 4px; margin: 0 0 var(--gap-md); padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
-  .tab { flex: 0 0 auto; min-height: var(--control-h); border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
+  .tab { width: 100%; min-width: 0; min-height: var(--control-h); border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
   .tab:hover { border-color: rgba(87,166,214,.45); color: var(--text); }
   .tab.active { color: var(--text); border-color: rgba(87,166,214,.55); background: var(--panel-2); }
   .view { display: grid; gap: var(--gap-xl); min-height: 0; }
@@ -281,6 +281,7 @@
   .origin-row { display: grid; gap: 6px; align-items: end; }
   .origin-row-action { grid-template-columns: minmax(176px, 220px) auto; }
   .origin-row-action.needs-value { grid-template-columns: minmax(176px, 220px) 96px auto; }
+	.origin-row-anchor { grid-template-columns: minmax(132px, 1fr) 78px 78px auto; }
   .origin-row-saved { grid-template-columns: minmax(0, 1fr) 74px 72px minmax(0, .85fr) 122px; }
   .origin-row label { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
   .origin-row label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
@@ -295,7 +296,7 @@
   .control-command-drawer .tap-origin-panel { grid-template-columns: 1fr; gap: 10px; padding-top: 0; border-top: 0; }
   .control-command-drawer .tap-control-group, .control-command-drawer .tap-coordinate-panel, .control-command-drawer .origin-group { grid-template-rows: auto; gap: 0; }
   .control-command-drawer .origin-group.has-title { grid-template-rows: var(--tap-label-h) auto; gap: 6px; }
-  .control-command-drawer .origin-row-action, .control-command-drawer .origin-row-action.needs-value, .control-command-drawer .origin-row-saved { grid-template-columns: 1fr; }
+  .control-command-drawer .origin-row-action, .control-command-drawer .origin-row-action.needs-value, .control-command-drawer .origin-row-anchor, .control-command-drawer .origin-row-saved { grid-template-columns: 1fr; }
   .control-command-drawer .saved-origin-label-field, .control-command-drawer #saved-origin-save { grid-column: auto; }
   .tap-move-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(74px, 92px); gap: 10px; align-items: stretch; }
   .workarea-frame { position: relative; width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
@@ -462,7 +463,6 @@
     #command-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
     .command-popout > summary, #command-toolbar > #ctl-halt { padding-inline: 9px; }
     .tabs { margin-bottom: var(--gap-sm); }
-    .tab { flex: 1 0 auto; }
     #log-tools, .log-left, .log-right, #gcode-form { display: grid; grid-template-columns: 1fr; align-items: stretch; }
     .log-left label { justify-content: start; }
     .table-scroll { overflow: visible; border: 0; background: transparent; }
@@ -643,11 +643,11 @@
   </div>
 </header>
 <main>
-  <nav class="tabs" aria-label="Views">
-    <button type="button" id="tab-active-job" class="tab active">Active job</button>
-    <button type="button" id="tab-gcode-console" class="tab">Gcode console</button>
-    <button type="button" id="tab-control" class="tab">Control</button>
-    <button type="button" id="tab-files" class="tab">Files</button>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button type="button" id="tab-active-job" class="tab active" role="tab" aria-selected="true" aria-controls="active-job-view">Active job</button>
+    <button type="button" id="tab-gcode-console" class="tab" role="tab" aria-selected="false" aria-controls="gcode-console-view" tabindex="-1">Gcode console</button>
+    <button type="button" id="tab-control" class="tab" role="tab" aria-selected="false" aria-controls="control-view" tabindex="-1">Control</button>
+    <button type="button" id="tab-files" class="tab" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
   </nav>
 
   <section class="page-section">
@@ -662,7 +662,7 @@
     </div>
   </section>
 
-  <section id="active-job-view" class="view">
+  <section id="active-job-view" class="view" role="tabpanel" aria-labelledby="tab-active-job">
     <section class="page-section">
       <h2>Active job</h2>
       <div id="active-gcode-panel" class="action-panel">
@@ -699,7 +699,7 @@
     </section>
   </section>
 
-  <section id="gcode-console-view" class="view" hidden>
+  <section id="gcode-console-view" class="view" role="tabpanel" aria-labelledby="tab-gcode-console" hidden>
     <section class="page-section">
       <h2>Gcode console</h2>
       <div id="console">
@@ -733,7 +733,7 @@
     </section>
   </section>
 
-  <section id="control-view" class="view" hidden>
+  <section id="control-view" class="view" role="tabpanel" aria-labelledby="tab-control" hidden>
     <section class="page-section">
       <h2>Control</h2>
       <div id="jog">
@@ -816,6 +816,15 @@
                         <button type="button" id="saved-origin-save">Save Current</button>
                       </div>
                     </div>
+					<div class="origin-group has-title">
+					  <div class="origin-group-title">Anchor Origin</div>
+					  <div class="origin-row origin-row-anchor">
+						<label><span>Anchor</span><select id="anchor-origin-anchor"><option value="anchor1">Anchor 1</option><option value="anchor2">Anchor 2</option></select></label>
+						<label><span>X Offset</span><input id="anchor-origin-offset-x" type="number" value="0" step="0.001" inputmode="decimal"></label>
+						<label><span>Y Offset</span><input id="anchor-origin-offset-y" type="number" value="0" step="0.001" inputmode="decimal"></label>
+						<button type="button" id="anchor-origin-apply">Set Origin</button>
+					  </div>
+					</div>
                   </div>
                 </div>
               </details>
@@ -965,6 +974,7 @@
               </div>
               <div id="outline-field-controls" class="outline-field-controls" hidden>
                 <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
+                <label><span>Safe Z</span><input id="outline-field-safe-z" type="number" min="0" max="200" step="0.1" inputmode="decimal"></label>
                 <button type="button" id="outline-field-probe">Probe field Z</button>
                 <div id="outline-export-controls" class="outline-export-controls" hidden>
                   <button type="button" id="outline-export-obj">Export OBJ</button>
@@ -979,7 +989,7 @@
     </section>
   </section>
 
-  <section id="files-view" class="view" hidden>
+  <section id="files-view" class="view" role="tabpanel" aria-labelledby="tab-files" hidden>
     <section class="page-section">
       <div class="toolbar">
         <div id="drop">Drop files here or click to upload to <span class="name">the current folder</span></div>

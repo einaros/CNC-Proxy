@@ -984,6 +984,10 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 		"coordinate.clearance_x=-5.0",
 		"coordinate.clearance_y=-21.0",
 		"coordinate.clearance_z=-3.0",
+		"coordinate.anchor1_x=-287.51",
+		"coordinate.anchor1_y=-202.11",
+		"coordinate.anchor2_offset_x=88.5",
+		"coordinate.anchor2_offset_y=45.0",
 		"atc.probe.fast_rate_mm_m=300",
 		"atc.probe.slow_rate_mm_m=60",
 		"atc.probe.retract_mm=2",
@@ -1002,11 +1006,14 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	if res.UI.Machine.FeedMaxMMMin != 2800 || res.Learned.Feed.MaxXYMMMin != 2800 {
 		t.Fatalf("feed max = ui %v learned %+v", res.UI.Machine.FeedMaxMMMin, res.Learned.Feed)
 	}
-	if res.UI.Machine.SafeZMM != 0 || res.Learned.ZMinMM != -121 || res.Learned.ZMaxMM != 0 {
+	if res.UI.Machine.SafeZMM != -3 || res.Learned.ZMinMM != -121 || res.Learned.ZMaxMM != 0 {
 		t.Fatalf("Z profile = ui safe %v learned %+v", res.UI.Machine.SafeZMM, res.Learned)
 	}
 	if res.Learned.SoftEndstop.Enabled || res.Learned.Clearance.X != -5 || res.Learned.Probe.RetractMM != 2 {
 		t.Fatalf("known config profile = %+v", res.Learned)
+	}
+	if !res.Learned.Anchors.Available || res.Learned.Anchors.Anchor1 != (store.XYPoint{X: -287.51, Y: -202.11}) || res.Learned.Anchors.Anchor2 != (store.XYPoint{X: -199.01, Y: -157.11}) {
+		t.Fatalf("learned anchors = %+v", res.Learned.Anchors)
 	}
 	if got := res.Learned.Config["soft_endstop.x_min"]; got != "-302.0" {
 		t.Fatalf("raw config soft_endstop.x_min = %q", got)
@@ -1375,6 +1382,65 @@ func TestContinueToolChangeRejectsNonToolState(t *testing.T) {
 	}
 }
 
+func TestProbeZFieldRetractsAboveFirstContactWithoutCrossingSafeCeiling(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:0,0,-10|WPos:0,0,-10|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	m.SetGcodeReply("G38.2 Z-20.0000 F50.0000", "[PRB:10.0000,-5.0000,-10.0000:1]")
+	clearance := 5.0
+
+	res, err := svc.ProbeZ(ProbeZRequest{
+		MachineX:       10,
+		MachineY:       -5,
+		MoveXY:         true,
+		SafeZMM:        -1,
+		RetractAboveMM: &clearance,
+		ProbeDepthMM:   20,
+		ProbeFeedMM:    50,
+	})
+	if err != nil {
+		t.Fatalf("ProbeZ: %v", err)
+	}
+	if res.RetractZMM != -5 {
+		t.Fatalf("retract Z = %v, want -5", res.RetractZMM)
+	}
+	want := []string{
+		"G53 G0 Z-3.0000",
+		"G53 G0 X10.0000 Y-5.0000",
+		"G38.2 Z-20.0000 F50.0000",
+		"G53 G0 Z-5.0000",
+	}
+	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
+		t.Fatalf("probe gcodes = %v, want %v", got, want)
+	}
+}
+
+func TestSafeZTargetUsesFirmwareClearanceAsTheSharedCeiling(t *testing.T) {
+	svc, _, _ := serviceWithMachine(t)
+	ui := svc.UISettings()
+	ui.Machine.SafeZMM = 0
+	ui.Machine.Learned = store.MachineLearned{
+		ZMinMM: -121,
+		ZMaxMM: 0,
+		ConfigNumbers: map[string]float64{
+			"coordinate.clearance_z": -5,
+		},
+	}
+	ui, err := svc.SetUISettings(ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ui.Machine.SafeZMM != -5 {
+		t.Fatalf("persisted safe Z = %v, want firmware clearance -5", ui.Machine.SafeZMM)
+	}
+	if got := svc.SafeZTargetMM(-1); got != -5 {
+		t.Fatalf("effective safe Z = %v, want firmware clearance -5", got)
+	}
+}
+
 func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
@@ -1398,7 +1464,7 @@ func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
 	}
 	want := []string{
 		"M494.1",
-		"G53 G0 Z5.0000",
+		"G53 G0 Z-3.0000",
 		"G53 G0 X0.0000 Y0.0000",
 		"G53 G0 Z-2.0000",
 		"G53 G1 X10.0000 Y0.0000 F600.0000",
@@ -1468,7 +1534,7 @@ func TestTraceOutlineTurnsProbeLaserOffAfterFailure(t *testing.T) {
 	if !tr.ObserveStatusPayload(status) {
 		t.Fatal("failed to seed tracker status")
 	}
-	m.SetGcodeReply("G53 G0 Z5.0000", "error: soft limit")
+	m.SetGcodeReply("G53 G0 Z-3.0000", "error: soft limit")
 
 	_, err := svc.TraceOutline(TraceOutlineRequest{
 		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}},
@@ -1481,7 +1547,7 @@ func TestTraceOutlineTurnsProbeLaserOffAfterFailure(t *testing.T) {
 	}
 	want := []string{
 		"M494.1",
-		"G53 G0 Z5.0000",
+		"G53 G0 Z-3.0000",
 		"M494.2",
 	}
 	if got := m.Gcodes(); !stringSlicesEqual(got, want) {

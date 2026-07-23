@@ -782,12 +782,28 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
+	for _, want := range []string{
+		`grid-template-columns: repeat(4, minmax(112px, 1fr))`,
+		`main > *, .view > .page-section { width: 100%; min-width: 0; }`,
+		`role="tablist"`,
+		`role="tab" aria-selected="true" aria-controls="active-job-view"`,
+		`role="tabpanel" aria-labelledby="tab-active-job"`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing full-width responsive tab marker %s", want)
+		}
+	}
+	for _, gone := range []string{`max-width: 1440px`, `body[data-active-tab="gcode-console"] main`} {
+		if strings.Contains(string(body), gone) {
+			t.Errorf("index still contains tab-specific width constraint %s", gone)
+		}
+	}
 	for _, want := range []string{`id="macro-toolbar"`, `id="macro-panel"`, `id="macro-manager"`, `id="macro-save"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`<h2>Control</h2>`, `Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `Saved Zeros`, `<span>Preset</span><select id="saved-origin-select"`, `id="origin-action"`, `Zero XY`, `Zero Z`, `Set X Value`, `Set Y Value`, `Set Z Value`, `Probe Z`, `Reset XY to Machine`, `id="origin-value-x"`, `id="origin-value-y"`, `id="origin-value-z"`, `id="origin-apply"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `id="outline-probe-controls"`, `id="outline-probe-point"`, `id="outline-close"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings"`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learn-status"`, `id="machine-learned-summary"`, `<summary>Gamepad</summary>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
+	for _, want := range []string{`<h2>Control</h2>`, `Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `Saved Zeros`, `Anchor Origin`, `id="anchor-origin-anchor"`, `id="anchor-origin-offset-x"`, `id="anchor-origin-offset-y"`, `id="anchor-origin-apply"`, `<span>Preset</span><select id="saved-origin-select"`, `id="origin-action"`, `Zero XY`, `Zero Z`, `Set X Value`, `Set Y Value`, `Set Z Value`, `Probe Z`, `Reset XY to Machine`, `id="origin-value-x"`, `id="origin-value-y"`, `id="origin-value-z"`, `id="origin-apply"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `id="outline-probe-controls"`, `id="outline-probe-point"`, `id="outline-close"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-safe-z"`, `Safe Z`, `id="outline-field-probe"`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings"`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learn-status"`, `id="machine-learned-summary"`, `<summary>Gamepad</summary>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -817,6 +833,11 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), "/api/events?scope=control") || !strings.Contains(string(jsBody), "/api/events?scope=files") {
 		t.Errorf("app.js missing scoped event streams")
 	}
+	for _, want := range []string{`setAttribute("aria-selected", String(active))`, `if (e.key === "ArrowRight")`, `else if (e.key === "Home")`} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing accessible tab behavior %s", want)
+		}
+	}
 	if !strings.Contains(string(jsBody), `clearNotice("control-sse")`) || !strings.Contains(string(jsBody), `clearNotice("files-sse")`) {
 		t.Errorf("app.js missing stream reconnect notice clearing")
 	}
@@ -829,10 +850,10 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), "refreshJobs") || !strings.Contains(string(jsBody), "/api/jobs") {
 		t.Errorf("app.js missing active job diagnostic refresh")
 	}
-	if !strings.Contains(string(jsBody), "renderWorkArea") || !strings.Contains(string(jsBody), "SPINDLE_DIAMETER_MM") || !strings.Contains(string(jsBody), "OUTLINE_POINT_DIAMETER_MM") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "sendTapMove") || !strings.Contains(string(jsBody), "sendWorkCoordinateMove") || !strings.Contains(string(jsBody), "workMoveTargetsFromInputs") || !strings.Contains(string(jsBody), "resetWorkMoveInput") || !strings.Contains(string(jsBody), "workMoveInputIsLive") || !strings.Contains(string(jsBody), "renderWorkMoveFieldState") || !strings.Contains(string(jsBody), "stepTapFeed") || !strings.Contains(string(jsBody), "feedBoundsFor") || !strings.Contains(string(jsBody), "stepZ") || !strings.Contains(string(jsBody), "setOriginAxis") || !strings.Contains(string(jsBody), "applyOriginAction") || !strings.Contains(string(jsBody), "runAutoZProbe") || !strings.Contains(string(jsBody), "recallSelectedOrigin") || !strings.Contains(string(jsBody), "saveCurrentOrigin") || !strings.Contains(string(jsBody), "deleteSelectedOrigin") || !strings.Contains(string(jsBody), "saved_origins") || !strings.Contains(string(jsBody), `type: "target"`) || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), `type: "origin"`) || !strings.Contains(string(jsBody), "G10L20P0") || !strings.Contains(string(jsBody), "/api/probe/auto-z") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
+	if !strings.Contains(string(jsBody), "renderWorkArea") || !strings.Contains(string(jsBody), "SPINDLE_DIAMETER_MM") || !strings.Contains(string(jsBody), "OUTLINE_POINT_DIAMETER_MM") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "sendTapMove") || !strings.Contains(string(jsBody), "sendWorkCoordinateMove") || !strings.Contains(string(jsBody), "workMoveTargetsFromInputs") || !strings.Contains(string(jsBody), "resetWorkMoveInput") || !strings.Contains(string(jsBody), "workMoveInputIsLive") || !strings.Contains(string(jsBody), "renderWorkMoveFieldState") || !strings.Contains(string(jsBody), "stepTapFeed") || !strings.Contains(string(jsBody), "feedBoundsFor") || !strings.Contains(string(jsBody), "stepZ") || !strings.Contains(string(jsBody), "setOriginAxis") || !strings.Contains(string(jsBody), "applyOriginAction") || !strings.Contains(string(jsBody), "applyAnchorOrigin") || !strings.Contains(string(jsBody), "originTargetsFromAnchor") || !strings.Contains(string(jsBody), "machineAnchorPoints") || !strings.Contains(string(jsBody), "runAutoZProbe") || !strings.Contains(string(jsBody), "recallSelectedOrigin") || !strings.Contains(string(jsBody), "saveCurrentOrigin") || !strings.Contains(string(jsBody), "deleteSelectedOrigin") || !strings.Contains(string(jsBody), "saved_origins") || !strings.Contains(string(jsBody), `type: "target"`) || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), `type: "origin"`) || !strings.Contains(string(jsBody), "G10L20P0") || !strings.Contains(string(jsBody), "/api/probe/auto-z") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing work area, tap move, jog status messaging, or cache-only status polling")
 	}
-	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "traceOutline", "traceOutlineMachinePoints", "/api/outline/trace", "runFieldProbe", "probeZAtWorkPoint", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "OUTLINE_CURVE_TOLERANCE_MM", "MAX_EFFECTIVE_OUTLINE_POINTS", "effectiveOutlineGeometry", "outlineEffectiveExportPoints", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "buildOutlineSVG", "svgExportPoint", `viewBox="0 0`, "visible_svg", "field-probe-layer", "probe_diameter_mm", "spot_gap_mm", "center_spacing_mm", "effective_point_count", "exportHeightOBJ", "exportHeightImage", "zero_origin_machine_mm", "table-layer", "outline-layer", "data-z-mm", "safe_z_enabled", "safe_z_disabled"} {
+	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "traceOutline", "traceOutlineMachinePoints", "/api/outline/trace", "runFieldProbe", "probeZAtWorkPoint", "fieldProbeSafeZ", "retract_above_mm", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "OUTLINE_CURVE_TOLERANCE_MM", "MAX_EFFECTIVE_OUTLINE_POINTS", "effectiveOutlineGeometry", "outlineEffectiveExportPoints", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "buildOutlineSVG", "svgExportPoint", `viewBox="0 0`, "visible_svg", "field-probe-layer", "probe_diameter_mm", "spot_gap_mm", "center_spacing_mm", "effective_point_count", "exportHeightOBJ", "exportHeightImage", "zero_origin_machine_mm", "table-layer", "outline-layer", "data-z-mm", "safe_z_enabled", "safe_z_disabled"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing outline capture behavior %s", want)
 		}
@@ -860,10 +881,13 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing %s", want)
 		}
 	}
-	for _, want := range []string{`function renderToolActions`, `const waitingForTool = m.state === "Tool"`, `const continueAvailable = waitingForTool || state.toolChangeAwaitingContinue`, `tool-wait-row`, `tool-wait-status`, `set.disabled = setPending || waitingForTool`, `change.disabled = changePending || waitingForTool`, `cont.disabled = continuePending`, `setSoftDisabled(cont, !continuePending && !continueAvailable)`, `cal.disabled = calibratePending || waitingForTool`, `function syncToolFlowFromMachineStatus`, `function refreshMachineAfterToolAction`, `isProbeToolActive()`} {
+	for _, want := range []string{`function renderToolActions`, `const waitingForTool = m.state === "Tool"`, `const continueAvailable = waitingForTool`, `tool-wait-row`, `tool-wait-status`, `set.disabled = setPending || waitingForTool`, `change.disabled = changePending || waitingForTool`, `cont.disabled = continuePending`, `setSoftDisabled(cont, !continuePending && !continueAvailable)`, `cal.disabled = calibratePending || waitingForTool`, `function refreshMachineAfterToolAction`, `isProbeToolActive()`} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing tool wait-state UI policy %s", want)
 		}
+	}
+	if strings.Contains(string(jsBody), "toolChangeAwaitingContinue") {
+		t.Error("tool Continue availability must follow the observed machine Tool state, not a stale local latch")
 	}
 	for _, old := range []string{`cal.disabled = pending || waitingForTool`, `change.disabled = pending || waitingForTool`, `set.disabled = pending || waitingForTool`, `cont.disabled = pending || !waitingForTool`, `await pollMachine();
     setTimeout(pollMachine, 1200);`} {
@@ -999,6 +1023,10 @@ func TestLearnMachineParametersAPI(t *testing.T) {
 		"alpha_max_rate=3000.0",
 		"beta_max_rate=3000.0",
 		"default_seek_rate=3000",
+		"coordinate.anchor1_x=-287.51",
+		"coordinate.anchor1_y=-202.11",
+		"coordinate.anchor2_offset_x=88.5",
+		"coordinate.anchor2_offset_y=45.0",
 	}, "\n")+"\x04")
 
 	resp := postJSON(t, srv.URL+"/api/machine/learn", map[string]any{})
@@ -1017,8 +1045,11 @@ func TestLearnMachineParametersAPI(t *testing.T) {
 	if out.UI.Machine.WorkArea != (store.WorkArea{XMin: -371, XMax: 0, YMin: -250, YMax: 0}) {
 		t.Fatalf("api learned work area = %+v", out.UI.Machine.WorkArea)
 	}
+	if !out.Learned.Anchors.Available || out.Learned.Anchors.Anchor1 != (store.XYPoint{X: -287.51, Y: -202.11}) || out.Learned.Anchors.Anchor2 != (store.XYPoint{X: -199.01, Y: -157.11}) {
+		t.Fatalf("api learned anchors = %+v", out.Learned.Anchors)
+	}
 	got := st.UISettings()
-	if got.Machine.Learned.Config["soft_endstop.x_min"] != "-371.0" || got.Machine.WorkArea.XMin != -371 {
+	if got.Machine.Learned.Config["soft_endstop.x_min"] != "-371.0" || got.Machine.WorkArea.XMin != -371 || !got.Machine.Learned.Anchors.Available {
 		t.Fatalf("persisted UI settings = %+v", got.Machine)
 	}
 }
@@ -1316,7 +1347,7 @@ func TestJogWebSocketTargetSafeZ(t *testing.T) {
 	for time.Now().Before(deadline) {
 		gcodes := m.Gcodes()
 		if len(gcodes) >= 2 {
-			if !strings.Contains(gcodes[0], "Z4.0000") || !strings.Contains(gcodes[1], "X10.0000") || !strings.Contains(gcodes[1], "Y-5.0000") {
+			if !strings.Contains(gcodes[0], "Z1.0000") || !strings.Contains(gcodes[1], "X10.0000") || !strings.Contains(gcodes[1], "Y-5.0000") {
 				t.Fatalf("safe target gcodes = %v", gcodes)
 			}
 			return
@@ -1495,10 +1526,10 @@ func TestProbeZEndpointSerializesSafeMoveProbeAndLift(t *testing.T) {
 		t.Fatalf("probe result = %+v", result)
 	}
 	want := []string{
-		"G53 G0 Z0.0000",
+		"G53 G0 Z-3.0000",
 		"G53 G0 X10.0000 Y-5.0000",
 		"G38.2 Z-5.0000 F50.0000",
-		"G53 G0 Z0.0000",
+		"G53 G0 Z-3.0000",
 	}
 	got := m.Gcodes()
 	if len(got) != len(want) {
@@ -1566,7 +1597,7 @@ func TestTraceOutlineEndpointSerializesProbeLaserTrace(t *testing.T) {
 	}
 	want := []string{
 		"M494.1",
-		"G53 G0 Z5.0000",
+		"G53 G0 Z-3.0000",
 		"G53 G0 X0.0000 Y0.0000",
 		"G53 G0 Z-2.0000",
 		"G53 G1 X10.0000 Y0.0000 F600.0000",
