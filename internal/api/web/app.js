@@ -2442,7 +2442,7 @@ function renderWorkAreaFieldProbePreview() {
     return;
   }
   group.innerHTML = points.map((p, i) =>
-    `<circle class="${done.has(p.src.id) ? "done" : ""}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`
+    `<circle class="${[done.has(p.src.id) ? "done" : "", o.fieldProbePending && i === o.fieldProbeIndex ? "current" : ""].filter(Boolean).join(" ")}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`
   ).join("");
   group.removeAttribute("display");
 }
@@ -2731,6 +2731,7 @@ async function runFieldProbe() {
       o.fieldProbeIndex = i;
       o.feedback = "Probing field point " + (i + 1) + " of " + o.fieldProbePreview.length + "...";
       renderOutlineCapture();
+      renderWorkArea();
       const p = o.fieldProbePreview[i];
       const probed = await probeZAtWorkPoint(p, {
         moveXY: true,

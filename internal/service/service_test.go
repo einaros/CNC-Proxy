@@ -1447,6 +1447,9 @@ func TestProbeZFieldRetractsAboveFirstContactWithoutCrossingSafeCeiling(t *testi
 	if res.RetractZMM != -5 {
 		t.Fatalf("retract Z = %v, want -5", res.RetractZMM)
 	}
+	if st, _ := tr.Current(); st.State != machine.Idle {
+		t.Fatalf("probe returned before retract completed: %s", st.State)
+	}
 	want := []string{
 		"G53 G0 Z-3.0000",
 		"G53 G0 X10.0000 Y-5.0000",

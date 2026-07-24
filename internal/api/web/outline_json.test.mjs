@@ -105,6 +105,7 @@ test("outline JSON load rejects malformed geometry", () => {
 
 test("field probing keeps every travel and retract at the starting machine Z", async () => {
   const calls = [];
+  const workAreaRenders = [];
   const state = {
     jog: { armed: false },
     outline: {
@@ -128,7 +129,11 @@ test("field probing keeps every travel and retract at the starting machine Z", a
     currentOutlineCapturePosition: () => ({ machine: { z: -41 } }),
     setOutlineFeedback: () => {},
     renderOutlineCapture: () => {},
-    renderWorkArea: () => {},
+    renderWorkArea: () => workAreaRenders.push({
+      pending: state.outline.fieldProbePending,
+      index: state.outline.fieldProbeIndex,
+      results: state.outline.fieldProbeResults.length,
+    }),
     pollMachine: () => {},
     probeZAtWorkPoint: async (point, opts) => {
       calls.push({ point, opts });
@@ -144,4 +149,6 @@ test("field probing keeps every travel and retract at the starting machine Z", a
     assert.equal(opts.retractZMM, -41);
     assert.equal("retractAboveMM" in opts, false);
   }
+  assert.ok(workAreaRenders.some((render) => render.pending && render.index === 0 && render.results === 0), "first target renders before its probe completes");
+  assert.ok(workAreaRenders.some((render) => render.pending && render.index === 1 && render.results === 1), "next target renders before its probe completes");
 });

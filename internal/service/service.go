@@ -1658,6 +1658,7 @@ const (
 	traceStatusPollInterval = 250 * time.Millisecond
 	traceStatusMinTimeout   = 5 * time.Second
 	traceStatusMaxTimeout   = 2 * time.Minute
+	probeIdleTimeout        = 2 * time.Minute
 )
 
 // RecoveryResult is returned by explicit alarm-recovery actions so operators
@@ -1762,6 +1763,16 @@ func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
 		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", retractZ), false); err != nil {
 			return err
 		}
+		// Motion gcode is silent over WiFi. Do not return while the final
+		// retract is still running: the next field point must not be injected
+		// into the machine's queued motion.
+		st, err := s.waitMachineIdle(c, probeIdleTimeout)
+		if err != nil {
+			return fmt.Errorf("%w: could not verify probe retract: %v", ErrMachineStatusStale, err)
+		}
+		if st.State != machine.Idle {
+			return fmt.Errorf("%w: probe retract did not finish (%s)", ErrMachineStatusStale, statusSummary(st))
+		}
 		return nil
 	})
 	if err != nil {
@@ -1815,7 +1826,7 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 			res.Message = "Trace outline failed: " + err.Error()
 			return err
 		}
-		st, err = s.waitTraceIdle(c, traceIdleTimeout(points, req.FeedMM))
+		st, err = s.waitMachineIdle(c, traceIdleTimeout(points, req.FeedMM))
 		if err != nil {
 			res.Message = "Trace outline could not verify final machine status: " + err.Error()
 			return err
@@ -1960,7 +1971,7 @@ func traceIdleTimeout(points []TracePoint, feedMMMin float64) time.Duration {
 	return estimated
 }
 
-func (s *Service) waitTraceIdle(c *client.Conn, timeout time.Duration) (machine.Status, error) {
+func (s *Service) waitMachineIdle(c *client.Conn, timeout time.Duration) (machine.Status, error) {
 	deadline := time.Now().Add(timeout)
 	var last machine.Status
 	for {
