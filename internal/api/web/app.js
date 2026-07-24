@@ -422,6 +422,7 @@ function defaultOutlineState() {
     fieldProbeIndex: 0,
     fieldProbeTooDense: false,
     tracePending: false,
+    filePending: false,
     feedback: "",
     feedbackKind: "",
   };
@@ -2186,6 +2187,8 @@ function renderOutlineCapture() {
   const redo = document.getElementById("outline-redo");
   const close = document.getElementById("outline-close");
   const trace = document.getElementById("outline-trace");
+  const load = document.getElementById("outline-load");
+  const save = document.getElementById("outline-save");
   const curve = document.getElementById("outline-curve-fit");
   const probeControls = document.getElementById("outline-probe-controls");
   const probeWrap = document.getElementById("outline-probe-point-wrap");
@@ -2199,7 +2202,7 @@ function renderOutlineCapture() {
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
-  const busy = !!o.pointProbePending || !!o.fieldProbePending || !!o.tracePending;
+  const busy = !!o.pointProbePending || !!o.fieldProbePending || !!o.tracePending || !!o.filePending;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
   if (start) {
@@ -2208,6 +2211,11 @@ function renderOutlineCapture() {
     setSoftDisabled(start, false);
   }
   if (activeControls) activeControls.hidden = !o.active;
+  if (load) {
+    load.disabled = busy;
+    setSoftDisabled(load, false);
+    setTextIfChanged(load, o.filePending ? "Loading..." : "Load outline");
+  }
   if (end) {
     end.disabled = busy;
     setSoftDisabled(end, false);
@@ -2243,6 +2251,10 @@ function renderOutlineCapture() {
   if (exp) {
     exp.disabled = busy;
     setSoftDisabled(exp, !busy && o.points.length < 2);
+  }
+  if (save) {
+    save.disabled = busy;
+    setSoftDisabled(save, !busy && o.points.length < 2);
   }
   if (fieldControls) fieldControls.hidden = !fieldReady;
   if (spacing) {
@@ -2873,55 +2885,196 @@ function outlinePathD(points, closed, curveFit) {
     if (closed && points.length > 1) d += " Z";
     return d;
   }
-  if (closed) {
-    for (let i = 0; i < points.length; i++) {
-      const p0 = points[(i - 1 + points.length) % points.length];
-      const p1 = points[i];
-      const p2 = points[(i + 1) % points.length];
-      const p3 = points[(i + 2) % points.length];
-      d += " " + curveCommand(p0, p1, p2, p3);
-    }
-    return d + " Z";
+  for (const segment of outlineCubicSegments(points, closed)) {
+    d += " C " + pathPoint(segment.c1) + " " + pathPoint(segment.c2) + " " + pathPoint(segment.end);
   }
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = i === 0 ? points[i] : points[i - 1];
+  return closed ? d + " Z" : d;
+}
+
+function outlineCubicSegments(points, closed) {
+  if (points.length < 2) return [];
+  const count = closed ? points.length : points.length - 1;
+  const segments = [];
+  for (let i = 0; i < count; i++) {
+    const p0 = closed ? points[(i - 1 + points.length) % points.length] : (i === 0 ? points[i] : points[i - 1]);
     const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = i + 2 < points.length ? points[i + 2] : p2;
-    d += " " + curveCommand(p0, p1, p2, p3);
+    const p2 = closed ? points[(i + 1) % points.length] : points[i + 1];
+    const p3 = closed ? points[(i + 2) % points.length] : (i + 2 < points.length ? points[i + 2] : p2);
+    const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
+    const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
+    segments.push({ start: p1, c1, c2, end: p2 });
   }
-  return d;
+  return segments;
 }
 
-function curveCommand(p0, p1, p2, p3) {
-  const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
-  const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
-  return "C " + pathPoint(c1) + " " + pathPoint(c2) + " " + pathPoint(p2);
+function dxfPair(lines, code, value) {
+  lines.push(String(code), String(value));
 }
 
-function svgExportPoint(p, ext) {
-  return { x: p.x - ext.x_min, y: ext.y_max - p.y };
+function dxfNumber(value) {
+  if (!Number.isFinite(value)) throw new Error("outline contains an invalid coordinate");
+  return pathNum(value);
 }
 
-function svgExportRect(rect, ext) {
-  return {
-    x: rect.x_min - ext.x_min,
-    y: ext.y_max - rect.y_max,
-    width: rect.x_max - rect.x_min,
-    height: rect.y_max - rect.y_min,
-  };
+function addOutlinePolylineDXF(lines, points, closed) {
+  dxfPair(lines, 0, "LWPOLYLINE");
+  dxfPair(lines, 100, "AcDbEntity");
+  dxfPair(lines, 8, "OUTLINE");
+  dxfPair(lines, 100, "AcDbPolyline");
+  dxfPair(lines, 90, points.length);
+  dxfPair(lines, 70, closed ? 1 : 0);
+  for (const point of points) {
+    dxfPair(lines, 10, dxfNumber(point.x));
+    dxfPair(lines, 20, dxfNumber(point.y));
+  }
+}
+
+function addOutlineSplineDXF(lines, segment) {
+  dxfPair(lines, 0, "SPLINE");
+  dxfPair(lines, 100, "AcDbEntity");
+  dxfPair(lines, 8, "OUTLINE");
+  dxfPair(lines, 100, "AcDbSpline");
+  dxfPair(lines, 210, 0);
+  dxfPair(lines, 220, 0);
+  dxfPair(lines, 230, 1);
+  dxfPair(lines, 70, 8);
+  dxfPair(lines, 71, 3);
+  dxfPair(lines, 72, 8);
+  dxfPair(lines, 73, 4);
+  dxfPair(lines, 74, 0);
+  for (const knot of [0, 0, 0, 0, 1, 1, 1, 1]) dxfPair(lines, 40, knot);
+  for (const point of [segment.start, segment.c1, segment.c2, segment.end]) {
+    dxfPair(lines, 10, dxfNumber(point.x));
+    dxfPair(lines, 20, dxfNumber(point.y));
+    dxfPair(lines, 30, 0);
+  }
 }
 
 function exportOutline() {
   try {
     if (state.outline.points.length < 2) throw new Error("outline needs at least two points");
-    const svg = buildOutlineSVG();
+    const dxf = buildOutlineDXF();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    downloadBlob("cnc-outline-" + stamp + ".svg", svg, "image/svg+xml");
-    setOutlineFeedback("Outline export started.", "ok");
+    downloadBlob("cnc-outline-" + stamp + ".dxf", dxf, "application/dxf");
+    setOutlineFeedback("DXF export started.", "ok");
   } catch (e) {
     setOutlineFeedback("Export failed: " + e.message, "error");
   }
+}
+
+function outlineJSONDocument() {
+  const o = state.outline;
+  if (o.points.length < 2) throw new Error("outline needs at least two points");
+  return {
+    app: "cnc-proxy",
+    kind: "capture-outline",
+    version: 1,
+    units: "mm",
+    outline: {
+      points: o.points.map(cloneOutlinePoint),
+      closed: !!o.closed,
+      curve_fit: !!o.curveFit,
+      origin: cloneOutlineOrigin(o.origin),
+      probe_each_point: !!o.probeEachPoint,
+      field_spot_gap_mm: fieldProbeSpotGap(),
+      field_safe_z_mm: fieldProbeSafeZ(),
+      field_probe_results: o.fieldProbeResults.map(cloneOutlinePoint),
+    },
+  };
+}
+
+function saveOutlineJSON() {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadBlob("cnc-outline-" + stamp + ".json", JSON.stringify(outlineJSONDocument(), null, 2) + "\n", "application/json");
+    setOutlineFeedback("Outline JSON export started.", "ok");
+  } catch (e) {
+    setOutlineFeedback("Save outline failed: " + e.message, "error");
+  }
+}
+
+async function loadOutlineFile(file) {
+  if (!file) return;
+  const current = state.outline;
+  if (current.points.length && !confirm("Load this outline and replace the current captured outline?")) return;
+  current.filePending = true;
+  current.feedback = "Loading outline...";
+  current.feedbackKind = "";
+  renderOutlineCapture();
+  try {
+    const next = outlineStateFromJSON(JSON.parse(await file.text()));
+    state.outline = next;
+    if (next.closed && !next.fieldProbeResults.length) updateFieldProbePreview();
+    next.feedback = "Loaded outline with " + next.points.length + " points.";
+    next.feedbackKind = "ok";
+    renderOutlineCapture();
+    renderWorkArea();
+  } catch (e) {
+    current.filePending = false;
+    current.feedback = "Load outline failed: " + e.message;
+    current.feedbackKind = "error";
+    renderOutlineCapture();
+  }
+}
+
+function outlineStateFromJSON(doc) {
+  if (!doc || doc.app !== "cnc-proxy" || doc.kind !== "capture-outline" || doc.version !== 1 || doc.units !== "mm") {
+    throw new Error("file is not a CNC Proxy outline JSON export");
+  }
+  const raw = doc.outline;
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.points)) {
+    throw new Error("outline points are missing");
+  }
+  if (raw.points.length < 2 || raw.points.length > MAX_EFFECTIVE_OUTLINE_POINTS) {
+    throw new Error("outline must contain between 2 and " + MAX_EFFECTIVE_OUTLINE_POINTS + " points");
+  }
+  const next = defaultOutlineState();
+  next.active = true;
+  next.points = raw.points.map((point, i) => outlinePointFromJSON(point, i + 1));
+  next.closed = !!raw.closed;
+  next.curveFit = !!raw.curve_fit;
+  next.origin = outlineOriginFromJSON(raw.origin);
+  next.probeEachPoint = !!raw.probe_each_point;
+  next.fieldSpotGapMM = boundedOutlineNumber(raw.field_spot_gap_mm, 0, 250, DEFAULT_FIELD_SPOT_GAP_MM);
+  next.fieldSafeZMM = boundedOutlineNumber(raw.field_safe_z_mm, 0, 200, DEFAULT_FIELD_SAFE_Z_MM);
+  const samples = raw.field_probe_results == null ? [] : raw.field_probe_results;
+  if (!Array.isArray(samples) || samples.length > MAX_FIELD_PROBE_POINTS) {
+    throw new Error("field probe samples are invalid");
+  }
+  next.fieldProbeResults = samples.map((point, i) => outlinePointFromJSON(point, i + 1));
+  return next;
+}
+
+function outlineOriginFromJSON(raw) {
+  if (raw == null) return null;
+  if (typeof raw !== "object") throw new Error("outline origin is invalid");
+  const origin = {};
+  for (const axis of ["x", "y", "z"]) {
+    const value = Number(raw[axis]);
+    if (Number.isFinite(value)) origin[axis] = value;
+  }
+  if (!Object.keys(origin).length) throw new Error("outline origin is invalid");
+  return origin;
+}
+
+function boundedOutlineNumber(value, min, max, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+}
+
+function outlinePointFromJSON(raw, index) {
+  if (!raw || typeof raw !== "object") throw new Error("outline point " + index + " is invalid");
+  const point = {};
+  for (const field of ["x", "y", "z", "machine_x", "machine_y", "machine_z"]) {
+    const value = Number(raw[field]);
+    if (!Number.isFinite(value)) throw new Error("outline point " + index + " is missing " + field);
+    point[field] = value;
+  }
+  point.id = typeof raw.id === "string" && raw.id ? raw.id.slice(0, 160) : newID("outline-point");
+  point.captured_at = typeof raw.captured_at === "string" ? raw.captured_at.slice(0, 80) : "";
+  point.probed = !!raw.probed;
+  point.probe_output = typeof raw.probe_output === "string" ? raw.probe_output.slice(0, 4096) : "";
+  return point;
 }
 
 function downloadBlob(filename, content, type) {
@@ -6801,9 +6954,15 @@ function init() {
   bindButtonAction(document.getElementById("outline-undo"), undoOutline);
   bindButtonAction(document.getElementById("outline-redo"), redoOutline);
   bindButtonAction(document.getElementById("outline-close"), closeOutline);
+  bindButtonAction(document.getElementById("outline-load"), () => document.getElementById("outline-file").click());
+  bindButtonAction(document.getElementById("outline-save"), saveOutlineJSON);
   document.getElementById("outline-curve-fit").onchange = toggleOutlineCurveFit;
   document.getElementById("outline-probe-point").onchange = toggleOutlineProbePoint;
   bindButtonAction(document.getElementById("outline-export"), exportOutline);
+  document.getElementById("outline-file").onchange = (e) => {
+    loadOutlineFile(e.target.files[0]);
+    e.target.value = "";
+  };
   const outlineSpacing = document.getElementById("outline-field-spacing");
   outlineSpacing.oninput = () => markControlDirty(outlineSpacing);
   outlineSpacing.onchange = updateOutlineFieldSpacing;

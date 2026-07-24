@@ -900,6 +900,7 @@
                     <button type="button" id="jog-arm">Arm Tap Move</button>
                   </div>
                   <button type="button" id="outline-start" class="primary">Capture outline</button>
+                  <button type="button" id="outline-load">Load outline</button>
                   <div id="outline-active-controls" class="outline-active-controls" hidden>
                     <button type="button" id="outline-end">End outline</button>
                     <button type="button" id="outline-add-point">Add point</button>
@@ -907,9 +908,11 @@
                     <button type="button" id="outline-undo">Undo</button>
                     <button type="button" id="outline-redo">Redo</button>
                     <button type="button" id="outline-close">Close outline</button>
+                    <button type="button" id="outline-save">Save outline</button>
                     <button type="button" id="outline-export">Export SVG</button>
                     <label><input type="checkbox" id="outline-curve-fit"> Curve fit</label>
                   </div>
+                  <input id="outline-file" type="file" accept="application/json,.json" hidden>
                 </div>
                 <div id="workarea-hover-position" hidden></div>
                 <svg id="workarea-plot" class="not-armed" viewBox="0 0 100 100" role="img" aria-label="Machine work area">
