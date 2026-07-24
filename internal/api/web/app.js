@@ -4862,6 +4862,7 @@ function renderMacroRegion(region, box) {
     btn.textContent = macro.name;
     btn.title = macro.description || macro.lines.join("\n");
     if (macro.color) btn.style.borderColor = macro.color;
+    btn.disabled = state.macroRunning;
     bindButtonAction(btn, () => runMacro(macro));
     box.appendChild(btn);
   }
@@ -4890,8 +4891,8 @@ function renderMacroEditor() {
   setControlValueIfIdle("macro-placement", macro ? (slotForMacro(macro.id)?.region || "none") : "none");
   document.getElementById("macro-save").disabled = false;
   const run = document.getElementById("macro-run");
-  run.disabled = false;
-  setSoftDisabled(run, !macro);
+  run.disabled = !!state.macroRunning;
+  setSoftDisabled(run, !state.macroRunning && !macro);
   document.getElementById("macro-up").disabled = !macro || !slotForMacro(macro.id);
   document.getElementById("macro-down").disabled = !macro || !slotForMacro(macro.id);
   document.getElementById("macro-delete").disabled = !macro;
@@ -5000,6 +5001,8 @@ async function runMacro(macro, opts = {}) {
   }
   if (macro.lines.length > 1 && !confirm("Run macro " + macro.name + "?")) return;
   state.macroRunning = true;
+  renderMacroButtons();
+  renderMacroEditor();
   setNotice((opts.source === "gamepad" ? "Gamepad macro: " : "Running macro: ") + macro.name, "info", "macro-run");
   try {
     for (const line of macro.lines) {
@@ -5013,6 +5016,8 @@ async function runMacro(macro, opts = {}) {
     setNotice("Macro completed: " + macro.name, "ok", "macro-run");
   } finally {
     state.macroRunning = false;
+    renderMacroButtons();
+    renderMacroEditor();
   }
 }
 

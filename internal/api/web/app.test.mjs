@@ -18,7 +18,16 @@ function extractFunction(name) {
   let start = source.indexOf("\nfunction " + name + "(");
   if (start < 0) start = source.indexOf("\nasync function " + name + "(");
   if (start < 0) throw new Error("function not found in app.js: " + name);
-  const bodyStart = source.indexOf("{", start);
+  let parens = 0;
+  let bodyStart = -1;
+  for (let i = source.indexOf("(", start); i < source.length; i++) {
+    if (source[i] === "(") parens++;
+    else if (source[i] === ")" && --parens === 0) {
+      bodyStart = source.indexOf("{", i);
+      break;
+    }
+  }
+  if (bodyStart < 0) throw new Error("function body not found in app.js: " + name);
   let depth = 0;
   for (let i = bodyStart; i < source.length; i++) {
     if (source[i] === "{") depth++;
@@ -251,6 +260,27 @@ test("saving Machine Settings keeps learned machine profiles", () => {
     state.ui.machine.learned_profiles,
     { "Carvera|1.0": { identity: { model: "Carvera" } } },
   );
+});
+
+test("running a macro disables its controls until the command completes", async () => {
+  let resolveCommand;
+  const renders = [];
+  const state = { macroRunning: false };
+  const ctx = buildContext(["runMacro"], [], {
+    state,
+    rememberCommand: () => {},
+    sendGcode: () => new Promise((resolve) => { resolveCommand = resolve; }),
+    setNotice: () => {},
+    renderMacroButtons: () => renders.push("buttons"),
+    renderMacroEditor: () => renders.push("editor"),
+  });
+  const run = vm.runInContext("runMacro({ name: 'Laser light', lines: ['M3'] })", ctx);
+  assert.equal(state.macroRunning, true);
+  assert.deepEqual(renders, ["buttons", "editor"]);
+  resolveCommand(true);
+  await run;
+  assert.equal(state.macroRunning, false);
+  assert.deepEqual(renders, ["buttons", "editor", "buttons", "editor"]);
 });
 
 test("Set XYZ leaves blank axes unchanged", () => {
