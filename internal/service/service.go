@@ -649,13 +649,63 @@ func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
 	if err := validateMachineUI(ui.Machine); err != nil {
 		return store.UISettings{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
+	current := s.store.UISettings()
+	// Learned machine data is server-owned read-only metadata. A browser can
+	// still have a delayed settings save in flight when learning completes, so
+	// never let that stale UI snapshot erase newer anchors or profiles.
+	ui.Machine.Learned = newerMachineLearned(current.Machine.Learned, ui.Machine.Learned)
+	ui.Machine.LearnedProfiles = mergeMachineLearnedProfiles(current.Machine.LearnedProfiles, ui.Machine.LearnedProfiles)
 	ui.Machine.SafeZMM = clampSafeZMM(ui.Machine.SafeZMM, ui.Machine.Learned)
 	if ui.Log.Filter == "" {
 		ui.Log.Filter = "all"
-		current := s.store.UISettings()
 		ui.Log.Autoscroll = current.Log.Autoscroll
 	}
 	return s.store.SetUISettings(ui)
+}
+
+func newerMachineLearned(current, candidate store.MachineLearned) store.MachineLearned {
+	if !hasMachineLearnedData(current) && hasMachineLearnedData(candidate) {
+		return candidate
+	}
+	if hasMachineLearnedData(current) && !hasMachineLearnedData(candidate) {
+		return current
+	}
+	if current.LearnedAt.IsZero() && !candidate.LearnedAt.IsZero() {
+		return candidate
+	}
+	if !candidate.LearnedAt.IsZero() && !candidate.LearnedAt.Before(current.LearnedAt) {
+		return candidate
+	}
+	if current.Identity.Model == "" && candidate.Identity.Model != "" {
+		return candidate
+	}
+	return current
+}
+
+func hasMachineLearnedData(learned store.MachineLearned) bool {
+	return !learned.LearnedAt.IsZero() ||
+		learned.Identity != (store.MachineIdentity{}) ||
+		learned.Anchors.Available ||
+		len(learned.Config) > 0 ||
+		len(learned.ConfigNumbers) > 0 ||
+		len(learned.ConfigBools) > 0 ||
+		len(learned.Diagnostics) > 0 ||
+		learned.ZMinMM != 0 ||
+		learned.ZMaxMM != 0
+}
+
+func mergeMachineLearnedProfiles(current, candidate map[string]store.MachineLearned) map[string]store.MachineLearned {
+	if len(current) == 0 && len(candidate) == 0 {
+		return nil
+	}
+	merged := make(map[string]store.MachineLearned, len(current)+len(candidate))
+	for key, learned := range current {
+		merged[key] = learned
+	}
+	for key, learned := range candidate {
+		merged[key] = newerMachineLearned(merged[key], learned)
+	}
+	return merged
 }
 
 // LearnMachineParameters refreshes read-only firmware-reported parameters into

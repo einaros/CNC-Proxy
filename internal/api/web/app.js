@@ -1538,6 +1538,10 @@ function machineLearnedSummaryLines(learned) {
 
 async function learnMachineParameters() {
   if (state.machineLearnPending) return;
+  if (state.settingsSaveTimer) {
+    clearTimeout(state.settingsSaveTimer);
+    state.settingsSaveTimer = null;
+  }
   state.machineLearnPending = true;
   state.machineLearnFeedback = "Learning machine parameters...";
   state.machineLearnFeedbackKind = "info";

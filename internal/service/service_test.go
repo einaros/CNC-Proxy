@@ -1481,6 +1481,42 @@ func TestSafeZTargetUsesFirmwareClearanceAsTheSharedCeiling(t *testing.T) {
 	}
 }
 
+func TestSetUISettingsKeepsNewerLearnedAnchorsFromStaleBrowserSave(t *testing.T) {
+	svc, _ := newService(t)
+	now := time.Now().UTC()
+	ui := svc.UISettings()
+	ui.Machine.Learned = store.MachineLearned{
+		LearnedAt: now,
+		Identity:  store.MachineIdentity{Model: "CarveraAir", Version: "1.2.3", FileType: "lz"},
+		Anchors: store.MachineAnchorProfile{
+			Available: true,
+			Anchor1:   store.XYPoint{X: -287.51, Y: -202.11},
+			Anchor2:   store.XYPoint{X: -199.01, Y: -157.11},
+		},
+	}
+	ui.Machine.LearnedProfiles = map[string]store.MachineLearned{
+		"CarveraAir | 1.2.3 | lz": ui.Machine.Learned,
+	}
+	if _, err := svc.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := svc.UISettings()
+	stale.Machine.Learned = store.MachineLearned{}
+	stale.Machine.LearnedProfiles = nil
+	stale.Machine.TapFeedMMMin = 700
+	got, err := svc.SetUISettings(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Machine.Learned.Anchors.Available || got.Machine.Learned.Anchors.Anchor1 != (store.XYPoint{X: -287.51, Y: -202.11}) {
+		t.Fatalf("stale settings save erased learned anchors: %+v", got.Machine.Learned.Anchors)
+	}
+	if profile := got.Machine.LearnedProfiles["CarveraAir | 1.2.3 | lz"]; !profile.Anchors.Available {
+		t.Fatalf("stale settings save erased learned profile: %+v", got.Machine.LearnedProfiles)
+	}
+}
+
 func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
