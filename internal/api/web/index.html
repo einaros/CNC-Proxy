@@ -66,6 +66,7 @@
   .command-panel { position: fixed; top: var(--command-panel-top, -1000px); left: var(--command-panel-left, 12px); z-index: 90; width: var(--command-panel-width, min(440px, calc(100vw - 24px))); max-height: var(--command-panel-max-height, calc(100vh - 128px)); overflow: auto; padding: 12px; display: grid; gap: var(--gap-md); background: #1a2022; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 24px 58px rgba(0,0,0,.46), 0 0 0 1px rgba(255,255,255,.025) inset; opacity: 0; transform: translateY(-4px); transition: opacity .12s ease, transform .12s ease; }
   .command-popout[open] .command-panel { opacity: 1; transform: translateY(0); }
   .command-panel::before { content: ""; position: absolute; top: -6px; left: var(--command-panel-arrow-left, 24px); width: 10px; height: 10px; background: #1a2022; border-left: 1px solid var(--border); border-top: 1px solid var(--border); transform: rotate(45deg); }
+  .command-panel[data-placement="above"]::before { top: auto; bottom: -6px; transform: rotate(225deg); }
   .command-panel-compact { --command-panel-pref-width: 360px; }
   .command-panel-tool { --command-panel-pref-width: 400px; }
   .command-panel-wide { --command-panel-pref-width: 760px; }

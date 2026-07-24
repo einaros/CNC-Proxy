@@ -5206,14 +5206,29 @@ function bindDataControlButtons() {
   });
 }
 
+function commandPanelPlacement(rect, preferredWidth, viewportWidth, viewportHeight) {
+  const margin = 12;
+  const width = Math.min(preferredWidth, Math.max(280, viewportWidth - margin * 2));
+  const maxLeft = Math.max(margin, viewportWidth - margin - width);
+  const left = Math.round(Math.min(Math.max(rect.left + rect.width / 2 - width / 2, margin), maxLeft));
+  const belowTop = rect.bottom + 8;
+  const belowHeight = viewportHeight - belowTop - margin;
+  const aboveHeight = rect.top - margin - 8;
+  const placeAbove = belowHeight < 180 && aboveHeight > belowHeight;
+  const top = placeAbove
+    ? Math.max(margin, rect.top - 8 - Math.max(0, aboveHeight))
+    : Math.max(margin, belowTop);
+  const maxHeight = Math.max(0, placeAbove ? aboveHeight : belowHeight);
+  const arrowLeft = Math.round(Math.min(Math.max(rect.left + rect.width / 2 - left - 5, 16), width - 26));
+  return { top: Math.round(top), left, width, maxHeight: Math.round(maxHeight), arrowLeft, placement: placeAbove ? "above" : "below" };
+}
+
 function initCommandPopouts() {
   const popouts = Array.from(document.querySelectorAll(".command-popout"));
   const commandMenu = document.getElementById("command-menu");
   let positionFrame = 0;
 
   const directChild = (el, predicate) => Array.from(el.children).find(predicate) || null;
-  const clamp = (n, min, max) => Math.min(Math.max(n, min), max);
-
   function positionPopout(popout) {
     if (!popout.open) return;
     const trigger = directChild(popout, (el) => el.tagName === "SUMMARY");
@@ -5221,22 +5236,17 @@ function initCommandPopouts() {
     if (!trigger || !panel) return;
 
     const rect = trigger.getBoundingClientRect();
-    const margin = 12;
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1024;
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 768;
     const preferredWidth = Number.parseFloat(getComputedStyle(panel).getPropertyValue("--command-panel-pref-width")) || 440;
-    const width = Math.min(preferredWidth, Math.max(280, viewportWidth - margin * 2));
-    const top = Math.round(rect.bottom + 8);
-    const maxLeft = Math.max(margin, viewportWidth - margin - width);
-    const left = Math.round(clamp(rect.left + rect.width / 2 - width / 2, margin, maxLeft));
-    const maxHeight = Math.round(Math.max(180, viewportHeight - top - margin));
-    const arrowLeft = Math.round(clamp(rect.left + rect.width / 2 - left - 5, 16, width - 26));
+    const placement = commandPanelPlacement(rect, preferredWidth, viewportWidth, viewportHeight);
 
-    panel.style.setProperty("--command-panel-top", top + "px");
-    panel.style.setProperty("--command-panel-left", left + "px");
-    panel.style.setProperty("--command-panel-width", width + "px");
-    panel.style.setProperty("--command-panel-max-height", maxHeight + "px");
-    panel.style.setProperty("--command-panel-arrow-left", arrowLeft + "px");
+    panel.style.setProperty("--command-panel-top", placement.top + "px");
+    panel.style.setProperty("--command-panel-left", placement.left + "px");
+    panel.style.setProperty("--command-panel-width", placement.width + "px");
+    panel.style.setProperty("--command-panel-max-height", placement.maxHeight + "px");
+    panel.style.setProperty("--command-panel-arrow-left", placement.arrowLeft + "px");
+    panel.dataset.placement = placement.placement;
   }
 
   function positionOpenPopouts() {

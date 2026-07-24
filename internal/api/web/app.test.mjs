@@ -283,6 +283,25 @@ test("running a macro disables its controls until the command completes", async 
   assert.deepEqual(renders, ["buttons", "editor", "buttons", "editor"]);
 });
 
+test("command popovers use the side with usable viewport height", () => {
+  const ctx = buildContext(["commandPanelPlacement"]);
+  const below = vm.runInContext(
+    "commandPanelPlacement({ left: 100, width: 80, top: 100, bottom: 132 }, 440, 1200, 800)",
+    ctx,
+  );
+  assert.equal(below.placement, "below");
+  assert.equal(below.top, 140);
+  assert.equal(below.maxHeight, 648);
+
+  const above = vm.runInContext(
+    "commandPanelPlacement({ left: 100, width: 80, top: 260, bottom: 292 }, 440, 1200, 360)",
+    ctx,
+  );
+  assert.equal(above.placement, "above");
+  assert.equal(above.top, 12);
+  assert.equal(above.maxHeight, 240);
+});
+
 test("Set XYZ leaves blank axes unchanged", () => {
   const values = {
     "origin-xyz-x": { value: "1.5" },
