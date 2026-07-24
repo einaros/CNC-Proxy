@@ -1412,6 +1412,7 @@ func normalizeFinite(v, fallback float64) float64 {
 }
 
 func defaultGamepadSettings() Gamepad {
+	outlineButton := 7 // Standard gamepad mapping: right trigger.
 	return Gamepad{
 		Axes: GamepadAxes{
 			X: GamepadAxis{Axis: 0, Scale: 1},
@@ -1420,6 +1421,7 @@ func defaultGamepadSettings() Gamepad {
 		},
 		DeadmanButton: 0,
 		SlowButtons:   []int{4, 5},
+		OutlineButton: &outlineButton,
 		MacroButtons:  []GamepadMacroButton{},
 	}
 }
@@ -1435,6 +1437,11 @@ func normalizeGamepadSettings(in Gamepad, macros map[string]bool) Gamepad {
 		DeadmanButton: normalizeGamepadButton(in.DeadmanButton, d.DeadmanButton),
 		MacroButtons:  []GamepadMacroButton{},
 	}
+	outlineButton := *d.OutlineButton
+	if in.OutlineButton != nil {
+		outlineButton = normalizeGamepadButton(*in.OutlineButton, outlineButton)
+	}
+	out.OutlineButton = &outlineButton
 	if in.SlowButtons == nil {
 		out.SlowButtons = append([]int(nil), d.SlowButtons...)
 	} else {
@@ -1525,6 +1532,10 @@ func copyUISettings(in UISettings) UISettings {
 	out.Gamepad.SlowButtons = append([]int(nil), in.Gamepad.SlowButtons...)
 	if out.Gamepad.SlowButtons == nil {
 		out.Gamepad.SlowButtons = []int{}
+	}
+	if in.Gamepad.OutlineButton != nil {
+		outlineButton := *in.Gamepad.OutlineButton
+		out.Gamepad.OutlineButton = &outlineButton
 	}
 	out.Gamepad.MacroButtons = append([]GamepadMacroButton(nil), in.Gamepad.MacroButtons...)
 	if out.Gamepad.MacroButtons == nil {

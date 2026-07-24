@@ -384,6 +384,59 @@ test("an unconnected gamepad does not produce a disconnect status", () => {
   assert.equal(message.text, "");
 });
 
+test("outline gamepad button defaults to the standard right trigger and persists a custom binding", () => {
+  const ctx = buildContext([
+    "defaultGamepadSettings",
+    "normalizeGamepadSettings",
+    "normalizeAxisSetting",
+    "normalizeButtonList",
+    "newID",
+  ]);
+  assert.equal(vm.runInContext("defaultGamepadSettings().outline_button", ctx), 7);
+  assert.equal(vm.runInContext("normalizeGamepadSettings({ outline_button: 6 }, new Set()).outline_button", ctx), 6);
+});
+
+test("outline gamepad button is inert outside capture and adds exactly one point on its press edge", () => {
+  let points = 0;
+  const state = {
+    ui: { gamepad: { outline_button: 7 } },
+    jog: { buttons: [] },
+    outline: { active: false },
+  };
+  const ctx = buildContext(["handleGamepadOutlineButton"], [], {
+    state,
+    addOutlinePoint: () => { points++; },
+  });
+  vm.runInContext("handleGamepadOutlineButton([false, false, false, false, false, false, false, true], false)", ctx);
+  assert.equal(points, 0);
+  state.outline.active = true;
+  vm.runInContext("handleGamepadOutlineButton([false, false, false, false, false, false, false, true], false)", ctx);
+  assert.equal(points, 1);
+  state.jog.buttons = [false, false, false, false, false, false, false, true];
+  vm.runInContext("handleGamepadOutlineButton([false, false, false, false, false, false, false, true], false)", ctx);
+  assert.equal(points, 1);
+});
+
+test("focusing the outline button field captures the next gamepad press", () => {
+  let saves = 0;
+  const input = { value: "7", blur: () => { document.activeElement = null; } };
+  const document = {
+    activeElement: input,
+    getElementById: (id) => id === "gamepad-outline-button" ? input : null,
+  };
+  const state = { ui: { gamepad: { outline_button: 7 } }, jog: { buttons: [] } };
+  const ctx = buildContext(["captureGamepadOutlineButton"], [], {
+    state,
+    document,
+    clearControlDrafts: () => {},
+    queueSaveUISettings: () => { saves++; },
+  });
+  assert.equal(vm.runInContext("captureGamepadOutlineButton([false, false, false, false, false, false, true])", ctx), true);
+  assert.equal(state.ui.gamepad.outline_button, 6);
+  assert.equal(input.value, "6");
+  assert.equal(saves, 1);
+});
+
 test("Tap Move ignores a second tap until the first target is observed", () => {
   let sent = 0;
   const ctx = buildContext(["tapMoveTargetBusy", "sendTapMove"], [], {

@@ -383,6 +383,7 @@ function defaultGamepadSettings() {
     },
     deadman_button: 0,
     slow_buttons: [4, 5],
+    outline_button: 7,
     macro_buttons: [],
   };
 }
@@ -623,6 +624,7 @@ function normalizeGamepadSettings(gamepad, macroIDs) {
   }
   bindings.sort((a, b) => a.button - b.button);
   const deadman = Number(gamepad.deadman_button);
+  const outlineButton = Number(gamepad.outline_button);
   return {
     axes: {
       x: normalizeAxisSetting(gamepad.axes?.x, d.axes.x),
@@ -631,6 +633,7 @@ function normalizeGamepadSettings(gamepad, macroIDs) {
     },
     deadman_button: Number.isInteger(deadman) && deadman >= 0 && deadman <= 63 ? deadman : d.deadman_button,
     slow_buttons: normalizeButtonList(gamepad.slow_buttons, d.slow_buttons),
+    outline_button: Number.isInteger(outlineButton) && outlineButton >= 0 && outlineButton <= 63 ? outlineButton : d.outline_button,
     macro_buttons: bindings,
   };
 }
@@ -3345,6 +3348,7 @@ function renderGamepadSettings() {
   setControlValueIfIdle("gamepad-deadman-button", gp.deadman_button);
   setControlValueIfIdle("gamepad-slow-button-0", gp.slow_buttons[0] ?? "");
   setControlValueIfIdle("gamepad-slow-button-1", gp.slow_buttons[1] ?? "");
+  setControlValueIfIdle("gamepad-outline-button", gp.outline_button);
   renderGamepadMacroBindings();
 }
 
@@ -3447,6 +3451,7 @@ function updateGamepadButtons() {
     document.getElementById("gamepad-slow-button-0").value,
     document.getElementById("gamepad-slow-button-1").value,
   ].filter((v) => v !== "").map((v) => readInt(v, 0, 0, 63));
+  gp.outline_button = readInt(document.getElementById("gamepad-outline-button").value, gp.outline_button, 0, 63);
   queueSaveUISettings();
 }
 
@@ -6514,9 +6519,34 @@ function mappedAxis(gp, axis) {
   return clampAxis(value * cfg.scale);
 }
 
+function captureGamepadOutlineButton(buttons) {
+  const input = document.getElementById("gamepad-outline-button");
+  if (!input || document.activeElement !== input) return false;
+  const previous = state.jog.buttons || [];
+  const button = buttons.findIndex((pressed, index) => pressed && !previous[index]);
+  if (button < 0) return false;
+  state.ui.gamepad.outline_button = button;
+  input.value = String(button);
+  clearControlDrafts(input);
+  input.blur();
+  queueSaveUISettings();
+  return true;
+}
+
+function handleGamepadOutlineButton(buttons, captured) {
+  const button = state.ui.gamepad.outline_button;
+  const previous = state.jog.buttons || [];
+  if (captured || !buttons[button] || previous[button]) return;
+  // This binding is deliberately inert outside capture mode; it must never
+  // become an accidental machine action when the outline workflow is closed.
+  if (!state.outline.active) return;
+  addOutlinePoint();
+}
+
 function handleGamepadMacroButtons(buttons, deadman) {
   const prev = state.jog.buttons || [];
   for (const binding of state.ui.gamepad.macro_buttons) {
+    if (binding.button === state.ui.gamepad.outline_button) continue;
     const pressed = !!buttons[binding.button];
     if (!pressed || prev[binding.button]) continue;
     const macro = macroByID(binding.macro_id);
@@ -6528,7 +6558,6 @@ function handleGamepadMacroButtons(buttons, deadman) {
     clearNotice("gamepad-macro");
     runMacro(macro, { source: "gamepad" });
   }
-  state.jog.buttons = buttons;
 }
 
 function sameJogAxes(a, b) {
@@ -6579,7 +6608,10 @@ function sampleJog() {
     state.jog.pad = label;
     state.jog.deadman = deadman;
     state.jog.axes = axes;
+    const capturingOutlineButton = captureGamepadOutlineButton(buttons);
+    handleGamepadOutlineButton(buttons, capturingOutlineButton);
     handleGamepadMacroButtons(buttons, deadman);
+    state.jog.buttons = buttons;
     if (state.jog.armed) sendJog({ type: "input", deadman, axes, slow });
     if (changed) renderJog();
   } catch (e) {
@@ -6850,6 +6882,12 @@ function init() {
   document.getElementById("gamepad-deadman-button").onchange = updateGamepadButtons;
   document.getElementById("gamepad-slow-button-0").onchange = updateGamepadButtons;
   document.getElementById("gamepad-slow-button-1").onchange = updateGamepadButtons;
+  const outlineButtonInput = document.getElementById("gamepad-outline-button");
+  outlineButtonInput.oninput = () => markControlDirty(outlineButtonInput);
+  outlineButtonInput.onchange = () => {
+    clearControlDrafts(outlineButtonInput);
+    updateGamepadButtons();
+  };
   document.getElementById("gamepad-add-macro").onclick = addGamepadMacroBinding;
   bindDirtyDraftControls(MACHINE_SETTING_IDS);
   for (const id of MACHINE_SETTING_IDS) {

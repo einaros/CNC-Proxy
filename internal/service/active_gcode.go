@@ -486,12 +486,15 @@ func (s *Service) CalibrateCurrentTool() (MachineActionResult, error) {
 	return res, nil
 }
 
-// AutoZProbe mirrors the official controller's M495 auto Z probe action. The
-// proxy uses the current work XY as the probe point and zero X/Y probe offsets.
+// AutoZProbe probes the current XY from the current machine Z and sets the
+// current work Z to zero at the contact point. Unlike the firmware's M495
+// automation, this must not first lift to the firmware clearance Z: that
+// clearance can lie outside a configured Z soft limit.
 func (s *Service) AutoZProbe() (MachineActionResult, error) {
 	res := MachineActionResult{Action: "auto_z_probe"}
 	var out string
 	var display string
+	var verified bool
 	err := s.arb.WithMachine(true, func(c *client.Conn) error {
 		st, err := s.queryRecoveryStatus(c)
 		if err != nil {
@@ -503,34 +506,53 @@ func (s *Service) AutoZProbe() (MachineActionResult, error) {
 		if st.State != machine.Idle {
 			return fmt.Errorf("%w: machine reports %s", ErrMachineStatusStale, statusSummary(st))
 		}
-		workX, workY, ok := currentWorkXY(st)
+		startZ, ok := finiteAxisValue(st.MPos, "z")
 		if !ok {
-			return fmt.Errorf("%w: current work XY is unavailable", ErrProbeUnavailable)
+			return fmt.Errorf("%w: current machine Z is unavailable", ErrProbeUnavailable)
 		}
-		wire := protocol.AutoZProbeLine(workX, workY, 0, 0)
-		display = strings.TrimSpace(wire)
-		s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, display)
-		o, e := c.SendConsoleCommand(wire, client.GcodeOpts{Cap: gcodeReplyCap})
+		// This is intentionally not SafeZTargetMM(startZ). The target equals a
+		// freshly observed in-range machine coordinate, so clamping it would
+		// move away from the requested start height.
+		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", startZ), false); err != nil {
+			return err
+		}
+		probeLine := "G38.2 Z-20.0000 F50.0000"
+		display = probeLine + " → G10 L20 P0 Z0"
+		o, err := s.sendProbeLine(c, probeLine, true)
 		out = o
-		if e != nil {
-			return e
+		if err != nil {
+			return err
+		}
+		if _, hit, err := parseProbeResult(out); err != nil {
+			return err
+		} else if !hit {
+			return fmt.Errorf("%w: probe did not report contact", ErrProbeUnavailable)
+		}
+		if _, err := s.sendProbeLine(c, "G10 L20 P0 Z0", false); err != nil {
+			return err
+		}
+		verifiedStatus, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			return fmt.Errorf("%w: could not verify work Z after probing: %v", ErrMachineStatusStale, err)
+		}
+		workZ, ok := finiteAxisValue(verifiedStatus.WPos, "z")
+		if !ok || math.Abs(workZ) > 0.01 {
+			return fmt.Errorf("%w: work Z did not reach zero after probing", ErrProbeUnavailable)
+		}
+		verified = true
+		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", startZ), false); err != nil {
+			return err
 		}
 		s.refreshStatusBestEffort(c)
 		return nil
 	})
 	res.Command = display
 	res.Output = out
-	res.Message = "Auto Z probe command sent; machine confirmation was not available."
-	if out != "" {
-		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
-	}
+	res.Verified = verified
+	res.Message = "Work Z zero verified at probe contact."
 	if err != nil {
 		res.Message = err.Error()
-		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
 		return res, err
-	}
-	if out == "" {
-		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "sent: no reply observed")
 	}
 	return res, nil
 }

@@ -263,9 +263,12 @@ type XYPoint struct {
 // scale and map the normalized client input before it is sent to the jog
 // WebSocket.
 type Gamepad struct {
-	Axes          GamepadAxes          `json:"axes"`
-	DeadmanButton int                  `json:"deadman_button"`
-	SlowButtons   []int                `json:"slow_buttons"`
+	Axes          GamepadAxes `json:"axes"`
+	DeadmanButton int         `json:"deadman_button"`
+	SlowButtons   []int       `json:"slow_buttons"`
+	// OutlineButton adds a point while outline capture is active. A nil value
+	// is normalized to the standard-mapping right trigger for older profiles.
+	OutlineButton *int                 `json:"outline_button"`
 	MacroButtons  []GamepadMacroButton `json:"macro_buttons"`
 }
 

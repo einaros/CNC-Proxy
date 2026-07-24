@@ -1269,6 +1269,9 @@ func validateGamepadSettings(g store.Gamepad) error {
 	if g.DeadmanButton < 0 || g.DeadmanButton > maxGamepadButton {
 		return fmt.Errorf("service: gamepad deadman button must be between 0 and %d", maxGamepadButton)
 	}
+	if g.OutlineButton != nil && (*g.OutlineButton < 0 || *g.OutlineButton > maxGamepadButton) {
+		return fmt.Errorf("service: gamepad outline button must be between 0 and %d", maxGamepadButton)
+	}
 	for _, btn := range g.SlowButtons {
 		if btn < 0 || btn > maxGamepadButton {
 			return fmt.Errorf("service: gamepad slow button must be between 0 and %d", maxGamepadButton)

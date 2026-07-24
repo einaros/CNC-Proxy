@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -816,7 +817,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
-	for _, want := range []string{`Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `data-origin-zero="x"`, `data-origin-zero="y"`, `data-origin-zero="z"`, `Set XYZ`, `id="origin-set-xyz-open"`, `id="origin-xyz-modal"`, `id="origin-xyz-x"`, `id="origin-xyz-y"`, `id="origin-xyz-z"`, `id="origin-xyz-apply"`, `Set Origin`, `id="origin-set-open"`, `id="origin-set-modal"`, `id="origin-set-source"`, `id="origin-set-x"`, `id="origin-set-y"`, `id="origin-set-apply"`, `Origin Presets`, `id="origin-presets-open"`, `id="origin-presets-modal"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="origin-probe-z"`, `Probe Z`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `id="outline-probe-controls"`, `id="outline-probe-point"`, `id="outline-close"`, `id="outline-load"`, `id="outline-save"`, `id="outline-file"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings-open"`, `id="machine-settings-modal"`, `id="machine-settings-close"`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learn-status"`, `id="machine-learned-summary"`, `<summary>Gamepad</summary>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
+	for _, want := range []string{`Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `data-origin-zero="x"`, `data-origin-zero="y"`, `data-origin-zero="z"`, `Set XYZ`, `id="origin-set-xyz-open"`, `id="origin-xyz-modal"`, `id="origin-xyz-x"`, `id="origin-xyz-y"`, `id="origin-xyz-z"`, `id="origin-xyz-apply"`, `Set Origin`, `id="origin-set-open"`, `id="origin-set-modal"`, `id="origin-set-source"`, `id="origin-set-x"`, `id="origin-set-y"`, `id="origin-set-apply"`, `Origin Presets`, `id="origin-presets-open"`, `id="origin-presets-modal"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="origin-probe-z"`, `Probe Z`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `id="outline-probe-controls"`, `id="outline-probe-point"`, `id="outline-close"`, `id="outline-load"`, `id="outline-save"`, `id="outline-file"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings-open"`, `id="machine-settings-modal"`, `id="machine-settings-close"`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learn-status"`, `id="machine-learned-summary"`, `<summary>Gamepad</summary>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-outline-button"`, `gamepad-outline-button-help`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -1583,13 +1584,14 @@ func TestProbeZEndpointSerializesSafeMoveProbeAndLift(t *testing.T) {
 	}
 }
 
-func TestAutoZProbeEndpointSendsControllerM495AtCurrentWorkXY(t *testing.T) {
+func TestAutoZProbeEndpointStartsAtCurrentMachineZ(t *testing.T) {
 	srv, m, tr := serverWithMachine(t)
 	status := "<Idle|MPos:20,30,-5|WPos:12.5,-3.25,1|T:0,0>"
 	m.SetStatus(status)
 	if !tr.ObserveStatusPayload(status) {
 		t.Fatal("failed to seed tracker status")
 	}
+	m.SetGcodeReply("G38.2 Z-20.0000 F50.0000", "[PRB:20.0000,30.0000,-12.0000:1]")
 
 	resp := postJSON(t, srv.URL+"/api/probe/auto-z", map[string]any{})
 	defer resp.Body.Close()
@@ -1601,11 +1603,12 @@ func TestAutoZProbeEndpointSendsControllerM495AtCurrentWorkXY(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "auto_z_probe" || result.Command != "M495 X12.5Y-3.25O0F0" {
+	if result.Action != "auto_z_probe" || result.Command != "G38.2 Z-20.0000 F50.0000 → G10 L20 P0 Z0" || !result.Verified {
 		t.Fatalf("auto z probe result = %+v", result)
 	}
-	if got := m.Gcodes(); len(got) != 1 || got[0] != "M495 X12.5Y-3.25O0F0" {
-		t.Fatalf("auto z probe gcodes = %v", got)
+	want := []string{"G53 G0 Z-5.0000", "G38.2 Z-20.0000 F50.0000", "G10 L20 P0 Z0", "G53 G0 Z-5.0000"}
+	if got := m.Gcodes(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("auto z probe gcodes = %v, want %v", got, want)
 	}
 }
 

@@ -133,6 +133,7 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	outlineButton := 6
 	ui, err := s.SetUISettings(UISettings{
 		Macros: []Macro{{
 			ID:    "probe",
@@ -169,6 +170,7 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 			},
 			DeadmanButton: 7,
 			SlowButtons:   []int{6},
+			OutlineButton: &outlineButton,
 			MacroButtons:  []GamepadMacroButton{{ID: "gp1", Button: 1, MacroID: "probe"}},
 		},
 	})
@@ -210,6 +212,9 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	}
 	if len(got.Gamepad.SlowButtons) != 1 || got.Gamepad.SlowButtons[0] != 6 {
 		t.Fatalf("reopened gamepad slow buttons = %+v", got.Gamepad.SlowButtons)
+	}
+	if got.Gamepad.OutlineButton == nil || *got.Gamepad.OutlineButton != 6 {
+		t.Fatalf("reopened gamepad outline button = %+v", got.Gamepad.OutlineButton)
 	}
 	if len(got.Gamepad.MacroButtons) != 1 || got.Gamepad.MacroButtons[0].MacroID != "probe" {
 		t.Fatalf("reopened gamepad macro buttons = %+v", got.Gamepad.MacroButtons)
@@ -272,7 +277,7 @@ func TestUISettingsGamepadDefaults(t *testing.T) {
 	if got.Gamepad.Axes.Z.Axis != 3 || !got.Gamepad.Axes.Z.Invert || got.Gamepad.Axes.Z.Scale != 1 {
 		t.Fatalf("default Z axis = %+v", got.Gamepad.Axes.Z)
 	}
-	if got.Gamepad.DeadmanButton != 0 || len(got.Gamepad.SlowButtons) != 2 {
+	if got.Gamepad.DeadmanButton != 0 || len(got.Gamepad.SlowButtons) != 2 || got.Gamepad.OutlineButton == nil || *got.Gamepad.OutlineButton != 7 {
 		t.Fatalf("default gamepad buttons = %+v", got.Gamepad)
 	}
 }
