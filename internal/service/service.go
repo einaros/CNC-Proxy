@@ -729,7 +729,10 @@ func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
 		if diagnoseOut, e = s.sendLearnLine(c, "diagnose"); e != nil {
 			return e
 		}
-		if configOut, e = s.sendLearnLine(c, "config-get-all -e"); e != nil {
+		// Older controller builds append -e to request an EOT byte, but current
+		// firmware interprets it as a config filename. Send the portable form;
+		// sendLearnLine already completes reply reads using a quiescence window.
+		if configOut, e = s.sendLearnLine(c, "config-get-all"); e != nil {
 			return e
 		}
 		return nil

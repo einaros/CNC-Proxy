@@ -965,7 +965,7 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	m.SetGcodeReply("model", "model = CarveraAir,FACTORY,PROBE")
 	m.SetGcodeReply("version", "version = 1.2.3")
 	m.SetGcodeReply("diagnose", "{S:0,0|L:0,0|G:1,0,0,0,0|E:0,1,0,1,1,0|P:1,0|RSSI:-55}")
-	m.SetGcodeReply("config-get-all -e", strings.Join([]string{
+	m.SetGcodeReply("config-get-all", strings.Join([]string{
 		"soft_endstop.enable=false",
 		"soft_endstop.x_min=-302.0",
 		"soft_endstop.y_min=-212.0",
@@ -1023,7 +1023,7 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 		t.Fatalf("diagnostics = %+v", res.Learned.Diagnostics)
 	}
 	gcodes := m.Gcodes()
-	for _, want := range []string{"model", "version", "diagnose", "config-get-all -e"} {
+	for _, want := range []string{"model", "version", "diagnose", "config-get-all"} {
 		if !slices.Contains(gcodes, want) {
 			t.Fatalf("gcodes %v missing %q", gcodes, want)
 		}
@@ -1036,7 +1036,7 @@ func TestRunMachineLearningRefreshesEachNewConnectionAndPersistsProfile(t *testi
 	m.SetGcodeReply("model", "model = CarveraAir,FACTORY,PROBE")
 	m.SetGcodeReply("version", "version = 1.2.3")
 	m.SetGcodeReply("diagnose", "{E:0,1,0,1,1,0}")
-	m.SetGcodeReply("config-get-all -e", strings.Join([]string{
+	m.SetGcodeReply("config-get-all", strings.Join([]string{
 		"soft_endstop.x_min=-302.0",
 		"soft_endstop.y_min=-212.0",
 		"coordinate.anchor1_x=-287.51",

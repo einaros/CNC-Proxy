@@ -1055,7 +1055,7 @@ func TestLearnMachineParametersAPI(t *testing.T) {
 	m.SetGcodeReply("model", "model = CarveraAir")
 	m.SetGcodeReply("version", "version = 1.2.3")
 	m.SetGcodeReply("diagnose", "{E:0,1,0,1,1,0|P:1,0}")
-	m.SetGcodeReply("config-get-all -e", strings.Join([]string{
+	m.SetGcodeReply("config-get-all", strings.Join([]string{
 		"soft_endstop.x_min=-371.0",
 		"soft_endstop.y_min=-250.0",
 		"soft_endstop.z_min=-135.0",
