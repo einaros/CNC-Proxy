@@ -1520,7 +1520,7 @@ func TestSetUISettingsKeepsNewerLearnedAnchorsFromStaleBrowserSave(t *testing.T)
 	}
 }
 
-func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
+func TestTraceOutlineUsesVendorMarginLaserModeAndVerifies(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
 	m.SetStatus(status)
@@ -1541,7 +1541,7 @@ func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
 		t.Fatalf("trace result = %+v", res)
 	}
 	want := []string{
-		"M494.1",
+		"M494.0",
 		"G53 G0 Z-3.0000",
 		"G53 G0 X0.0000 Y0.0000",
 		"G53 G1 X10.0000 Y0.0000 F600.0000",
@@ -1621,7 +1621,7 @@ func TestTraceOutlineKeepsProbeLaserEnabledAfterFailure(t *testing.T) {
 		t.Fatal("expected trace move failure")
 	}
 	want := []string{
-		"M494.1",
+		"M494.0",
 		"G53 G0 Z-3.0000",
 	}
 	if got := m.Gcodes(); !stringSlicesEqual(got, want) {

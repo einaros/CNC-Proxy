@@ -1810,7 +1810,10 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 			_, err := s.sendTraceLine(c, line)
 			return err
 		}
-		if err := run("M494.1"); err != nil {
+		// M494.0 is the firmware's margin/outline laser command. The vendor's
+		// Z-probe workflows use M494.1 (and separately enable 3D-probe mode),
+		// so keep the trace on the established margin command.
+		if err := run("M494.0"); err != nil {
 			return err
 		}
 		var err error
