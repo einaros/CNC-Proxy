@@ -36,23 +36,24 @@ const (
 	// actuator max rate, not a feedrate. These match CarveraFirmware
 	// config.default for XYZ. Firmware accepts scales above 1; the firmware
 	// planner may still cap real hardware at configured machine limits.
-	firmwareMaxXYMMMin = 3000.0
-	firmwareMaxZMMMin  = 2000.0
-	minJogTick         = 5 * time.Millisecond
-	minStatusEvery     = 100 * time.Millisecond
-	minDeadmanTimeout  = 300 * time.Millisecond
-	minJogSegment      = 60 * time.Millisecond
-	maxJogSegment      = 100 * time.Millisecond
-	minJogLookahead    = 120 * time.Millisecond
-	maxJogLookahead    = 180 * time.Millisecond
-	minActiveStatusGap = time.Second
-	maxActiveStatusGap = 2 * time.Second
-	maxSegmentsPerTick = 2
-	motionLogGap       = time.Second
-	motionEventGap     = 33 * time.Millisecond
-	statusWaitGap      = 500 * time.Millisecond
-	maxManualStepMM    = 50.0
-	maxTargetFeedMMMin = 10000.0
+	firmwareMaxXYMMMin        = 3000.0
+	firmwareMaxZMMMin         = 2000.0
+	minJogTick                = 5 * time.Millisecond
+	minStatusEvery            = 100 * time.Millisecond
+	minDeadmanTimeout         = 300 * time.Millisecond
+	minJogSegment             = 60 * time.Millisecond
+	maxJogSegment             = 100 * time.Millisecond
+	minJogLookahead           = 120 * time.Millisecond
+	maxJogLookahead           = 180 * time.Millisecond
+	minActiveStatusGap        = time.Second
+	maxActiveStatusGap        = 2 * time.Second
+	maxSegmentsPerTick        = 2
+	motionLogGap              = time.Second
+	motionEventGap            = 33 * time.Millisecond
+	statusWaitGap             = 500 * time.Millisecond
+	maxManualStepMM           = 50.0
+	maxTargetFeedMMMin        = 10000.0
+	targetPositionToleranceMM = 0.02
 )
 
 // Config controls the jog engine.
@@ -172,17 +173,18 @@ type Capabilities struct {
 
 // Event is a WebSocket-ready server message.
 type Event struct {
-	Type         string        `json:"type"`
-	Seq          int64         `json:"seq,omitempty"`
-	Code         string        `json:"code,omitempty"`
-	Message      string        `json:"message,omitempty"`
-	Armed        *bool         `json:"armed,omitempty"`
-	Mode         string        `json:"mode,omitempty"`
-	Availability *Availability `json:"availability,omitempty"`
-	Capabilities *Capabilities `json:"capabilities,omitempty"`
-	Status       *StatusEvent  `json:"status,omitempty"`
-	Motion       *MotionEvent  `json:"motion,omitempty"`
-	LatencyMs    int64         `json:"latency_ms,omitempty"`
+	Type         string             `json:"type"`
+	Seq          int64              `json:"seq,omitempty"`
+	Code         string             `json:"code,omitempty"`
+	Message      string             `json:"message,omitempty"`
+	Armed        *bool              `json:"armed,omitempty"`
+	Mode         string             `json:"mode,omitempty"`
+	Availability *Availability      `json:"availability,omitempty"`
+	Capabilities *Capabilities      `json:"capabilities,omitempty"`
+	Status       *StatusEvent       `json:"status,omitempty"`
+	Motion       *MotionEvent       `json:"motion,omitempty"`
+	Target       machine.AxisValues `json:"target,omitempty"`
+	LatencyMs    int64              `json:"latency_ms,omitempty"`
 }
 
 // StatusEvent is the status subset streamed to jog clients.
@@ -232,6 +234,11 @@ type plannedSegment struct {
 	end   time.Time
 	from  machine.AxisValues
 	to    machine.AxisValues
+}
+
+type pendingTarget struct {
+	seq    int64
+	target machine.AxisValues
 }
 
 // Manager owns the single active jog session.
@@ -384,6 +391,7 @@ type Session struct {
 	lastStatusWait  time.Time
 	lastAlarmRaw    string
 	lastMotionLog   time.Time
+	targetPending   *pendingTarget
 }
 
 // Events streams server messages until the session closes.
@@ -534,10 +542,15 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	planned := copyAxes(s.planned)
 	queuedUntil := s.queuedUntil
 	statusInFlight := s.statusInFlight
+	targetPending := s.targetPending != nil
 	s.mu.Unlock()
 	if lease == nil {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm jog before using step buttons"})
 		s.emitState(seq)
+		return
+	}
+	if targetPending {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for the current tap move to reach its target"})
 		return
 	}
 	if !canContinueJog(st.State) {
@@ -613,10 +626,15 @@ func (s *Session) handleOrigin(seq int64, axis string, value float64) {
 	lastStatusAt := s.lastStatusAt
 	queuedUntil := s.queuedUntil
 	statusInFlight := s.statusInFlight
+	targetPending := s.targetPending != nil
 	s.mu.Unlock()
 	if lease == nil {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm tap move before setting origin"})
 		s.emitState(seq)
+		return
+	}
+	if targetPending {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for the current tap move to reach its target"})
 		return
 	}
 	if st.State != machine.Idle {
@@ -690,10 +708,15 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	planned := copyAxes(s.planned)
 	queuedUntil := s.queuedUntil
 	statusInFlight := s.statusInFlight
+	targetPending := s.targetPending != nil
 	s.mu.Unlock()
 	if lease == nil {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm tap move before selecting a target"})
 		s.emitState(seq)
+		return
+	}
+	if targetPending {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "tap move is awaiting the previous target"})
 		return
 	}
 	if !canContinueJog(st.State) {
@@ -706,8 +729,8 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		return
 	}
 	queuedLead := queueLead(now, queuedUntil)
-	if queuedLead > jogLookahead(cfg) {
-		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "tap move is already queued"})
+	if queuedLead > 0 {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for queued jog motion to finish before selecting a tap target"})
 		return
 	}
 	if (len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(cfg)) && queuedLead == 0 {
@@ -740,7 +763,8 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	fullDelta := axesDelta(planned, finalTarget)
 	if fullDelta.X == 0 && fullDelta.Y == 0 && fullDelta.Z == 0 {
 		s.emitMotionEstimate(now, st, finalTarget, fullDelta, "", queuedLead)
-		s.emit(Event{Type: "ack", Seq: seq})
+		s.emit(Event{Type: "ack", Seq: seq, Target: finalTarget})
+		s.emit(Event{Type: "target_complete", Seq: seq, Target: finalTarget})
 		return
 	}
 
@@ -796,7 +820,12 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		}
 	}
 	s.emitMotionEstimate(now, st, target, delta, lastCmd, queuedLead)
-	s.emit(Event{Type: "ack", Seq: seq})
+	s.mu.Lock()
+	s.targetPending = &pendingTarget{seq: seq, target: copyAxes(target)}
+	s.haveInput = false
+	s.mu.Unlock()
+	s.emit(Event{Type: "ack", Seq: seq, Target: target})
+	s.requestStatus()
 }
 
 func (s *Session) writePlannedJogSegment(now time.Time, lease *session.JogLease, from, target machine.AxisValues, delta Axes, dur time.Duration, queuedUntil time.Time, cfg Config) (machine.AxisValues, time.Time, time.Duration, string, error) {
@@ -940,11 +969,12 @@ func (s *Session) shouldRequestStatus(now time.Time) bool {
 	in := s.latest
 	haveInput := s.haveInput
 	inFlight := s.statusInFlight
+	targetPending := s.targetPending != nil
 	s.mu.Unlock()
 	if lease == nil || inFlight {
 		return false
 	}
-	if motionInputActive(haveInput, in, now, s.mgr.cfg) {
+	if !targetPending && motionInputActive(haveInput, in, now, s.mgr.cfg) {
 		return false
 	}
 	return true
@@ -985,6 +1015,14 @@ func (s *Session) applyStatusPayload(payload string) error {
 	s.lastStatus = st
 	now := s.mgr.now()
 	s.lastStatusAt = now
+	var completed *pendingTarget
+	if pending := s.targetPending; pending != nil && targetReached(st.MPos, pending.target) {
+		completed = &pendingTarget{seq: pending.seq, target: copyAxes(pending.target)}
+		s.targetPending = nil
+		s.planned = copyAxes(st.MPos)
+		s.queuedUntil = time.Time{}
+		s.segments = nil
+	}
 	if queueLead(now, s.queuedUntil) == 0 {
 		s.planned = copyAxes(st.MPos)
 		s.segments = nil
@@ -994,6 +1032,9 @@ func (s *Session) applyStatusPayload(payload string) error {
 		s.logAlarmStatus(st)
 	}
 	s.emit(Event{Type: "status", Status: statusEvent(st, age)})
+	if completed != nil {
+		s.emit(Event{Type: "target_complete", Seq: completed.seq, Target: completed.target})
+	}
 	if !canContinueJog(st.State) {
 		s.release(nil)
 		s.emit(Event{Type: "error", Code: CodeNotIdle, Message: "machine left joggable state: " + stateLabel(st.State)})
@@ -1011,6 +1052,7 @@ func (s *Session) motionTick() {
 	planned := copyAxes(s.planned)
 	lastStatusAt := s.lastStatusAt
 	queuedUntil := s.queuedUntil
+	targetPending := s.targetPending != nil
 	s.mu.Unlock()
 
 	queuedLead := queueLead(now, queuedUntil)
@@ -1023,6 +1065,12 @@ func (s *Session) motionTick() {
 		s.release(nil)
 		s.emit(Event{Type: "error", Code: CodeNotIdle, Message: "machine left joggable state: " + stateLabel(st.State)})
 		s.emitState(0)
+		return
+	}
+	if targetPending {
+		if queuedLead > 0 {
+			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
+		}
 		return
 	}
 	if !activeMotion {
@@ -1192,6 +1240,19 @@ func axesDelta(from, target machine.AxisValues) Axes {
 		Y: target["y"] - from["y"],
 		Z: target["z"] - from["z"],
 	}
+}
+
+func targetReached(position, target machine.AxisValues) bool {
+	if len(position) == 0 || len(target) == 0 {
+		return false
+	}
+	for axis, wanted := range target {
+		actual, ok := position[axis]
+		if !ok || math.Abs(actual-wanted) > targetPositionToleranceMM {
+			return false
+		}
+	}
+	return true
 }
 
 func targetMoveDuration(delta Axes, feedMMMin float64, cfg Config) time.Duration {
@@ -1583,6 +1644,7 @@ func (s *Session) release(err error) {
 	s.lastStatusWait = time.Time{}
 	s.lastAlarmRaw = ""
 	s.lastMotionLog = time.Time{}
+	s.targetPending = nil
 	s.mu.Unlock()
 	if lease != nil {
 		s.statusWG.Wait()

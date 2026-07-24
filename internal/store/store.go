@@ -1098,13 +1098,17 @@ func normalizeMachineUI(in MachineUI, now time.Time) MachineUI {
 			X: normalizeFinite(in.Origin.X, d.Origin.X),
 			Y: normalizeFinite(in.Origin.Y, d.Origin.Y),
 		},
-		FeedMinMMMin:  normalizeFinite(in.FeedMinMMMin, d.FeedMinMMMin),
-		FeedMaxMMMin:  normalizeFinite(in.FeedMaxMMMin, d.FeedMaxMMMin),
-		TapFeedMMMin:  normalizeFinite(in.TapFeedMMMin, d.TapFeedMMMin),
-		SafeZMM:       normalizeFinite(in.SafeZMM, d.SafeZMM),
-		SafeZDisabled: in.SafeZDisabled,
-		SavedOrigins:  normalizeSavedOrigins(in.SavedOrigins, now),
-		Learned:       learned,
+		FeedMinMMMin:    normalizeFinite(in.FeedMinMMMin, d.FeedMinMMMin),
+		FeedMaxMMMin:    normalizeFinite(in.FeedMaxMMMin, d.FeedMaxMMMin),
+		TapFeedMMMin:    normalizeFinite(in.TapFeedMMMin, d.TapFeedMMMin),
+		SafeZMM:         normalizeFinite(in.SafeZMM, d.SafeZMM),
+		SafeZDisabled:   in.SafeZDisabled,
+		SavedOrigins:    normalizeSavedOrigins(in.SavedOrigins, now),
+		Learned:         learned,
+		LearnedProfiles: normalizeMachineLearnedProfiles(in.LearnedProfiles),
+	}
+	if len(out.LearnedProfiles) == 0 && learned.Identity.Model != "" {
+		out.LearnedProfiles = map[string]MachineLearned{machineLearnedProfileKey(learned): learned}
 	}
 	if out.WorkArea.XMin >= out.WorkArea.XMax {
 		out.WorkArea.XMin = d.WorkArea.XMin
@@ -1134,6 +1138,33 @@ func normalizeMachineUI(in MachineUI, now time.Time) MachineUI {
 		out.TapFeedMMMin = out.FeedMaxMMMin
 	}
 	return out
+}
+
+func normalizeMachineLearnedProfiles(in map[string]MachineLearned) map[string]MachineLearned {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]MachineLearned, len(in))
+	for key, learned := range in {
+		key = strings.TrimSpace(key)
+		if key == "" || len(key) > 240 {
+			continue
+		}
+		normalized := normalizeMachineLearned(learned)
+		if normalized.Identity.Model == "" {
+			continue
+		}
+		out[key] = normalized
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func machineLearnedProfileKey(learned MachineLearned) string {
+	parts := []string{strings.TrimSpace(learned.Identity.Model), strings.TrimSpace(learned.Identity.Version), strings.TrimSpace(learned.Identity.FileType)}
+	return strings.Join(parts, " | ")
 }
 
 func normalizeMachineLearned(in MachineLearned) MachineLearned {
@@ -1490,6 +1521,7 @@ func copyUISettings(in UISettings) UISettings {
 		out.Machine.SavedOrigins = []SavedOrigin{}
 	}
 	out.Machine.Learned = copyMachineLearned(in.Machine.Learned)
+	out.Machine.LearnedProfiles = copyMachineLearnedProfiles(in.Machine.LearnedProfiles)
 	out.Gamepad.SlowButtons = append([]int(nil), in.Gamepad.SlowButtons...)
 	if out.Gamepad.SlowButtons == nil {
 		out.Gamepad.SlowButtons = []int{}
@@ -1497,6 +1529,17 @@ func copyUISettings(in UISettings) UISettings {
 	out.Gamepad.MacroButtons = append([]GamepadMacroButton(nil), in.Gamepad.MacroButtons...)
 	if out.Gamepad.MacroButtons == nil {
 		out.Gamepad.MacroButtons = []GamepadMacroButton{}
+	}
+	return out
+}
+
+func copyMachineLearnedProfiles(in map[string]MachineLearned) map[string]MachineLearned {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]MachineLearned, len(in))
+	for key, learned := range in {
+		out[key] = copyMachineLearned(learned)
 	}
 	return out
 }

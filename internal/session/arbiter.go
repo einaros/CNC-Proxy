@@ -125,9 +125,10 @@ type Arbiter struct {
 	// shared transport without taking the injection window).
 	controlWriter ControlWriter
 
-	mu        sync.Mutex
-	mode      Mode
-	ownerConn *client.Conn
+	mu                   sync.Mutex
+	mode                 Mode
+	ownerConn            *client.Conn
+	connectionGeneration uint64
 
 	// opMu serializes actual machine I/O for the full duration of a WithMachine
 	// callback. The machine is single-conversation and a client.Conn is not safe
@@ -222,6 +223,15 @@ func (a *Arbiter) StateMaxAge() time.Duration { return a.stateMaxAge }
 // Tracker exposes the shared machine-state tracker.
 func (a *Arbiter) Tracker() *machine.Tracker { return a.tracker }
 
+// ConnectionGeneration changes whenever the proxy starts a fresh machine-side
+// conversation, allowing background observers to refresh connection-scoped
+// read-only metadata exactly once per connection.
+func (a *Arbiter) ConnectionGeneration() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.connectionGeneration
+}
+
 // EnterRelay is called when a controller connects. The proxy drops its owner
 // connection (if any) so the controller becomes the machine's sole conversation
 // partner, and the sync engine is blocked from acquiring the connection.
@@ -229,6 +239,7 @@ func (a *Arbiter) EnterRelay() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.mode = ModeRelay
+	a.connectionGeneration++
 	if a.ownerConn != nil {
 		a.ownerConn.Close()
 		a.ownerConn = nil
@@ -557,6 +568,7 @@ func (a *Arbiter) acquireOwnerConn() (*client.Conn, error) {
 		return existing, nil
 	default:
 		a.ownerConn = conn
+		a.connectionGeneration++
 		a.mu.Unlock()
 		return conn, nil
 	}

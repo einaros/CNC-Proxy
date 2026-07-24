@@ -93,6 +93,10 @@ type Service struct {
 	activeProbeLast     time.Time
 	activeProbeLoaded   bool
 
+	autoLearnMu         sync.Mutex
+	autoLearnGeneration uint64
+	autoLearnRunning    bool
+
 	// commitMu makes a mutation's "publish to cache + update catalog + enqueue
 	// job" sequence atomic across concurrent callers, so the cache file, the
 	// catalog entry's MD5/size, and the queued job always describe the same
@@ -691,6 +695,12 @@ func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
 	}
 	ui := s.store.UISettings()
 	ui.Machine.Learned = learned
+	if key := machineLearnedProfileKey(learned); key != "" {
+		if ui.Machine.LearnedProfiles == nil {
+			ui.Machine.LearnedProfiles = map[string]store.MachineLearned{}
+		}
+		ui.Machine.LearnedProfiles[key] = learned
+	}
 	applyLearnedMachineDefaults(&ui.Machine, learned)
 	ui, err = s.SetUISettings(ui)
 	if err != nil {
@@ -702,6 +712,63 @@ func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
 		Learned: ui.Machine.Learned,
 		Message: "Learned machine parameters from firmware.",
 	}, nil
+}
+
+func machineLearnedProfileKey(learned store.MachineLearned) string {
+	parts := []string{strings.TrimSpace(learned.Identity.Model), strings.TrimSpace(learned.Identity.Version), strings.TrimSpace(learned.Identity.FileType)}
+	key := strings.Join(parts, " | ")
+	if strings.Trim(key, " |") == "" {
+		return ""
+	}
+	return key
+}
+
+// RunMachineLearning refreshes machine parameters once for every newly opened
+// machine connection. It waits for an observed Idle state, so the background
+// read-only queries never interrupt an active job, and a later Idle status
+// retries an earlier unavailable/busy attempt.
+func (s *Service) RunMachineLearning(ctx context.Context) {
+	statusCh, unsubscribe := s.arb.Tracker().Subscribe()
+	defer unsubscribe()
+	if st, _ := s.arb.Tracker().Current(); st.State == machine.Idle {
+		s.maybeLearnConnectedMachine(ctx)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case st, ok := <-statusCh:
+			if !ok {
+				return
+			}
+			if st.State == machine.Idle {
+				s.maybeLearnConnectedMachine(ctx)
+			}
+		}
+	}
+}
+
+func (s *Service) maybeLearnConnectedMachine(ctx context.Context) {
+	generation := s.arb.ConnectionGeneration()
+	if generation == 0 || ctx.Err() != nil {
+		return
+	}
+	s.autoLearnMu.Lock()
+	if s.autoLearnGeneration == generation || s.autoLearnRunning {
+		s.autoLearnMu.Unlock()
+		return
+	}
+	s.autoLearnRunning = true
+	s.autoLearnMu.Unlock()
+	go func() {
+		_, err := s.LearnMachineParameters()
+		s.autoLearnMu.Lock()
+		defer s.autoLearnMu.Unlock()
+		s.autoLearnRunning = false
+		if err == nil && s.arb.ConnectionGeneration() == generation {
+			s.autoLearnGeneration = generation
+		}
+	}()
 }
 
 func (s *Service) sendLearnLine(c *client.Conn, line string) (string, error) {

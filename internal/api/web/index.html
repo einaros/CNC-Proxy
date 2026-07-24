@@ -14,31 +14,50 @@
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  html { min-height: 100%; color-scheme: dark; }
-  body { min-height: 100dvh; margin: 0; display: flex; flex-direction: column; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  html { height: 100%; color-scheme: dark; }
+  body { height: 100dvh; margin: 0; display: flex; flex-direction: column; overflow: hidden; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
   button, input, select, textarea { font: inherit; }
   header { position: sticky; top: 0; z-index: 60; display: grid; gap: var(--gap-xs); padding: 8px 20px; background: rgba(24,29,31,.96); border-bottom: 1px solid var(--border); backdrop-filter: blur(10px); box-shadow: 0 10px 24px rgba(0,0,0,.18); }
   #header-main { display: flex; align-items: center; gap: 18px; min-width: 0; }
   header h1 { font-size: 16px; margin: 0; font-weight: 650; }
-  #machine { margin-left: auto; display: grid; grid-auto-flow: column; gap: 14px; align-items: center; color: var(--muted); font-size: 13px; }
-  #machine span:not(.badge) { min-width: 0; white-space: nowrap; }
+  #machine { margin-left: auto; display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
   .badge { padding: 2px 10px; border-radius: 999px; font-weight: 650; font-size: 12px; }
   .state-Idle { background: rgba(68,194,123,.15); color: var(--ok); }
   .state-Run, .state-Hold, .state-Home, .state-Sleep { background: rgba(217,154,58,.16); color: var(--warn); }
   .state-Alarm { background: rgba(232,106,95,.16); color: var(--err); }
   .state-Unknown, .state- { background: rgba(145,160,174,.15); color: var(--muted); }
-  #machine-status-toolbar { display: grid; grid-template-columns: minmax(330px, 1.6fr) minmax(130px, .55fr) minmax(150px, .65fr) minmax(110px, .45fr); gap: 4px; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  .connection-status { width: 28px; height: 28px; display: inline-grid; place-items: center; border: 1px solid currentColor; border-radius: 50%; color: var(--muted); font-weight: 800; line-height: 1; }
+  .connection-status::before { content: "?"; }
+  .connection-status.connected { color: var(--ok); }
+  .connection-status.connected::before { content: "✓"; }
+  .connection-status.reconnecting { color: var(--warn); }
+  .connection-status.reconnecting::before { content: "…"; }
+  .connection-status.outage { color: var(--err); }
+  .connection-status.outage::before { content: "!"; }
+  .machine-status-popout { position: relative; margin: 0; overflow: visible; background: transparent; border: 0; border-radius: 0; }
+  .machine-status-popout > summary { list-style: none; padding: 0; }
+  .machine-status-popout > summary::-webkit-details-marker { display: none; }
+  .machine-status-popout > summary .badge { display: inline-block; cursor: pointer; }
+  .machine-status-popout > summary:focus-visible .badge { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .machine-status-popout-body { position: absolute; top: calc(100% + 8px); right: 0; z-index: 90; display: none; gap: 6px; width: max-content; min-width: 176px; padding: 10px; color: var(--muted); background: #1a2022; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 16px 38px rgba(0,0,0,.36); }
+  .machine-status-popout[open] .machine-status-popout-body { display: grid; }
+  .machine-status-detail { display: grid; grid-template-columns: max-content max-content; justify-content: space-between; gap: 14px; align-items: baseline; }
+  .machine-status-detail span { font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+  .machine-status-detail b { color: var(--text); font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #machine-status-toolbar { margin-left: auto; display: flex; align-items: stretch; gap: 4px; width: max-content; max-width: 100%; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   #machine-status-toolbar::-webkit-scrollbar { display: none; }
-  .machine-status-item { min-width: 0; min-height: 32px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; padding: 4px 8px; background: rgba(32,38,41,.78); border-radius: 4px; }
+  .machine-status-item { flex: 0 0 auto; width: max-content; min-height: 32px; display: grid; grid-template-columns: max-content max-content; gap: 8px; align-items: center; padding: 4px 8px; background: rgba(32,38,41,.78); border-radius: 4px; }
   .machine-status-item .label { color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
-  .machine-status-item .value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); }
-  .machine-status-position { align-items: stretch; }
-  .position-lines { display: grid; gap: 1px; min-width: 0; align-self: center; }
-  .position-line { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 6px; align-items: center; min-width: 0; }
+  .machine-status-item .value { white-space: nowrap; font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); }
+  .machine-status-position { grid-template-columns: max-content max-content; align-items: stretch; }
+  .position-lines { display: grid; gap: 1px; width: max-content; align-self: center; }
+  .position-line { display: grid; grid-template-columns: 16px max-content; gap: 6px; align-items: center; width: max-content; }
   .position-line span { color: var(--muted); font: 650 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .position-line b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  #command-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--gap-md); align-items: center; min-width: 0; }
-  #command-menu { display: flex; gap: var(--gap-sm); align-items: center; min-width: 0; overflow-x: auto; overflow-y: visible; scrollbar-width: none; }
+  .position-line b { white-space: nowrap; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #command-toolbar { display: flex; align-items: center; gap: var(--gap-md); min-width: 0; }
+  #command-actions { display: flex; flex: 0 0 auto; align-items: center; gap: var(--gap-md); min-width: 0; overflow-x: auto; overflow-y: visible; scrollbar-width: none; }
+  #command-actions::-webkit-scrollbar { display: none; }
+  #command-menu { display: flex; flex: 0 0 auto; gap: var(--gap-sm); align-items: center; min-width: 0; }
   #command-menu::-webkit-scrollbar { display: none; }
   .command-popout { flex: 0 0 auto; margin: 0; overflow: visible; background: transparent; border: 0; border-radius: 0; }
   .command-popout > summary { list-style: none; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 5px 12px; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; font-weight: 550; white-space: nowrap; user-select: none; }
@@ -54,8 +73,8 @@
   .command-panel-wide { --command-panel-pref-width: 760px; }
   .command-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: var(--gap-xs); align-items: center; min-width: 0; }
   .command-panel form { margin: 0; }
-  #command-toolbar > #ctl-halt { min-width: 84px; font-weight: 650; }
-  main { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); padding: clamp(14px, 2vw, 22px) clamp(14px, 2vw, 22px) 76px; }
+  #command-actions > #ctl-halt { flex: 0 0 auto; min-width: 84px; font-weight: 650; }
+  main { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; padding: clamp(14px, 2vw, 22px) clamp(14px, 2vw, 22px) 76px; }
   main > *, .view > .page-section { width: 100%; min-width: 0; }
   #status-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; display: flex; gap: 10px; align-items: flex-end; padding: 8px 20px calc(8px + env(safe-area-inset-bottom)); background: rgba(16,19,22,.96); border-top: 1px solid var(--border); box-shadow: 0 -10px 24px rgba(0,0,0,.22); }
   #status-bar[hidden] { display: none !important; }
@@ -68,12 +87,12 @@
   .status-item.error { border-color: rgba(232,106,95,.5); color: var(--err); }
   .status-item.error .status-dot { background: var(--err); }
   #notice-clear { flex: 0 0 auto; }
-  .tabs { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 4px; margin: 0 0 var(--gap-md); padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  .tabs { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 4px; min-width: 0; margin: 0; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
   .tab { width: 100%; min-width: 0; min-height: var(--control-h); border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
   .tab:hover { border-color: rgba(87,166,214,.45); color: var(--text); }
   .tab.active { color: var(--text); border-color: rgba(87,166,214,.55); background: var(--panel-2); }
-  .view { display: grid; gap: var(--gap-xl); min-height: 0; }
+  .view { display: grid; gap: var(--gap-xl); min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .view[hidden] { display: none; }
   .page-section { display: grid; gap: var(--gap-sm); min-width: 0; }
   details { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin: 0; overflow: hidden; }
@@ -277,12 +296,22 @@
   .work-move-field.is-live .work-move-reset { opacity: .46; }
   .work-move-field.is-stale .work-move-reset { color: var(--warn); opacity: 1; }
   .tap-coordinate-row > button { align-self: end; justify-content: center; min-width: 64px; white-space: nowrap; }
-  .tap-origin-panel { grid-column: 1 / -1; min-width: 0; display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 18px; align-items: stretch; padding-top: 10px; border-top: 1px solid rgba(48,56,58,.72); }
+  .tap-origin-panel { grid-column: 1 / -1; min-width: 0; display: grid; gap: 14px; align-items: stretch; }
+  .origin-action-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px; }
+  .origin-action-grid button { min-height: var(--tap-control-h); white-space: nowrap; }
+  .origin-action-status { min-height: 18px; color: var(--muted); font-size: 12px; line-height: 18px; }
+  .origin-action-status[data-kind="ok"] { color: var(--ok); }
+  .origin-action-status[data-kind="error"] { color: var(--err); }
+  .origin-modal { width: min(480px, calc(100vw - 24px)); }
+  .origin-modal-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .origin-modal-fields label, .origin-modal-source label { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
+  .origin-modal-fields label span, .origin-modal-source label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
+  .origin-modal-fields input, .origin-modal-source input, .origin-modal-source select { width: 100%; min-width: 0; }
+  .origin-modal-source { display: grid; grid-template-columns: minmax(0, 1fr) 96px 96px; gap: 8px; }
+  .origin-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
   .origin-row { display: grid; gap: 6px; align-items: end; }
-  .origin-row-action { grid-template-columns: minmax(176px, 220px) auto; }
-  .origin-row-action.needs-value { grid-template-columns: minmax(176px, 220px) 96px auto; }
-	.origin-row-anchor { grid-template-columns: minmax(132px, 1fr) 78px 78px auto; }
-  .origin-row-saved { grid-template-columns: minmax(0, 1fr) 74px 72px minmax(0, .85fr) 122px; }
+  .origin-row-preset { grid-template-columns: minmax(0, 1fr) 82px 72px; }
+  .origin-row-save { grid-template-columns: minmax(0, 1fr) 132px; }
   .origin-row label { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
   .origin-row label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
   .origin-row input, .origin-row select { width: 100%; min-width: 0; }
@@ -293,11 +322,10 @@
   .control-command-drawer .tap-coordinate-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .control-command-drawer .work-move-field { width: 100%; }
   .control-command-drawer .tap-coordinate-row > button { grid-column: 1 / -1; }
-  .control-command-drawer .tap-origin-panel { grid-template-columns: 1fr; gap: 10px; padding-top: 0; border-top: 0; }
+  .control-command-drawer .tap-origin-panel { grid-template-columns: 1fr; gap: 14px; padding-top: 0; border-top: 0; }
   .control-command-drawer .tap-control-group, .control-command-drawer .tap-coordinate-panel, .control-command-drawer .origin-group { grid-template-rows: auto; gap: 0; }
   .control-command-drawer .origin-group.has-title { grid-template-rows: var(--tap-label-h) auto; gap: 6px; }
-  .control-command-drawer .origin-row-action, .control-command-drawer .origin-row-action.needs-value, .control-command-drawer .origin-row-anchor, .control-command-drawer .origin-row-saved { grid-template-columns: 1fr; }
-  .control-command-drawer .saved-origin-label-field, .control-command-drawer #saved-origin-save { grid-column: auto; }
+  .control-command-drawer .origin-row-preset, .control-command-drawer .origin-row-save { grid-template-columns: 1fr; }
   .tap-move-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(74px, 92px); gap: 10px; align-items: stretch; }
   .workarea-frame { position: relative; width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .workarea-controls { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 3px; padding: 3px; background: rgba(18,23,28,.82); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
@@ -320,6 +348,7 @@
   .outline-probe-controls label, .outline-field-controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); min-height: 32px; }
   .outline-field-controls input[type="number"] { width: 88px; }
   .outline-summary { color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .origin-set-change { min-height: 18px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .z-step-controls { display: grid; grid-template-rows: minmax(68px, 1fr) auto minmax(68px, 1fr); gap: 8px; align-items: stretch; }
   .z-step-controls button { justify-content: center; min-height: 68px; font-size: 16px; font-weight: 650; }
   .z-step-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -342,7 +371,11 @@
   #workarea-spindle-marker { fill: var(--ok); stroke: none; }
   #workarea-spindle-cross, #workarea-target-cross { display: none; }
   #workarea-target-marker { fill: none; stroke: var(--warn); stroke-width: .2; }
-  #machine-settings .detail-body, #gamepad-settings .detail-body { gap: 12px; }
+  dialog { width: min(760px, calc(100vw - 24px)); max-height: min(760px, calc(100dvh - 24px)); margin: auto; padding: 0; color: var(--text); background: #1a2022; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 24px 58px rgba(0,0,0,.46), 0 0 0 1px rgba(255,255,255,.025) inset; }
+  dialog::backdrop { background: rgba(0,0,0,.58); backdrop-filter: blur(2px); }
+  .machine-settings-modal-body { max-height: calc(100dvh - 96px); overflow: auto; padding: 16px; display: grid; gap: 12px; }
+  .machine-settings-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .machine-settings-modal-head h2 { color: var(--text); }
   .machine-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
   .machine-settings-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 8px; align-items: center; }
   .machine-settings-actions button { flex: 0 1 auto; }
@@ -398,6 +431,17 @@
   .file-col-actions { width: 28%; }
   @media (min-width: 881px) {
     #folder-sidebar { position: sticky; top: 142px; }
+    #control-view { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+    #control-view > .page-section { min-height: 0; }
+    #control-view #jog, #control-view .control-page-layout { min-height: 0; height: 100%; }
+    #control-view .control-page-layout { align-items: stretch; }
+    #control-view .control-command-drawer { position: static; top: auto; align-self: stretch; min-height: 0; max-height: none; overflow-y: auto; }
+    #control-view .control-workspace { min-height: 0; height: 100%; grid-template-rows: minmax(0, 1fr) auto; align-items: stretch; }
+    #control-view .tap-move-body, #control-view .workarea-frame { min-height: 0; height: 100%; }
+  }
+  @media (max-width: 1180px) {
+    #command-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); }
+    #machine-status-toolbar { justify-self: start; margin-left: 0; }
   }
   @media (max-width: 1360px) {
     .tap-coordinate-panel { grid-column: 1 / -1; padding-left: 0; border-left: 0; }
@@ -407,10 +451,6 @@
     #active-gcode-run { width: 100%; justify-content: center; }
     .control-page-layout { grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); }
     .tap-control-group, .tap-coordinate-panel { padding-left: 0; border-left: 0; }
-    .tap-origin-panel { grid-template-columns: minmax(220px, .75fr) minmax(0, 1fr); }
-    .origin-row-saved { grid-template-columns: minmax(210px, 1fr) 74px 72px; }
-    .saved-origin-label-field { grid-column: 1 / 3; }
-    #saved-origin-save { grid-column: 3; }
     .file-col-modified, th:nth-child(4), td:nth-child(4) { display: none; }
     .file-col-actions { width: 32%; }
     .file-col-status { width: 15%; }
@@ -425,15 +465,13 @@
   }
   @media (max-width: 760px) {
     #header-main { display: grid; gap: var(--gap-sm); }
-    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-arm-panel, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-row, .origin-row-action, .origin-row-saved { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-arm-panel, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row, .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row label:last-child { grid-column: auto; }
     .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
     .tap-feed-field { width: 100%; }
     .tap-feed-stepper { grid-template-columns: 38px minmax(0, 1fr) 38px; }
-    .saved-origin-label-field, #saved-origin-save { grid-column: auto; }
-    #machine { margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    #machine-status-toolbar { grid-template-columns: minmax(300px, 1.5fr) repeat(3, minmax(110px, .55fr)); }
+    #machine { margin-left: 0; }
     #command-toolbar { gap: var(--gap-sm); }
     #command-menu { gap: var(--gap-xs); }
     .command-panel { padding: 10px; }
@@ -458,11 +496,9 @@
   }
   @media (max-width: 600px) {
     main { padding-inline: 10px; }
-    #machine { grid-template-columns: 1fr 1fr; gap: 8px; }
+    #machine { gap: 8px; }
     header { padding-inline: 10px; }
-    #command-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
-    .command-popout > summary, #command-toolbar > #ctl-halt { padding-inline: 9px; }
-    .tabs { margin-bottom: var(--gap-sm); }
+    .command-popout > summary, #command-actions > #ctl-halt { padding-inline: 9px; }
     #log-tools, .log-left, .log-right, #gcode-form { display: grid; grid-template-columns: 1fr; align-items: stretch; }
     .log-left label { justify-content: start; }
     .table-scroll { overflow: visible; border: 0; background: transparent; }
@@ -490,36 +526,20 @@
   <div id="header-main">
     <h1>CNC Proxy</h1>
     <div id="machine">
-      <span>mode: <b id="mode">-</b></span>
-      <span>age: <b id="age">-</b></span>
-      <span>conn: <b id="status-connection">-</b></span>
-      <span>pending: <b id="pending">0</b></span>
-      <span id="state" class="badge state-Unknown">Unknown</span>
-    </div>
-  </div>
-  <div id="machine-status-toolbar" aria-label="Machine status">
-    <div class="machine-status-item machine-status-position">
-      <span class="label">Position</span>
-      <div class="position-lines">
-        <div class="position-line"><span>M</span><b id="status-mpos">-</b></div>
-        <div class="position-line"><span>W</span><b id="status-wpos">-</b></div>
-      </div>
-    </div>
-    <div class="machine-status-item">
-      <span class="label">Feed</span>
-      <b id="status-feed" class="value">-</b>
-    </div>
-    <div class="machine-status-item">
-      <span class="label">Spindle</span>
-      <b id="status-spindle" class="value">-</b>
-    </div>
-    <div class="machine-status-item">
-      <span class="label">Tool</span>
-      <b id="status-tool" class="value">-</b>
+      <span id="status-connection" class="connection-status" role="img" aria-label="Machine connection unknown" title="Machine connection unknown"></span>
+      <details id="machine-status-popout" class="machine-status-popout">
+        <summary aria-label="Machine status details"><span id="state" class="badge state-Unknown">Unknown</span></summary>
+        <div class="machine-status-popout-body">
+          <div class="machine-status-detail"><span>Mode</span><b id="mode">-</b></div>
+          <div class="machine-status-detail"><span>Status age</span><b id="age">-</b></div>
+          <div class="machine-status-detail"><span>Pending jobs</span><b id="pending">0</b></div>
+        </div>
+      </details>
     </div>
   </div>
   <div id="command-toolbar" aria-label="Command toolbar">
-    <div id="command-menu">
+    <div id="command-actions">
+      <div id="command-menu">
       <details class="command-popout">
         <summary>Machine</summary>
         <div class="command-panel command-panel-compact">
@@ -638,18 +658,40 @@
           </div>
         </div>
       </details>
+        <button type="button" id="machine-settings-open">Machine settings</button>
+      </div>
+      <button type="button" id="ctl-halt" class="danger" title="Emergency stop (halt)">⏹ Halt</button>
     </div>
-    <button type="button" id="ctl-halt" class="danger" title="Emergency stop (halt)">⏹ Halt</button>
+    <div id="machine-status-toolbar" aria-label="Machine status">
+      <div class="machine-status-item machine-status-position">
+        <span class="label">Position</span>
+        <div class="position-lines">
+          <div class="position-line"><span>M</span><b id="status-mpos">-</b></div>
+          <div class="position-line"><span>W</span><b id="status-wpos">-</b></div>
+        </div>
+      </div>
+      <div class="machine-status-item">
+        <span class="label">Feed</span>
+        <b id="status-feed" class="value">-</b>
+      </div>
+      <div class="machine-status-item">
+        <span class="label">Spindle</span>
+        <b id="status-spindle" class="value">-</b>
+      </div>
+      <div class="machine-status-item">
+        <span class="label">Tool</span>
+        <b id="status-tool" class="value">-</b>
+      </div>
+    </div>
   </div>
-</header>
-<main>
   <nav class="tabs" role="tablist" aria-label="Views">
     <button type="button" id="tab-active-job" class="tab active" role="tab" aria-selected="true" aria-controls="active-job-view">Active job</button>
     <button type="button" id="tab-gcode-console" class="tab" role="tab" aria-selected="false" aria-controls="gcode-console-view" tabindex="-1">Gcode console</button>
     <button type="button" id="tab-control" class="tab" role="tab" aria-selected="false" aria-controls="control-view" tabindex="-1">Control</button>
     <button type="button" id="tab-files" class="tab" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
   </nav>
-
+</header>
+<main>
   <section class="page-section">
     <div id="alarm-panel" hidden>
       <div>
@@ -664,7 +706,6 @@
 
   <section id="active-job-view" class="view" role="tabpanel" aria-labelledby="tab-active-job">
     <section class="page-section">
-      <h2>Active job</h2>
       <div id="active-gcode-panel" class="action-panel">
         <div class="active-gcode-body">
           <div class="active-gcode-head">
@@ -701,7 +742,6 @@
 
   <section id="gcode-console-view" class="view" role="tabpanel" aria-labelledby="tab-gcode-console" hidden>
     <section class="page-section">
-      <h2>Gcode console</h2>
       <div id="console">
         <div id="log-tools">
           <div class="log-left">
@@ -735,7 +775,6 @@
 
   <section id="control-view" class="view" role="tabpanel" aria-labelledby="tab-control" hidden>
     <section class="page-section">
-      <h2>Control</h2>
       <div id="jog">
         <div class="control-page-layout">
           <details id="control-command-drawer" class="control-command-drawer" open>
@@ -785,68 +824,19 @@
                 <summary>Work Zero</summary>
                 <div class="detail-body">
                   <div class="tap-origin-panel" aria-label="Set work origin">
-                    <div class="origin-group">
-                      <div class="origin-row origin-row-action">
-                        <label><span>Origin Action</span>
-                          <select id="origin-action">
-                            <option value="zero-x">Zero X</option>
-                            <option value="zero-y">Zero Y</option>
-                            <option value="zero-z">Zero Z</option>
-                            <option value="zero-xy">Zero XY</option>
-                            <option value="set-x">Set X Value</option>
-                            <option value="set-y">Set Y Value</option>
-                            <option value="set-z">Set Z Value</option>
-                            <option value="probe-z">Probe Z</option>
-                            <option value="reset-xy">Reset XY to Machine</option>
-                          </select>
-                        </label>
-                        <label id="origin-value-x-wrap"><span>X Value</span><input id="origin-value-x" type="number" step="0.001" inputmode="decimal"></label>
-                        <label id="origin-value-y-wrap"><span>Y Value</span><input id="origin-value-y" type="number" step="0.001" inputmode="decimal"></label>
-                        <label id="origin-value-z-wrap"><span>Z Value</span><input id="origin-value-z" type="number" step="0.001" inputmode="decimal"></label>
-                        <button type="button" id="origin-apply">Apply</button>
-                      </div>
-                    </div>
                     <div class="origin-group has-title">
-                      <div class="origin-group-title">Saved Zeros</div>
-                      <div class="origin-row origin-row-saved">
-                        <label><span>Preset</span><select id="saved-origin-select"></select></label>
-                        <button type="button" id="saved-origin-recall">Recall</button>
-                        <button type="button" id="saved-origin-delete">Delete</button>
-                        <label class="saved-origin-label-field"><span>Save Label</span><input id="saved-origin-label" type="text" maxlength="80" autocomplete="off" spellcheck="false"></label>
-                        <button type="button" id="saved-origin-save">Save Current</button>
+                      <div class="origin-group-title">Work origin</div>
+                      <div class="origin-action-grid">
+                        <button type="button" data-origin-zero="x">Zero X</button>
+                        <button type="button" data-origin-zero="y">Zero Y</button>
+                        <button type="button" data-origin-zero="z">Zero Z</button>
+                        <button type="button" id="origin-set-xyz-open">Set XYZ</button>
+                        <button type="button" id="origin-set-open">Set Origin</button>
+                        <button type="button" id="origin-presets-open">Origin Presets</button>
+                        <button type="button" id="origin-probe-z">Probe Z</button>
                       </div>
                     </div>
-					<div class="origin-group has-title">
-					  <div class="origin-group-title">Anchor Origin</div>
-					  <div class="origin-row origin-row-anchor">
-						<label><span>Anchor</span><select id="anchor-origin-anchor"><option value="anchor1">Anchor 1</option><option value="anchor2">Anchor 2</option></select></label>
-						<label><span>X Offset</span><input id="anchor-origin-offset-x" type="number" value="0" step="0.001" inputmode="decimal"></label>
-						<label><span>Y Offset</span><input id="anchor-origin-offset-y" type="number" value="0" step="0.001" inputmode="decimal"></label>
-						<button type="button" id="anchor-origin-apply">Set Origin</button>
-					  </div>
-					</div>
                   </div>
-                </div>
-              </details>
-              <details id="machine-settings" class="control-drawer-section">
-                <summary>Machine Settings</summary>
-                <div class="detail-body">
-                  <div class="machine-settings-grid">
-                    <label><span>Display X Min</span><input id="machine-x-min" type="number" step="1" inputmode="decimal"></label>
-                    <label><span>Display X Max</span><input id="machine-x-max" type="number" step="1" inputmode="decimal"></label>
-                    <label><span>Display Y Min</span><input id="machine-y-min" type="number" step="1" inputmode="decimal"></label>
-                    <label><span>Display Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
-                    <label><span>Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
-                    <label><span>Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
-                    <label><span>Feed Min</span><input id="machine-feed-min" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
-                    <label><span>Feed Max</span><input id="machine-feed-max" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
-                    <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
-                  </div>
-                  <div class="machine-settings-actions">
-                    <button type="button" id="machine-learn">Learn from machine</button>
-                  </div>
-                  <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
-                  <div id="machine-learned-summary" class="machine-learned-summary"></div>
                 </div>
               </details>
               <details class="control-drawer-section">
@@ -999,7 +989,6 @@
     </section>
 
     <section class="page-section">
-      <h2>Files</h2>
       <div id="file-summary"></div>
       <div id="file-browser">
         <aside id="folder-sidebar">
@@ -1049,6 +1038,76 @@
     </section>
   </section>
 </main>
+<dialog id="origin-xyz-modal" class="origin-modal" aria-labelledby="origin-xyz-title">
+  <div class="machine-settings-modal-head">
+    <h2 id="origin-xyz-title">Set XYZ</h2>
+    <button type="button" id="origin-xyz-close" aria-label="Close Set XYZ">Close</button>
+  </div>
+  <div class="machine-settings-modal-body">
+    <div class="origin-modal-fields">
+      <label><span>X</span><input id="origin-xyz-x" type="number" step="0.001" inputmode="decimal" placeholder="Unchanged"></label>
+      <label><span>Y</span><input id="origin-xyz-y" type="number" step="0.001" inputmode="decimal" placeholder="Unchanged"></label>
+      <label><span>Z</span><input id="origin-xyz-z" type="number" step="0.001" inputmode="decimal" placeholder="Unchanged"></label>
+    </div>
+    <div class="origin-modal-actions"><button type="button" id="origin-xyz-apply">Set XYZ</button></div>
+  </div>
+</dialog>
+<dialog id="origin-set-modal" class="origin-modal" aria-labelledby="origin-set-title">
+  <div class="machine-settings-modal-head">
+    <h2 id="origin-set-title">Set Origin</h2>
+    <button type="button" id="origin-set-close" aria-label="Close Set Origin">Close</button>
+  </div>
+  <div class="machine-settings-modal-body">
+    <div class="origin-modal-source">
+      <label><span>Reference</span><select id="origin-set-source"><option value="anchor1">Anchor 1</option><option value="anchor2">Anchor 2</option><option value="machine">Machine coordinates</option></select></label>
+      <label><span id="origin-set-x-label">X Offset</span><input id="origin-set-x" type="number" value="0" step="0.001" inputmode="decimal"></label>
+      <label><span id="origin-set-y-label">Y Offset</span><input id="origin-set-y" type="number" value="0" step="0.001" inputmode="decimal"></label>
+    </div>
+    <div id="origin-set-change" class="origin-set-change" aria-live="polite"></div>
+    <div class="origin-modal-actions"><button type="button" id="origin-set-apply">Set Origin</button></div>
+  </div>
+</dialog>
+<dialog id="origin-presets-modal" class="origin-modal" aria-labelledby="origin-presets-title">
+  <div class="machine-settings-modal-head">
+    <h2 id="origin-presets-title">Origin Presets</h2>
+    <button type="button" id="origin-presets-close" aria-label="Close Origin Presets">Close</button>
+  </div>
+  <div class="machine-settings-modal-body">
+    <div class="origin-row origin-row-preset">
+      <label><span>Preset</span><select id="saved-origin-select"></select></label>
+      <button type="button" id="saved-origin-recall">Load</button>
+      <button type="button" id="saved-origin-delete">Delete</button>
+    </div>
+    <div class="origin-row origin-row-save">
+      <label class="saved-origin-label-field"><span>Save label</span><input id="saved-origin-label" type="text" maxlength="80" autocomplete="off" spellcheck="false"></label>
+      <button type="button" id="saved-origin-save">Save current</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="machine-settings-modal" aria-labelledby="machine-settings-title">
+  <div class="machine-settings-modal-head">
+    <h2 id="machine-settings-title">Machine settings</h2>
+    <button type="button" id="machine-settings-close" aria-label="Close machine settings">Close</button>
+  </div>
+  <div class="machine-settings-modal-body">
+    <div class="machine-settings-grid">
+      <label><span>Display X Min</span><input id="machine-x-min" type="number" step="1" inputmode="decimal"></label>
+      <label><span>Display X Max</span><input id="machine-x-max" type="number" step="1" inputmode="decimal"></label>
+      <label><span>Display Y Min</span><input id="machine-y-min" type="number" step="1" inputmode="decimal"></label>
+      <label><span>Display Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
+      <label><span>Display Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
+      <label><span>Display Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
+      <label><span>Feed Min</span><input id="machine-feed-min" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
+      <label><span>Feed Max</span><input id="machine-feed-max" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
+      <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
+    </div>
+    <div class="machine-settings-actions">
+      <button type="button" id="machine-learn">Learn from machine</button>
+    </div>
+    <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
+    <div id="machine-learned-summary" class="machine-learned-summary"></div>
+  </div>
+</dialog>
 <div id="status-bar" role="status" aria-live="polite" hidden>
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>

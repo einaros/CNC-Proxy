@@ -89,6 +89,7 @@ const state = {
     armPendingAction: "",
     armQueuedAction: "",
     targetPending: 0,
+    targetMotionPending: 0,
     targetLabel: "",
     zStepPending: 0,
     zStepLabel: "",
@@ -398,6 +399,7 @@ function defaultMachineSettings() {
     safe_z_mm: DEFAULT_SAFE_Z_MM,
     safe_z_disabled: false,
     learned: {},
+	learned_profiles: {},
   };
 }
 
@@ -437,6 +439,7 @@ function defaultWorkAreaView() {
     pointerLastY: 0,
     clientStartX: 0,
     clientStartY: 0,
+    tapLocal: null,
     dragging: false,
   };
 }
@@ -484,6 +487,7 @@ function normalizeMachineSettings(machine) {
     safe_z_mm: finiteOr(machine.safe_z_mm, d.safe_z_mm),
     safe_z_disabled: !!machine.safe_z_disabled,
     learned,
+	learned_profiles: Object.fromEntries(Object.entries(machine.learned_profiles || {}).map(([key, profile]) => [key, normalizeMachineLearned(profile)])),
   };
   if (out.work_area.x_min >= out.work_area.x_max) {
     out.work_area.x_min = d.work_area.x_min;
@@ -953,8 +957,15 @@ function renderMachine() {
   document.getElementById("status-spindle").textContent = fmtSpindle(m.spindle);
   document.getElementById("status-tool").textContent = fmtActiveTool(m.tool);
   renderToolStatus(m);
-  document.getElementById("status-connection").textContent =
-    m.reconnecting ? "reconnecting" : (m.connected ? "connected" : "not connected");
+  const connection = document.getElementById("status-connection");
+  if (connection) {
+    const status = m.reconnecting ? "reconnecting" : (m.connected ? "connected" : "outage");
+    const label = status === "connected" ? "Connected to machine" :
+      (status === "reconnecting" ? "Reconnecting to machine" : "Machine connection outage");
+    connection.className = "connection-status " + status;
+    connection.setAttribute("aria-label", label);
+    connection.title = label;
+  }
   renderAlarmPanel(m);
   renderActiveGcode();
   syncJogAvailabilityFromMachine(m);
@@ -1110,7 +1121,7 @@ function renderJog() {
     feed.min = String(Math.round(feedBounds.min));
     feed.max = String(Math.round(feedBounds.max));
     if (!controlLocallyOwned(feed)) feed.value = String(feedValue);
-    feed.disabled = !!j.targetPending || !!j.zStepPending || tapOperationBusy;
+    feed.disabled = tapMoveTargetBusy() || !!j.zStepPending || tapOperationBusy;
   }
   for (const btn of document.querySelectorAll("[data-feed-step]")) {
     const step = Number(btn.dataset.feedStep) || 0;
@@ -1119,9 +1130,9 @@ function renderJog() {
   renderWorkMoveControls(tapOperationBusy);
   renderOriginButtons();
   const zStepDistance = document.getElementById("z-step-distance");
-  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || !!j.targetPending || tapOperationBusy;
-  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !j.targetPending && !tapOperationBusy;
-  const zStepBusy = !!j.zStepPending || !!j.targetPending || tapOperationBusy;
+  if (zStepDistance) zStepDistance.disabled = !!j.zStepPending || tapMoveTargetBusy() || tapOperationBusy;
+  const zStepReady = !!j.caps?.enabled && j.link === "online" && j.armed && !j.zStepPending && !tapMoveTargetBusy() && !tapOperationBusy;
+  const zStepBusy = !!j.zStepPending || tapMoveTargetBusy() || tapOperationBusy;
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
     btn.disabled = zStepBusy;
     setSoftDisabled(btn, !zStepBusy && !zStepReady);
@@ -1200,43 +1211,35 @@ function renderOriginButtons() {
   const jogReady = !!j.caps?.enabled && j.link === "online" && j.armed;
   const externalJogBusy = !j.armed && j.availability && !j.availability.available && j.availability.reason === "busy";
   const apiReady = !j.armed && machineReadyForOriginSet() && !externalJogBusy;
-  const ready = (jogReady || apiReady) && !j.armPending && !j.targetPending && !j.zStepPending && !pendingAxis && !zProbePending;
-  const busy = !!j.armPending || !!j.targetPending || !!j.zStepPending || !!pendingAxis || zProbePending;
-  const action = document.getElementById("origin-action");
-  const actionValue = action?.value || "zero-x";
-  const probeSelected = actionValue === "probe-z";
+  const ready = (jogReady || apiReady) && !j.armPending && !tapMoveTargetBusy() && !j.zStepPending && !pendingAxis && !zProbePending;
+  const busy = !!j.armPending || tapMoveTargetBusy() || !!j.zStepPending || !!pendingAxis || zProbePending;
   const probeReady = apiReady && isProbeToolActive();
-  if (action) action.disabled = busy;
-  for (const id of ["origin-value-x-wrap", "origin-value-y-wrap", "origin-value-z-wrap"]) {
-    const wrap = document.getElementById(id);
-    if (wrap) wrap.hidden = true;
+  for (const btn of document.querySelectorAll("[data-origin-zero]")) {
+    btn.disabled = busy;
+    setSoftDisabled(btn, !busy && !ready);
   }
-  const xNeeded = actionValue === "set-x";
-  const yNeeded = actionValue === "set-y";
-  const zNeeded = actionValue === "set-z";
-  const actionRow = action?.closest(".origin-row-action");
-  if (actionRow) {
-    actionRow.classList.toggle("needs-value", xNeeded || yNeeded || zNeeded);
+  const probe = document.getElementById("origin-probe-z");
+  if (probe) {
+    probe.disabled = busy;
+    setSoftDisabled(probe, !busy && !probeReady);
+    setTextIfChanged(probe, zProbePending ? "Probing..." : "Probe Z");
   }
-  const xWrap = document.getElementById("origin-value-x-wrap");
-  const yWrap = document.getElementById("origin-value-y-wrap");
-  const zWrap = document.getElementById("origin-value-z-wrap");
-  if (xWrap) xWrap.hidden = !xNeeded;
-  if (yWrap) yWrap.hidden = !yNeeded;
-  if (zWrap) zWrap.hidden = !zNeeded;
-  const xValue = document.getElementById("origin-value-x");
-  const yValue = document.getElementById("origin-value-y");
-  const zValue = document.getElementById("origin-value-z");
-  if (xValue) xValue.disabled = busy || !xNeeded;
-  if (yValue) yValue.disabled = busy || !yNeeded;
-  if (zValue) zValue.disabled = busy || !zNeeded;
+  for (const id of ["origin-set-xyz-open", "origin-set-open", "origin-presets-open"]) {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = busy;
+  }
+  for (const id of ["origin-xyz-x", "origin-xyz-y", "origin-xyz-z", "origin-set-source", "origin-set-x", "origin-set-y"]) {
+    const input = document.getElementById(id);
+    if (input) input.disabled = busy;
+  }
+  for (const id of ["origin-xyz-apply", "origin-set-apply"]) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.disabled = busy;
+    setSoftDisabled(btn, !busy && !ready);
+    setTextIfChanged(btn, pendingAxis ? "Setting..." : (id === "origin-xyz-apply" ? "Set XYZ" : "Set Origin"));
+  }
   renderSavedOriginSelect();
-  const apply = document.getElementById("origin-apply");
-  if (apply) {
-    apply.disabled = busy;
-    setSoftDisabled(apply, !busy && !(probeSelected ? probeReady : ready));
-    setTextIfChanged(apply, zProbePending ? "Probing..." : (pendingAxis ? "Applying..." : "Apply"));
-  }
   const save = document.getElementById("saved-origin-save");
   const label = document.getElementById("saved-origin-label");
   const currentOrigin = currentWorkOrigin();
@@ -1255,17 +1258,20 @@ function renderOriginButtons() {
   if (del) {
     del.disabled = busy || !selected;
   }
-	const anchorAvailable = machineAnchorPoints() !== null;
-	for (const id of ["anchor-origin-anchor", "anchor-origin-offset-x", "anchor-origin-offset-y"]) {
-		const input = document.getElementById(id);
-		if (input) input.disabled = busy;
-	}
-	const anchorApply = document.getElementById("anchor-origin-apply");
-	if (anchorApply) {
-		anchorApply.disabled = busy;
-		setSoftDisabled(anchorApply, !busy && (!ready || !anchorAvailable));
-		setTextIfChanged(anchorApply, pendingAxis ? "Applying..." : "Set Origin");
-	}
+  renderOriginSetSourceLabels();
+}
+
+function setOriginFeedback(text, kind = "") {
+  setStatusMessage("origin-action", text, kind, { force: true });
+}
+
+function renderOriginSetSourceLabels() {
+  const machineCoordinates = document.getElementById("origin-set-source")?.value === "machine";
+  const xLabel = document.getElementById("origin-set-x-label");
+  const yLabel = document.getElementById("origin-set-y-label");
+  if (xLabel) xLabel.textContent = machineCoordinates ? "Machine X" : "X Offset";
+  if (yLabel) yLabel.textContent = machineCoordinates ? "Machine Y" : "Y Offset";
+  renderOriginSetChange();
 }
 
 function hasPendingOriginOperation() {
@@ -1344,7 +1350,7 @@ function saveCurrentOrigin() {
   renderJog();
   const select = document.getElementById("saved-origin-select");
   if (select) select.value = saved.id;
-  setTapFeedback("Saved zero " + saved.label + ".", "ok");
+  setOriginFeedback("Saved origin " + saved.label + ".", "ok");
 }
 
 function deleteSelectedOrigin() {
@@ -1362,7 +1368,7 @@ function deleteSelectedOrigin() {
   queueSaveUISettings();
   renderMachineSettings();
   renderJog();
-  setTapFeedback("Deleted saved zero " + selected.label + ".", "");
+  setOriginFeedback("Deleted saved origin " + selected.label + ".");
 }
 
 function jogPanelMessage() {
@@ -1371,13 +1377,13 @@ function jogPanelMessage() {
   if (j.link !== "online") {
     return { text: "Connecting to jog service...", kind: "" };
   }
-  const deadmanButton = state.ui.gamepad.deadman_button;
   if (!j.armed && j.availability && !j.availability.available) {
     return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
   }
   if (!j.pad) {
-    return { text: "Gamepad disconnected.", kind: "" };
+    return { text: "", kind: "" };
   }
+  const deadmanButton = state.ui.gamepad.deadman_button;
   if (!j.armed) {
     return { text: "Gamepad idle.", kind: "ok" };
   }
@@ -1512,7 +1518,6 @@ function machineLearnedSummaryLines(learned) {
   const id = learned.identity || {};
   const identity = [id.model, id.version, id.file_type].filter(Boolean).join(" / ");
   if (identity) lines.push(identity);
-  if (learned.learned_at) lines.push("learned " + learned.learned_at);
   const area = learned.work_area || {};
   if (Number.isFinite(area.x_min) && Number.isFinite(area.x_max) && Number.isFinite(area.y_min) && Number.isFinite(area.y_max)) {
     lines.push(`bounds X ${fmtCoord(area.x_min)}..${fmtCoord(area.x_max)}  Y ${fmtCoord(area.y_min)}..${fmtCoord(area.y_max)}`);
@@ -1536,10 +1541,14 @@ async function learnMachineParameters() {
   state.machineLearnPending = true;
   state.machineLearnFeedback = "Learning machine parameters...";
   state.machineLearnFeedbackKind = "info";
-  renderMachineSettings();
   try {
+    renderMachineSettings();
     const r = await request("/api/machine/learn", { method: "POST" });
     const result = await r.json();
+    // Clear pending before applying the refreshed settings. A render or
+    // normalization failure must never leave this action stranded on
+    // "Learning..." after the machine operation has completed.
+    state.machineLearnPending = false;
     if (result.ui) applyUISettings(result.ui);
     state.machineLearnFeedback = result.message || "Learned machine parameters from firmware.";
     state.machineLearnFeedbackKind = "ok";
@@ -1553,6 +1562,17 @@ async function learnMachineParameters() {
     state.machineLearnPending = false;
     renderMachineSettings();
   }
+}
+
+function openMachineSettings() {
+  const dialog = document.getElementById("machine-settings-modal");
+  if (!dialog || dialog.open) return;
+  renderMachineSettings();
+  dialog.showModal();
+}
+
+function closeMachineSettings() {
+  document.getElementById("machine-settings-modal")?.close();
 }
 
 function updateMachineSettings() {
@@ -1642,11 +1662,15 @@ function axisValue(values, axis) {
 }
 
 function currentAxisValues() {
-  const preferJog = state.jog.armed || state.jog.originPendingMode === "jog" || !!state.jog.targetPending || !!state.jog.zStepPending;
+  const preferJog = state.jog.armed || state.jog.originPendingMode === "jog" || !!state.jog.targetPending || !!state.jog.targetMotionPending || !!state.jog.zStepPending;
   return {
     mpos: preferJog ? (state.jog.mpos || state.machine.mpos) : (state.machine.mpos || state.jog.mpos),
     wpos: preferJog ? (state.jog.wpos || state.machine.wpos) : (state.machine.wpos || state.jog.wpos),
   };
+}
+
+function tapMoveTargetBusy() {
+  return !!state.jog.targetPending || !!state.jog.targetMotionPending;
 }
 
 function normalizeWorkAreaView() {
@@ -5308,8 +5332,9 @@ function connectJog() {
       state.jog.tapFeedback = tapMoveArmFailureText(action, "jog service disconnected");
       state.jog.tapFeedbackKind = "error";
     }
-    if (state.jog.targetPending) {
+    if (state.jog.targetPending || state.jog.targetMotionPending) {
       state.jog.targetPending = 0;
+      state.jog.targetMotionPending = 0;
       state.jog.tapFeedback = "Move failed: jog service disconnected.";
       state.jog.tapFeedbackKind = "error";
     }
@@ -5321,8 +5346,7 @@ function connectJog() {
     if (state.jog.originPendingMode === "jog" && hasPendingOriginOperation()) {
       const label = originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets);
       clearOriginVerification();
-      state.jog.tapFeedback = "Set " + label + " failed: jog service disconnected.";
-      state.jog.tapFeedbackKind = "error";
+      setOriginFeedback("Set " + label + " failed: jog service disconnected.", "error");
     }
     renderJog();
     scheduleJogReconnect();
@@ -5498,7 +5522,7 @@ function renderWorkMoveFieldState(axis, input) {
 
 function renderWorkMoveControls(originBusy = hasPendingOriginOperation()) {
   const { wpos } = currentAxisValues();
-  const busy = !!state.jog.targetPending || !!state.jog.zStepPending || originBusy;
+  const busy = tapMoveTargetBusy() || !!state.jog.zStepPending || originBusy;
   for (const axis of ["x", "y", "z"]) {
     const input = workMoveInput(axis);
     if (!input) continue;
@@ -5564,7 +5588,7 @@ function sendWorkCoordinateMove() {
     setTapFeedback("Arm tap move before moving to work coordinates.", "error");
     return;
   }
-  if (state.jog.targetPending || state.jog.zStepPending || hasPendingOriginOperation()) return;
+  if (tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
   let move;
   try {
     move = workMoveTargetsFromInputs();
@@ -5589,6 +5613,7 @@ function sendWorkCoordinateMove() {
   const base = state.jog.target || state.jog.observed || state.jog.mpos || state.machine.mpos || {};
   state.jog.target = { ...base, ...move.machineTargets };
   state.jog.targetPending = seq;
+  state.jog.targetMotionPending = seq;
   state.jog.targetLabel = move.label;
   state.jog.tapFeedback = "Sending move to " + move.label + "...";
   state.jog.tapFeedbackKind = "";
@@ -5609,7 +5634,7 @@ function sendTapMove(target) {
     setTapFeedback("Arm tap move before selecting a target.", "error");
     return;
   }
-  if (hasPendingOriginOperation()) return;
+  if (tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
   let feed;
   try {
     feed = currentTapFeed();
@@ -5628,6 +5653,7 @@ function sendTapMove(target) {
   const base = state.jog.target || state.jog.observed || state.jog.mpos || state.machine.mpos || {};
   state.jog.target = { ...base, x: target.x, y: target.y };
   state.jog.targetPending = seq;
+  state.jog.targetMotionPending = seq;
   state.jog.targetLabel = label;
   state.jog.tapFeedback = "Sending target " + label + "...";
   state.jog.tapFeedbackKind = "";
@@ -5660,7 +5686,7 @@ function stepZ(dir) {
     setTapFeedback("Arm tap move before moving Z.", "error");
     return;
   }
-  if (state.jog.targetPending || state.jog.zStepPending || hasPendingOriginOperation()) return;
+  if (tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
   const distance = currentZStepDistance() * dir;
   const label = zStepLabel(distance);
   const seq = sendJog({ type: "step", axis: "z", distance });
@@ -5686,42 +5712,17 @@ function formatOriginValue(value) {
   return n.toFixed(4).replace(/\.?0+$/, "");
 }
 
-function originTargetsFromAction() {
-  const action = document.getElementById("origin-action")?.value || "zero-x";
-  switch (action) {
-  case "zero-x":
-    return { targets: { x: 0 }, label: "X0" };
-  case "zero-y":
-    return { targets: { y: 0 }, label: "Y0" };
-  case "zero-z":
-    return { targets: { z: 0 }, label: "Z0" };
-  case "zero-xy":
-    return { targets: { x: 0, y: 0 }, label: "XY0" };
-  case "set-x": {
-    const value = finiteOr(document.getElementById("origin-value-x")?.value, NaN);
-    if (!Number.isFinite(value)) throw new Error("X value must be finite.");
-    return { targets: { x: value }, label: "X " + formatOriginValue(value) };
+function originTargetsFromXYZ() {
+  const targets = {};
+  for (const axis of ["x", "y", "z"]) {
+    const raw = String(document.getElementById("origin-xyz-" + axis)?.value || "").trim();
+    if (!raw) continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) throw new Error(axis.toUpperCase() + " value must be finite.");
+    targets[axis] = value;
   }
-  case "set-y": {
-    const value = finiteOr(document.getElementById("origin-value-y")?.value, NaN);
-    if (!Number.isFinite(value)) throw new Error("Y value must be finite.");
-    return { targets: { y: value }, label: "Y " + formatOriginValue(value) };
-  }
-  case "set-z": {
-    const value = finiteOr(document.getElementById("origin-value-z")?.value, NaN);
-    if (!Number.isFinite(value)) throw new Error("Z value must be finite.");
-    return { targets: { z: value }, label: "Z " + formatOriginValue(value) };
-  }
-  case "reset-xy": {
-    const { mpos } = currentAxisValues();
-    const x = axisValue(mpos, "x");
-    const y = axisValue(mpos, "y");
-    if (x === null || y === null) throw new Error("current machine XY position is unavailable.");
-    return { targets: { x, y }, label: "machine XY positioning" };
-  }
-  default:
-    throw new Error("unknown origin action.");
-  }
+  if (!originAxes(targets).length) throw new Error("Enter at least one coordinate.");
+  return { targets, label: "XYZ" };
 }
 
 function originTargetsFromSaved(saved) {
@@ -5749,23 +5750,52 @@ function machineAnchorPoints() {
   };
 }
 
-function originTargetsFromAnchor() {
-  const anchors = machineAnchorPoints();
-  if (!anchors) throw new Error("Machine anchor positions are unavailable. Learn machine parameters first.");
-  const selected = document.getElementById("anchor-origin-anchor")?.value === "anchor2" ? "anchor2" : "anchor1";
-  const offsetX = finiteOr(document.getElementById("anchor-origin-offset-x")?.value, NaN);
-  const offsetY = finiteOr(document.getElementById("anchor-origin-offset-y")?.value, NaN);
-  if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) throw new Error("Anchor offsets must be finite.");
+function originTargetsFromOriginSource() {
+  const source = document.getElementById("origin-set-source")?.value || "anchor1";
+  const x = finiteOr(document.getElementById("origin-set-x")?.value, NaN);
+  const y = finiteOr(document.getElementById("origin-set-y")?.value, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Origin coordinates must be finite.");
   const { mpos } = currentAxisValues();
   const mx = axisValue(mpos, "x");
   const my = axisValue(mpos, "y");
   if (mx === null || my === null) throw new Error("Current machine XY position is unavailable.");
-  const anchor = anchors[selected];
-  const machineOrigin = { x: anchor.x + offsetX, y: anchor.y + offsetY };
+  let machineOrigin;
+  let label;
+  if (source === "machine") {
+    machineOrigin = { x, y };
+    label = "machine coordinate origin";
+  } else {
+    const anchors = machineAnchorPoints();
+    if (!anchors) throw new Error("Machine anchor positions are unavailable. Learn machine parameters first.");
+    const selected = source === "anchor2" ? "anchor2" : "anchor1";
+    const anchor = anchors[selected];
+    machineOrigin = { x: anchor.x + x, y: anchor.y + y };
+    label = (selected === "anchor2" ? "Anchor 2" : "Anchor 1") + " origin";
+  }
   return {
     targets: { x: mx - machineOrigin.x, y: my - machineOrigin.y },
-    label: (selected === "anchor2" ? "Anchor 2" : "Anchor 1") + " origin",
+    label,
+    machineOrigin,
   };
+}
+
+function renderOriginSetChange() {
+  const out = document.getElementById("origin-set-change");
+  if (!out) return;
+  try {
+    const { machineOrigin } = originTargetsFromOriginSource();
+    const current = currentWorkOrigin();
+    const currentX = axisValue(current, "x");
+    const currentY = axisValue(current, "y");
+    if (currentX === null || currentY === null) {
+      out.textContent = "Change from current origin: unavailable (machine and work XY required).";
+      return;
+    }
+    const signed = (value) => (value >= 0 ? "+" : "") + formatOriginValue(value);
+    out.textContent = "Change from current origin: X " + signed(machineOrigin.x - currentX) + "  Y " + signed(machineOrigin.y - currentY) + " mm";
+  } catch (e) {
+    out.textContent = "Change from current origin: " + e.message;
+  }
 }
 
 function originAxes(targets) {
@@ -5796,8 +5826,7 @@ function beginOriginVerification() {
   state.jog.originPending = 0;
   state.jog.originPendingAxis = "";
   state.jog.originVerifyDeadline = Date.now() + 5000;
-  state.jog.tapFeedback = "Verifying " + originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets) + "...";
-  state.jog.tapFeedbackKind = "";
+  setOriginFeedback("Verifying " + originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets) + "...");
   if (!checkOriginVerification()) scheduleOriginVerification();
 }
 
@@ -5814,16 +5843,14 @@ function checkOriginVerification() {
   if (values.every((v) => v.w !== null && Math.abs(v.w - v.target) <= 0.01)) {
     const label = originTargetLabel(state.jog.originPendingLabel, targets);
     clearOriginVerification();
-    state.jog.tapFeedback = label + " set.";
-    state.jog.tapFeedbackKind = "ok";
+    setOriginFeedback(label + " set.", "ok");
     return true;
   }
   if (Date.now() > state.jog.originVerifyDeadline) {
     const seen = values.map((v) => v.w === null ? v.axis.toUpperCase() + " no WPos" : v.axis.toUpperCase() + " " + v.w.toFixed(3)).join(", ");
     const label = originTargetLabel(state.jog.originPendingLabel, targets);
     clearOriginVerification();
-    state.jog.tapFeedback = "Set " + label + " could not be verified (" + seen + ").";
-    state.jog.tapFeedbackKind = "error";
+    setOriginFeedback("Set " + label + " could not be verified (" + seen + ").", "error");
     return true;
   }
   return false;
@@ -5855,8 +5882,7 @@ async function setOriginViaGcode(targets, label) {
   state.jog.originPendingIndex = 0;
   state.jog.originPendingTargets = { ...targets };
   state.jog.originPendingLabel = label;
-  state.jog.tapFeedback = "Setting " + originTargetLabel(label, targets) + "...";
-  state.jog.tapFeedbackKind = "";
+  setOriginFeedback("Setting " + originTargetLabel(label, targets) + "...");
   renderJog();
   try {
     for (const axis of axes) {
@@ -5871,8 +5897,7 @@ async function setOriginViaGcode(targets, label) {
   } catch (e) {
     const pendingLabel = originTargetLabel(label, targets);
     clearOriginVerification();
-    state.jog.tapFeedback = "Set " + pendingLabel + " failed: " + e.message;
-    state.jog.tapFeedbackKind = "error";
+    setOriginFeedback("Set " + pendingLabel + " failed: " + e.message, "error");
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
   } finally {
     renderJog();
@@ -5891,13 +5916,12 @@ function sendNextJogOriginAxis() {
   if (!seq) {
     const label = originTargetLabel(state.jog.originPendingLabel, targets);
     clearOriginVerification();
-    setTapFeedback("Set " + label + " failed: jog service is not connected.", "error");
+    setOriginFeedback("Set " + label + " failed: jog service is not connected.", "error");
     return false;
   }
   state.jog.originPending = seq;
   state.jog.originPendingAxis = axis;
-  state.jog.tapFeedback = "Setting " + originTargetLabel(state.jog.originPendingLabel, targets) + "...";
-  state.jog.tapFeedbackKind = "";
+  setOriginFeedback("Setting " + originTargetLabel(state.jog.originPendingLabel, targets) + "...");
   renderJog();
   return true;
 }
@@ -5915,10 +5939,10 @@ function handleOriginAck() {
 function applyOriginTargets(targets, label) {
   const axes = originAxes(targets);
   if (!axes.length) return;
-  if (hasPendingOriginOperation() || state.jog.targetPending || state.jog.zStepPending) return;
+  if (hasPendingOriginOperation() || tapMoveTargetBusy() || state.jog.zStepPending) return;
   if (state.jog.armed) {
     if (state.jog.link !== "online") {
-      setTapFeedback("Jog service is not connected.", "error");
+      setOriginFeedback("Jog service is not connected.", "error");
       connectJog();
       return;
     }
@@ -5931,7 +5955,7 @@ function applyOriginTargets(targets, label) {
     return;
   }
   if (!machineReadyForOriginSet()) {
-    setTapFeedback("Machine must be connected and Idle to set origin.", "error");
+    setOriginFeedback("Machine must be connected and Idle to set origin.", "error");
     return;
   }
   setOriginViaGcode(targets, label);
@@ -5943,55 +5967,61 @@ function setOriginAxis(axis) {
   applyOriginTargets({ [axis]: 0 }, axis.toUpperCase() + "0");
 }
 
-function applyOriginAction() {
-  if ((document.getElementById("origin-action")?.value || "") === "probe-z") {
-    runAutoZProbe();
-    return;
-  }
+function openOriginDialog(id) {
+  const dialog = document.getElementById(id);
+  if (!dialog || dialog.open) return;
+  renderOriginButtons();
+  dialog.showModal();
+}
+
+function closeOriginDialog(id) {
+  document.getElementById(id)?.close();
+}
+
+function applyXYZOrigin() {
   try {
-    const { targets, label } = originTargetsFromAction();
+    const { targets, label } = originTargetsFromXYZ();
     applyOriginTargets(targets, label);
   } catch (e) {
-    setTapFeedback(e.message, "error");
+    setOriginFeedback(e.message, "error");
   }
 }
 
-function applyAnchorOrigin() {
+function applyOriginSource() {
   try {
-    const { targets, label } = originTargetsFromAnchor();
+    const { targets, label } = originTargetsFromOriginSource();
     applyOriginTargets(targets, label);
   } catch (e) {
-    setTapFeedback(e.message, "error");
+    setOriginFeedback(e.message, "error");
     renderJog();
   }
 }
 
 async function runAutoZProbe() {
-  if (state.jog.zProbePending || state.jog.targetPending || state.jog.zStepPending || hasPendingOriginOperation()) return;
+  if (state.jog.zProbePending || tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
   if (state.jog.armed) {
-    setTapFeedback("Disarm tap move before running Z probe.", "error");
+    setOriginFeedback("Disarm tap move before running Z probe.", "error");
     renderJog();
     return;
   }
   if (!machineReadyForOriginSet()) {
-    setTapFeedback("Machine must be connected and Idle to run Z probe.", "error");
+    setOriginFeedback("Machine must be connected and Idle to run Z probe.", "error");
     renderJog();
     return;
   }
   if (!isProbeToolActive()) {
-    setTapFeedback("Z probe requires the probe tool to be active.", "error");
+    setOriginFeedback("Z probe requires the probe tool to be active.", "error");
     renderJog();
     return;
   }
   const { wpos } = currentAxisValues();
   if (axisValue(wpos, "x") === null || axisValue(wpos, "y") === null) {
-    setTapFeedback("Current work XY is unavailable.", "error");
+    setOriginFeedback("Current work XY is unavailable.", "error");
     renderJog();
     return;
   }
   state.jog.zProbePending = true;
-  state.jog.tapFeedback = "Starting Z probe...";
-  state.jog.tapFeedbackKind = "";
+  setOriginFeedback("Starting Z probe...");
   renderJog();
   try {
     const resp = await request("/api/probe/auto-z", {
@@ -6001,12 +6031,10 @@ async function runAutoZProbe() {
     });
     const result = await resp.json();
     const msg = result.message || "Z probe command sent.";
-    state.jog.tapFeedback = msg;
-    state.jog.tapFeedbackKind = result.verified ? "ok" : "";
+    setOriginFeedback(msg, result.verified ? "ok" : "");
     await pollMachine();
   } catch (e) {
-    state.jog.tapFeedback = "Z probe failed: " + e.message;
-    state.jog.tapFeedbackKind = "error";
+    setOriginFeedback("Z probe failed: " + e.message, "error");
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
   } finally {
     state.jog.zProbePending = false;
@@ -6019,7 +6047,7 @@ function recallSelectedOrigin() {
     const { targets, label } = originTargetsFromSaved(selectedSavedOrigin());
     applyOriginTargets(targets, label);
   } catch (e) {
-    setTapFeedback(e.message, "error");
+    setOriginFeedback(e.message, "error");
   }
 }
 
@@ -6043,6 +6071,7 @@ function handleWorkAreaPointerDown(e) {
   v.pointerLastY = local.y;
   v.clientStartX = e.clientX;
   v.clientStartY = e.clientY;
+  v.tapLocal = { x: local.x, y: local.y };
   v.dragging = false;
   try {
     svg.setPointerCapture(e.pointerId);
@@ -6093,13 +6122,14 @@ function clearWorkAreaPointer(e) {
   }
   v.pointerId = null;
   v.dragging = false;
+  v.tapLocal = null;
 }
 
 function handleWorkAreaPointerUp(e) {
   const v = state.workarea;
   if (!v || v.pointerId !== e.pointerId) return;
   const wasDragging = !!v.dragging;
-  const local = workAreaSVGPointFromClient(e);
+  const local = wasDragging ? workAreaSVGPointFromClient(e) : v.tapLocal;
   clearWorkAreaPointer(e);
   updateWorkAreaHoverPosition(local);
   e.preventDefault();
@@ -6182,10 +6212,10 @@ function applyJogEvent(ev) {
     }
   } else if (ev.type === "motion" && ev.motion) {
     const predicted = ev.motion.estimated || ev.motion.observed || ev.motion.target;
-    state.jog.target = ev.motion.target || state.jog.target;
+    if (!state.jog.targetMotionPending) state.jog.target = ev.motion.target || state.jog.target;
     state.jog.mpos = predicted || state.jog.mpos;
     state.jog.wpos = ev.motion.estimated_wpos || state.jog.wpos;
-    state.jog.observed = predicted || state.jog.observed;
+    state.jog.observed = ev.motion.observed || state.jog.observed;
     state.jog.estimated = !!ev.motion.estimated;
     if (state.jog.estimated && Number(ev.motion.queue_lead_ms) > 0) {
       state.jog.estimatedUntil = performance.now() + Number(ev.motion.queue_lead_ms) + 75;
@@ -6221,9 +6251,10 @@ function applyJogEvent(ev) {
       state.jog.tapFeedbackKind = "ok";
     }
     completeCommandDisarm(ev.seq);
-    if (ev.seq && ev.seq === state.jog.targetPending) {
+    if (ev.seq && (ev.seq === state.jog.targetPending || ev.seq === state.jog.targetMotionPending)) {
       state.jog.targetPending = 0;
-      state.jog.tapFeedback = "Move command sent: " + state.jog.targetLabel;
+      state.jog.target = ev.target || state.jog.target;
+      state.jog.tapFeedback = "Moving to " + state.jog.targetLabel + "...";
       state.jog.tapFeedbackKind = "";
     }
     if (ev.seq && ev.seq === state.jog.zStepPending) {
@@ -6236,6 +6267,14 @@ function applyJogEvent(ev) {
     }
     state.jog.error = "";
     state.jog.errorCode = "";
+  } else if (ev.type === "target_complete") {
+    if (ev.seq && ev.seq === state.jog.targetMotionPending) {
+      state.jog.targetPending = 0;
+      state.jog.targetMotionPending = 0;
+      state.jog.target = ev.target || state.jog.target;
+      state.jog.tapFeedback = "Reached " + state.jog.targetLabel + ".";
+      state.jog.tapFeedbackKind = "ok";
+    }
   } else if (ev.type === "error") {
     completeCommandDisarm(ev.seq, ev.message || jogErrorText(ev.code));
     if (ev.seq && ev.seq === state.jog.armPending) {
@@ -6251,8 +6290,9 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
-    if (ev.seq && ev.seq === state.jog.targetPending) {
+    if (ev.seq && (ev.seq === state.jog.targetPending || ev.seq === state.jog.targetMotionPending)) {
       state.jog.targetPending = 0;
+      state.jog.targetMotionPending = 0;
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
@@ -6264,11 +6304,11 @@ function applyJogEvent(ev) {
     if (ev.seq && ev.seq === state.jog.originPending) {
       const label = originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets);
       clearOriginVerification();
-      state.jog.tapFeedback = "Set " + label + " failed: " + (ev.message || jogErrorText(ev.code));
-      state.jog.tapFeedbackKind = "error";
+      setOriginFeedback("Set " + label + " failed: " + (ev.message || jogErrorText(ev.code)), "error");
     }
-    if (!ev.seq && state.jog.targetPending) {
+    if (!ev.seq && (state.jog.targetPending || state.jog.targetMotionPending)) {
       state.jog.targetPending = 0;
+      state.jog.targetMotionPending = 0;
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
@@ -6280,8 +6320,7 @@ function applyJogEvent(ev) {
     if (!ev.seq && state.jog.originPendingMode === "jog" && hasPendingOriginOperation()) {
       const label = originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets);
       clearOriginVerification();
-      state.jog.tapFeedback = "Set " + label + " failed: " + (ev.message || jogErrorText(ev.code));
-      state.jog.tapFeedbackKind = "error";
+      setOriginFeedback("Set " + label + " failed: " + (ev.message || jogErrorText(ev.code)), "error");
     }
     if (!ev.seq && state.jog.armPending) {
       const action = state.jog.armPendingAction;
@@ -6704,28 +6743,40 @@ function init() {
   for (const btn of document.querySelectorAll("[data-z-step-dir]")) {
     bindButtonAction(btn, () => stepZ(Number(btn.dataset.zStepDir) || 1));
   }
-  document.getElementById("origin-action").onchange = renderJog;
-  for (const id of ["origin-value-x", "origin-value-y", "origin-value-z"]) {
+  for (const btn of document.querySelectorAll("[data-origin-zero]")) {
+    bindButtonAction(btn, () => setOriginAxis(btn.dataset.originZero));
+  }
+  bindButtonAction(document.getElementById("origin-probe-z"), runAutoZProbe);
+  bindButtonAction(document.getElementById("origin-set-xyz-open"), () => openOriginDialog("origin-xyz-modal"));
+  bindButtonAction(document.getElementById("origin-set-open"), () => openOriginDialog("origin-set-modal"));
+  bindButtonAction(document.getElementById("origin-presets-open"), () => openOriginDialog("origin-presets-modal"));
+  bindButtonAction(document.getElementById("origin-xyz-close"), () => closeOriginDialog("origin-xyz-modal"));
+  bindButtonAction(document.getElementById("origin-set-close"), () => closeOriginDialog("origin-set-modal"));
+  bindButtonAction(document.getElementById("origin-presets-close"), () => closeOriginDialog("origin-presets-modal"));
+  for (const id of ["origin-xyz-x", "origin-xyz-y", "origin-xyz-z"]) {
     const input = document.getElementById(id);
     if (!input) continue;
     input.onkeydown = (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        applyOriginAction();
+        applyXYZOrigin();
+      }
+    };
+  }
+  document.getElementById("origin-set-source").onchange = renderJog;
+  for (const id of ["origin-set-x", "origin-set-y"]) {
+    const input = document.getElementById(id);
+    input.oninput = renderOriginSetChange;
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyOriginSource();
       }
     };
   }
   document.getElementById("saved-origin-select").onchange = renderJog;
-  bindButtonAction(document.getElementById("origin-apply"), applyOriginAction);
-  for (const id of ["anchor-origin-offset-x", "anchor-origin-offset-y"]) {
-    document.getElementById(id).onkeydown = (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        applyAnchorOrigin();
-      }
-    };
-  }
-  bindButtonAction(document.getElementById("anchor-origin-apply"), applyAnchorOrigin);
+  bindButtonAction(document.getElementById("origin-xyz-apply"), applyXYZOrigin);
+  bindButtonAction(document.getElementById("origin-set-apply"), applyOriginSource);
   bindButtonAction(document.getElementById("saved-origin-recall"), recallSelectedOrigin);
   bindButtonAction(document.getElementById("saved-origin-save"), saveCurrentOrigin);
   bindButtonAction(document.getElementById("saved-origin-delete"), deleteSelectedOrigin);
@@ -6752,6 +6803,8 @@ function init() {
   bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);
+  bindButtonAction(document.getElementById("machine-settings-open"), openMachineSettings);
+  bindButtonAction(document.getElementById("machine-settings-close"), closeMachineSettings);
   bindButtonAction(document.getElementById("machine-learn"), learnMachineParameters);
 
   bindButtonAction(document.getElementById("ctl-hold"), () => sendControl("hold"));

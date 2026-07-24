@@ -145,15 +145,16 @@ type LogSettings struct {
 // surface. These values are UI state only; changing them never touches the
 // machine.
 type MachineUI struct {
-	WorkArea      WorkArea       `json:"work_area"`
-	Origin        XYPoint        `json:"origin"`
-	SavedOrigins  []SavedOrigin  `json:"saved_origins"`
-	FeedMinMMMin  float64        `json:"feed_min_mm_min"`
-	FeedMaxMMMin  float64        `json:"feed_max_mm_min"`
-	TapFeedMMMin  float64        `json:"tap_feed_mm_min"`
-	SafeZMM       float64        `json:"safe_z_mm"`
-	SafeZDisabled bool           `json:"safe_z_disabled,omitempty"`
-	Learned       MachineLearned `json:"learned,omitempty"`
+	WorkArea        WorkArea                  `json:"work_area"`
+	Origin          XYPoint                   `json:"origin"`
+	SavedOrigins    []SavedOrigin             `json:"saved_origins"`
+	FeedMinMMMin    float64                   `json:"feed_min_mm_min"`
+	FeedMaxMMMin    float64                   `json:"feed_max_mm_min"`
+	TapFeedMMMin    float64                   `json:"tap_feed_mm_min"`
+	SafeZMM         float64                   `json:"safe_z_mm"`
+	SafeZDisabled   bool                      `json:"safe_z_disabled,omitempty"`
+	Learned         MachineLearned            `json:"learned,omitempty"`
+	LearnedProfiles map[string]MachineLearned `json:"learned_profiles,omitempty"`
 }
 
 // MachineLearned is a read-only snapshot of parameters reported by the

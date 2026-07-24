@@ -223,6 +223,7 @@ func main() {
 	// Less frequently, use md5sum to catch same-size out-of-band changes.
 	go eng.RunDeepReconcile(ctx, 5*time.Minute, 8)
 	go svc.RunMaintenance(ctx, 10*time.Minute, 24*time.Hour, 24*time.Hour)
+	go svc.RunMachineLearning(ctx)
 	jogMgr := jog.New(arb, jog.Config{
 		Enabled:         *jogEnabled,
 		MaxXYMMMin:      *jogMaxXY,

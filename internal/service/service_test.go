@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -1027,6 +1028,45 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 			t.Fatalf("gcodes %v missing %q", gcodes, want)
 		}
 	}
+}
+
+func TestRunMachineLearningRefreshesEachNewConnectionAndPersistsProfile(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	m.SetFtype("lz")
+	m.SetGcodeReply("model", "model = CarveraAir,FACTORY,PROBE")
+	m.SetGcodeReply("version", "version = 1.2.3")
+	m.SetGcodeReply("diagnose", "{E:0,1,0,1,1,0}")
+	m.SetGcodeReply("config-get-all -e", strings.Join([]string{
+		"soft_endstop.x_min=-302.0",
+		"soft_endstop.y_min=-212.0",
+		"coordinate.anchor1_x=-287.51",
+		"coordinate.anchor1_y=-202.11",
+		"coordinate.anchor2_offset_x=88.5",
+		"coordinate.anchor2_offset_y=45.0",
+	}, "\n")+"\x04")
+
+	if err := svc.arb.WithMachine(false, func(*client.Conn) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Observe(machine.Idle)
+	go svc.RunMachineLearning(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		learned := svc.UISettings().Machine.Learned
+		if learned.Anchors.Available {
+			key := "CarveraAir,FACTORY,PROBE | 1.2.3 | lz"
+			profile, ok := svc.UISettings().Machine.LearnedProfiles[key]
+			if !ok || !profile.Anchors.Available {
+				t.Fatalf("persisted machine profile = %+v", svc.UISettings().Machine.LearnedProfiles)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("background learning did not persist anchor parameters: %+v", svc.UISettings().Machine.Learned)
 }
 
 func putCachedEntry(t *testing.T, svc *Service, remotePath string, content []byte, sync store.SyncState) store.Entry {

@@ -199,6 +199,9 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	if got.Machine.Learned.Identity.Model != "CarveraAir" || got.Machine.Learned.ConfigNumbers["alpha_max_rate"] != 3000 || len(got.Machine.Learned.Diagnostics["E"]) != 6 {
 		t.Fatalf("reopened learned machine profile = %+v", got.Machine.Learned)
 	}
+	if profile, ok := got.Machine.LearnedProfiles["CarveraAir | 1.2.3 | lz"]; !ok || profile.ConfigNumbers["alpha_max_rate"] != 3000 {
+		t.Fatalf("reopened learned machine profiles = %+v", got.Machine.LearnedProfiles)
+	}
 	if len(got.Machine.SavedOrigins) != 1 || got.Machine.SavedOrigins[0].Label != "Fixture" || got.Machine.SavedOrigins[0].Origin.X != -12.5 {
 		t.Fatalf("reopened saved origins = %+v", got.Machine.SavedOrigins)
 	}

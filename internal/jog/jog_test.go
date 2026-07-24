@@ -338,6 +338,86 @@ func TestJogTargetUsesFreshStatusWhileStatusPollInFlight(t *testing.T) {
 	t.Fatalf("no target jog command observed: %v", fm.Gcodes())
 }
 
+func TestJogTargetRemainsExclusiveUntilObservedAtTarget(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Target(2, machine.AxisValues{"x": 10, "y": -5}, 600, false, 0)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(fm.Gcodes()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(fm.Gcodes()) == 0 {
+		t.Fatal("first target did not reach fake machine")
+	}
+	before := len(fm.Gcodes())
+	s.SetInput(Input{Seq: 3, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+	s.motionTick()
+	if got := len(fm.Gcodes()); got != before {
+		t.Fatalf("continuous input wrote %d commands while target was pending, want %d", got, before)
+	}
+
+	s.Target(4, machine.AxisValues{"x": 20, "y": 5}, 600, false, 0)
+	busy := readEvent(t, s, "error")
+	if busy.Seq != 4 || busy.Code != CodeBusy {
+		t.Fatalf("second target event = %+v, want busy error for seq 4", busy)
+	}
+	if got := len(fm.Gcodes()); got != before {
+		t.Fatalf("second target wrote %d commands while first target was pending, want %d", got, before)
+	}
+
+	status := "<Idle|MPos:10,-5,0|WPos:10,-5,0>"
+	fm.SetStatus(status)
+	if err := s.applyStatusPayload(status); err != nil {
+		t.Fatal(err)
+	}
+	complete := drainUntil(t, s, "target_complete")
+	if complete.Seq != 2 || complete.Target["x"] != 10 || complete.Target["y"] != -5 {
+		t.Fatalf("target completion = %+v, want observed target for seq 2", complete)
+	}
+
+	s.Target(5, machine.AxisValues{"x": 20, "y": 5}, 600, false, 0)
+	ack = drainUntil(t, s, "ack")
+	if ack.Seq != 5 {
+		t.Fatalf("target ack after observed completion = %+v, want seq 5", ack)
+	}
+}
+
+func TestJogTargetWaitsForQueuedManualMotion(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+	drainUntil(t, s, "motion")
+	s.Target(3, machine.AxisValues{"x": 10, "y": -5}, 600, false, 0)
+	busy := readEvent(t, s, "error")
+	if busy.Seq != 3 || busy.Code != CodeBusy {
+		t.Fatalf("target during queued manual motion = %+v, want busy error for seq 3", busy)
+	}
+}
+
 func TestJogTargetMovesToSafeZBeforeXY(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()

@@ -15,8 +15,8 @@ import { fileURLToPath } from "node:url";
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "app.js"), "utf8");
 
 function extractFunction(name) {
-  const marker = "\nfunction " + name + "(";
-  const start = source.indexOf(marker);
+  let start = source.indexOf("\nfunction " + name + "(");
+  if (start < 0) start = source.indexOf("\nasync function " + name + "(");
   if (start < 0) throw new Error("function not found in app.js: " + name);
   const bodyStart = source.indexOf("{", start);
   let depth = 0;
@@ -115,9 +115,9 @@ test("safeZForTapMove stays below a learned Z soft maximum", () => {
 
 test("anchor origin targets use learned machine anchors plus the requested offset", () => {
   const values = {
-    "anchor-origin-anchor": { value: "anchor2" },
-    "anchor-origin-offset-x": { value: "10" },
-    "anchor-origin-offset-y": { value: "-3" },
+    "origin-set-source": { value: "anchor2" },
+    "origin-set-x": { value: "10" },
+    "origin-set-y": { value: "-3" },
   };
   const state = {
     ui: { machine: { learned: { anchors: { available: true, anchor1: { x: -287.51, y: -202.11 }, anchor2: { x: -199.01, y: -157.11 } } } } },
@@ -125,14 +125,113 @@ test("anchor origin targets use learned machine anchors plus the requested offse
     machine: { mpos: { x: -100, y: -100 } },
   };
   const ctx = buildContext(
-    ["finiteOr", "axisValue", "normalizeMachineLearned", "currentAxisValues", "machineAnchorPoints", "originTargetsFromAnchor"],
+    ["finiteOr", "axisValue", "normalizeMachineLearned", "currentAxisValues", "machineAnchorPoints", "originTargetsFromOriginSource"],
     [],
     { state, document: { getElementById: (id) => values[id] || null } },
   );
-  const out = vm.runInContext("originTargetsFromAnchor()", ctx);
+  const out = vm.runInContext("originTargetsFromOriginSource()", ctx);
   assert.equal(out.label, "Anchor 2 origin");
   assert.ok(Math.abs(out.targets.x - 89.01) < 1e-9);
   assert.ok(Math.abs(out.targets.y - 60.11) < 1e-9);
+  assert.ok(Math.abs(out.machineOrigin.x + 189.01) < 1e-9);
+  assert.ok(Math.abs(out.machineOrigin.y + 160.11) < 1e-9);
+});
+
+test("Set Origin shows the machine-coordinate change from the current origin", () => {
+  const values = {
+    "origin-set-source": { value: "machine" },
+    "origin-set-x": { value: "-80" },
+    "origin-set-y": { value: "-60" },
+    "origin-set-change": { textContent: "" },
+  };
+  const state = {
+    ui: { machine: { learned: {} } },
+    jog: { armed: false, mpos: null, wpos: null, targetPending: 0, zStepPending: 0 },
+    machine: { mpos: { x: -100, y: -90 }, wpos: { x: 10, y: 20 } },
+  };
+  const ctx = buildContext(
+    ["finiteOr", "axisValue", "formatOriginValue", "currentAxisValues", "currentWorkOrigin", "originTargetsFromOriginSource", "renderOriginSetChange"],
+    [],
+    { state, document: { getElementById: (id) => values[id] || null } },
+  );
+  vm.runInContext("renderOriginSetChange()", ctx);
+  assert.equal(values["origin-set-change"].textContent, "Change from current origin: X +30  Y +50 mm");
+});
+
+test("an unconnected gamepad does not produce a disconnect status", () => {
+  const ctx = buildContext(["jogPanelMessage"], [], {
+    state: { jog: { error: "", link: "online", availability: null, pad: "", armed: false } },
+  });
+  const message = vm.runInContext("jogPanelMessage()", ctx);
+  assert.equal(message.text, "");
+});
+
+test("Tap Move ignores a second tap until the first target is observed", () => {
+  let sent = 0;
+  const ctx = buildContext(["tapMoveTargetBusy", "sendTapMove"], [], {
+    state: {
+      jog: {
+        link: "online",
+        armed: true,
+        targetPending: 0,
+        targetMotionPending: 42,
+        zStepPending: 0,
+      },
+    },
+    hasPendingOriginOperation: () => false,
+    sendJog: () => { sent++; return 1; },
+  });
+  vm.runInContext("sendTapMove({ x: 12, y: -4 })", ctx);
+  assert.equal(sent, 0);
+});
+
+test("jog motion keeps observed machine position distinct from its prediction", () => {
+  const state = {
+    jog: {
+      observed: { x: 1, y: 2, z: 3 },
+      target: { x: 10, y: 2, z: 3 },
+      targetPending: 0,
+      targetMotionPending: 42,
+      mpos: { x: 1, y: 2, z: 3 },
+      wpos: { x: 1, y: 2, z: 3 },
+      estimated: false,
+      estimatedUntil: 0,
+      lead: {},
+      path: [],
+      sent: new Map(),
+    },
+    machine: { mpos: { x: 1, y: 2, z: 3 }, wpos: { x: 1, y: 2, z: 3 } },
+  };
+  const ctx = buildContext(["applyJogEvent"], [], {
+    state,
+    performance: { now: () => 100 },
+    renderMachine: () => {},
+    renderJog: () => {},
+  });
+  vm.runInContext(
+    "applyJogEvent({ type: 'motion', motion: { observed: { x: 1, y: 2, z: 3 }, estimated: { x: 4, y: 2, z: 3 }, target: { x: 10, y: 2, z: 3 }, estimated_wpos: { x: 4, y: 2, z: 3 }, lead: { x: 6, y: 0, z: 0 }, queue_lead_ms: 150 } })",
+    ctx,
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(state.jog.observed)), { x: 1, y: 2, z: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.jog.mpos)), { x: 4, y: 2, z: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.jog.target)), { x: 10, y: 2, z: 3 });
+});
+
+test("Set XYZ leaves blank axes unchanged", () => {
+  const values = {
+    "origin-xyz-x": { value: "1.5" },
+    "origin-xyz-y": { value: "" },
+    "origin-xyz-z": { value: "-2" },
+  };
+  const ctx = buildContext(
+    ["originAxes", "originTargetsFromXYZ"],
+    [],
+    { document: { getElementById: (id) => values[id] || null } },
+  );
+  const out = vm.runInContext("originTargetsFromXYZ()", ctx);
+  assert.equal(out.targets.x, 1.5);
+  assert.equal(out.targets.z, -2);
+  assert.equal(Object.hasOwn(out.targets, "y"), false);
 });
 
 // F21: fire-and-forget jog "input" messages are never acked by the server and
@@ -185,6 +284,52 @@ test("commands wait for Tap Move to release its lease", async () => {
   vm.runInContext("completeCommandDisarm(7)", ctx);
   await wait;
   assert.equal(state.jog.commandDisarm, null);
+});
+
+test("machine learning always leaves its pending state with terminal feedback", async () => {
+  const state = { machineLearnPending: false, machineLearnFeedback: "", machineLearnFeedbackKind: "" };
+  const calls = [];
+  const ctx = buildContext(["learnMachineParameters"], [], {
+    state,
+    request: async () => ({ json: async () => ({ ui: { machine: {} }, message: "Machine parameters learned." }) }),
+    applyUISettings: () => calls.push("settings"),
+    renderMachineSettings: () => calls.push("render"),
+    renderJog: () => calls.push("jog"),
+  });
+  await vm.runInContext("learnMachineParameters()", ctx);
+  assert.equal(state.machineLearnPending, false);
+  assert.equal(state.machineLearnFeedback, "Machine parameters learned.");
+  assert.equal(state.machineLearnFeedbackKind, "ok");
+  assert.ok(calls.includes("settings") && calls.includes("jog"));
+
+  const failedState = { machineLearnPending: false, machineLearnFeedback: "", machineLearnFeedbackKind: "" };
+  const failed = buildContext(["learnMachineParameters"], [], {
+    state: failedState,
+    request: async () => { throw new Error("offline"); },
+    applyUISettings: () => {},
+    renderMachineSettings: () => {},
+    renderJog: () => {},
+  });
+  await vm.runInContext("learnMachineParameters()", failed);
+  assert.equal(failedState.machineLearnPending, false);
+  assert.equal(failedState.machineLearnFeedback, "Learning machine parameters failed: offline");
+  assert.equal(failedState.machineLearnFeedbackKind, "error");
+});
+
+test("machine learning summary reports learned machine data, not persistence metadata", () => {
+  const ctx = buildContext(
+    ["finiteOr", "fmtCoord", "normalizeMachineLearned", "machineLearnedSummaryLines"],
+  );
+  const lines = vm.runInContext(
+    `machineLearnedSummaryLines({
+      learned_at: "2026-07-23T11:42:00Z",
+      identity: { model: "Carvera", version: "1.2.3" },
+      work_area: { x_min: -300, x_max: 0, y_min: -200, y_max: 0 }
+    })`,
+    ctx,
+  );
+  assert.ok(lines.includes("Carvera / 1.2.3"));
+  assert.ok(!lines.some((line) => line.includes("2026-07-23")));
 });
 
 // F13: terminal tap/outline feedback is displayed exactly once by the render
