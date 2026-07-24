@@ -18,9 +18,7 @@
   body { height: 100dvh; margin: 0; display: flex; flex-direction: column; overflow: hidden; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
   button, input, select, textarea { font: inherit; }
   header { position: sticky; top: 0; z-index: 60; display: grid; gap: var(--gap-xs); padding: 8px 20px; background: rgba(24,29,31,.96); border-bottom: 1px solid var(--border); backdrop-filter: blur(10px); box-shadow: 0 10px 24px rgba(0,0,0,.18); }
-  #header-main { display: flex; align-items: center; gap: 18px; min-width: 0; }
-  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
-  #machine { margin-left: auto; display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+  #machine { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
   .badge { padding: 2px 10px; border-radius: 999px; font-weight: 650; font-size: 12px; }
   .state-Idle { background: rgba(68,194,123,.15); color: var(--ok); }
   .state-Run, .state-Hold, .state-Home, .state-Sleep { background: rgba(217,154,58,.16); color: var(--warn); }
@@ -44,7 +42,7 @@
   .machine-status-detail { display: grid; grid-template-columns: max-content max-content; justify-content: space-between; gap: 14px; align-items: baseline; }
   .machine-status-detail span { font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
   .machine-status-detail b { color: var(--text); font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  #machine-status-toolbar { margin-left: auto; display: flex; align-items: stretch; gap: 4px; width: max-content; max-width: 100%; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  #machine-status-toolbar { flex: 0 1 auto; margin-left: auto; display: flex; align-items: stretch; gap: 4px; width: max-content; max-width: 100%; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   #machine-status-toolbar::-webkit-scrollbar { display: none; }
   .machine-status-item { flex: 0 0 auto; width: max-content; min-height: 32px; display: grid; grid-template-columns: max-content max-content; gap: 8px; align-items: center; padding: 4px 8px; background: rgba(32,38,41,.78); border-radius: 4px; }
   .machine-status-item .label { color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
@@ -440,8 +438,9 @@
     #control-view .tap-move-body, #control-view .workarea-frame { min-height: 0; height: 100%; }
   }
   @media (max-width: 1180px) {
-    #command-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); }
-    #machine-status-toolbar { justify-self: start; margin-left: 0; }
+    #command-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+    #command-actions { width: 100%; }
+    #machine-status-toolbar { grid-column: 1 / -1; justify-self: start; margin-left: 0; }
   }
   @media (max-width: 1360px) {
     .tap-coordinate-panel { grid-column: 1 / -1; padding-left: 0; border-left: 0; }
@@ -464,15 +463,15 @@
     .file-col-status { width: 16%; }
   }
   @media (max-width: 760px) {
-    #header-main { display: grid; gap: var(--gap-sm); }
-    header, .toolbar, #machine, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-arm-panel, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    header, .toolbar, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-arm-panel, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row, .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row label:last-child { grid-column: auto; }
     .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
     .tap-feed-field { width: 100%; }
     .tap-feed-stepper { grid-template-columns: 38px minmax(0, 1fr) 38px; }
-    #machine { margin-left: 0; }
-    #command-toolbar { gap: var(--gap-sm); }
+    #machine { justify-self: start; }
+    #command-toolbar { grid-template-columns: 1fr; gap: var(--gap-sm); }
+    #machine-status-toolbar { width: 100%; max-width: 100%; }
     #command-menu { gap: var(--gap-xs); }
     .command-panel { padding: 10px; }
     input[type="search"] { width: 100%; }
@@ -523,20 +522,6 @@
 </head>
 <body>
 <header>
-  <div id="header-main">
-    <h1>CNC Proxy</h1>
-    <div id="machine">
-      <span id="status-connection" class="connection-status" role="img" aria-label="Machine connection unknown" title="Machine connection unknown"></span>
-      <details id="machine-status-popout" class="machine-status-popout">
-        <summary aria-label="Machine status details"><span id="state" class="badge state-Unknown">Unknown</span></summary>
-        <div class="machine-status-popout-body">
-          <div class="machine-status-detail"><span>Mode</span><b id="mode">-</b></div>
-          <div class="machine-status-detail"><span>Status age</span><b id="age">-</b></div>
-          <div class="machine-status-detail"><span>Pending jobs</span><b id="pending">0</b></div>
-        </div>
-      </details>
-    </div>
-  </div>
   <div id="command-toolbar" aria-label="Command toolbar">
     <div id="command-actions">
       <div id="command-menu">
@@ -661,6 +646,17 @@
         <button type="button" id="machine-settings-open">Machine settings</button>
       </div>
       <button type="button" id="ctl-halt" class="danger" title="Emergency stop (halt)">⏹ Halt</button>
+    </div>
+    <div id="machine">
+      <span id="status-connection" class="connection-status" role="img" aria-label="Machine connection unknown" title="Machine connection unknown"></span>
+      <details id="machine-status-popout" class="machine-status-popout">
+        <summary aria-label="Machine status details"><span id="state" class="badge state-Unknown">Unknown</span></summary>
+        <div class="machine-status-popout-body">
+          <div class="machine-status-detail"><span>Mode</span><b id="mode">-</b></div>
+          <div class="machine-status-detail"><span>Status age</span><b id="age">-</b></div>
+          <div class="machine-status-detail"><span>Pending jobs</span><b id="pending">0</b></div>
+        </div>
+      </details>
     </div>
     <div id="machine-status-toolbar" aria-label="Machine status">
       <div class="machine-status-item machine-status-position">
