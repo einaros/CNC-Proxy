@@ -8,7 +8,8 @@ import vm from "node:vm";
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "app.js"), "utf8");
 
 function extractFunction(name) {
-  const start = source.indexOf("\nfunction " + name + "(");
+  let start = source.indexOf("\nfunction " + name + "(");
+  if (start < 0) start = source.indexOf("\nasync function " + name + "(");
   if (start < 0) throw new Error("function not found in app.js: " + name);
   const bodyStart = source.indexOf("{", source.indexOf(")", source.indexOf("(", start)));
   let depth = 0;
@@ -29,7 +30,6 @@ function outlineJSONContext(state) {
   const ctx = vm.createContext({ state });
   const constants = [
     "DEFAULT_FIELD_SPOT_GAP_MM",
-    "DEFAULT_FIELD_SAFE_Z_MM",
     "MAX_FIELD_PROBE_POINTS",
     "MAX_EFFECTIVE_OUTLINE_POINTS",
   ];
@@ -39,7 +39,6 @@ function outlineJSONContext(state) {
     "cloneOutlineOrigin",
     "defaultOutlineState",
     "fieldProbeSpotGap",
-    "fieldProbeSafeZ",
     "outlineJSONDocument",
     "outlineStateFromJSON",
     "outlineOriginFromJSON",
@@ -71,7 +70,6 @@ test("outline JSON save and load preserves the captured outline and samples", ()
       origin: { x: -210, y: -120, z: -43 },
       probeEachPoint: true,
       fieldSpotGapMM: 4.5,
-      fieldSafeZMM: 7.5,
       fieldProbeResults: [point("sample", 20, 30, 2.5)],
     },
   };
@@ -87,7 +85,6 @@ test("outline JSON save and load preserves the captured outline and samples", ()
   assert.deepEqual(restored.origin, { x: -210, y: -120, z: -43 });
   assert.equal(restored.probeEachPoint, true);
   assert.equal(restored.fieldSpotGapMM, 4.5);
-  assert.equal(restored.fieldSafeZMM, 7.5);
   assert.equal(restored.points.length, 3);
   assert.equal(restored.points[2].machine_y, -40);
   assert.equal(restored.fieldProbeResults.length, 1);
@@ -104,4 +101,47 @@ test("outline JSON load rejects malformed geometry", () => {
     () => vm.runInContext(`outlineStateFromJSON({app: "cnc-proxy", kind: "capture-outline", version: 1, units: "mm", outline: {points: [{id: "a", x: 0, y: 0, z: 0, machine_x: 0, machine_y: 0, machine_z: 0}, {id: "b", x: "bad", y: 0, z: 0, machine_x: 0, machine_y: 0, machine_z: 0}]}})`, ctx),
     /missing x/,
   );
+});
+
+test("field probing keeps every travel and retract at the starting machine Z", async () => {
+  const calls = [];
+  const state = {
+    jog: { armed: false },
+    outline: {
+      active: true,
+      closed: true,
+      points: [{}, {}, {}],
+      origin: { x: -200, y: -100, z: -40 },
+      fieldProbePreview: [{ id: "first", x: 1, y: 2 }, { id: "second", x: 3, y: 4 }],
+      fieldProbeResults: [],
+      fieldProbeTooDense: false,
+      fieldProbePending: false,
+      fieldProbeIndex: 0,
+      feedback: "",
+      feedbackKind: "",
+    },
+  };
+  const ctx = vm.createContext({
+    state,
+    isProbeToolActive: () => true,
+    updateFieldProbePreview: () => {},
+    currentOutlineCapturePosition: () => ({ machine: { z: -41 } }),
+    setOutlineFeedback: () => {},
+    renderOutlineCapture: () => {},
+    renderWorkArea: () => {},
+    pollMachine: () => {},
+    probeZAtWorkPoint: async (point, opts) => {
+      calls.push({ point, opts });
+      return { x: point.x, y: point.y, z: -42, machine_x: point.x - 200, machine_y: point.y - 100, machine_z: -42 };
+    },
+  });
+  vm.runInContext(["axisValue", "cloneOutlineOrigin", "runFieldProbe"].map(extractFunction).join("\n"), ctx);
+  await vm.runInContext("runFieldProbe()", ctx);
+
+  assert.equal(calls.length, 2);
+  for (const { opts } of calls) {
+    assert.equal(opts.safeZMM, -41);
+    assert.equal(opts.retractZMM, -41);
+    assert.equal("retractAboveMM" in opts, false);
+  }
 });

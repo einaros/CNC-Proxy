@@ -6,7 +6,6 @@ const GCODE_HISTORY_KEY = "cnc-proxy.gcode-history.v1";
 const PROBE_SPOT_DIAMETER_MM = 2;
 const PROBE_SPOT_RADIUS_MM = PROBE_SPOT_DIAMETER_MM / 2;
 const DEFAULT_FIELD_SPOT_GAP_MM = 8;
-const DEFAULT_FIELD_SAFE_Z_MM = 5;
 const DEFAULT_SAFE_Z_MM = -3;
 const SAFE_Z_LIMIT_MARGIN_MM = 3;
 const MAX_FIELD_PROBE_POINTS = 1500;
@@ -415,7 +414,6 @@ function defaultOutlineState() {
     probeEachPoint: false,
     pointProbePending: false,
     fieldSpotGapMM: DEFAULT_FIELD_SPOT_GAP_MM,
-    fieldSafeZMM: DEFAULT_FIELD_SAFE_Z_MM,
     fieldProbePreview: [],
     fieldProbeResults: [],
     fieldProbePending: false,
@@ -2196,7 +2194,6 @@ function renderOutlineCapture() {
   const exp = document.getElementById("outline-export");
   const fieldControls = document.getElementById("outline-field-controls");
   const spacing = document.getElementById("outline-field-spacing");
-  const fieldSafeZ = document.getElementById("outline-field-safe-z");
   const fieldProbe = document.getElementById("outline-field-probe");
   const exportControls = document.getElementById("outline-export-controls");
   const exportObj = document.getElementById("outline-export-obj");
@@ -2261,10 +2258,6 @@ function renderOutlineCapture() {
     if (!controlLocallyOwned(spacing)) spacing.value = pathNum(fieldProbeSpotGap());
     spacing.disabled = busy;
   }
-  if (fieldSafeZ) {
-    if (!controlLocallyOwned(fieldSafeZ)) fieldSafeZ.value = pathNum(fieldProbeSafeZ());
-    fieldSafeZ.disabled = busy;
-  }
   if (fieldProbe) {
     setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe field Z");
     fieldProbe.disabled = busy;
@@ -2319,28 +2312,6 @@ function updateOutlineFieldSpacing() {
 function fieldProbeSpotGap() {
   const v = Number(state.outline.fieldSpotGapMM);
   return Number.isFinite(v) ? Math.max(0, Math.min(250, v)) : DEFAULT_FIELD_SPOT_GAP_MM;
-}
-
-function fieldProbeSafeZ() {
-  const value = Number(state.outline.fieldSafeZMM);
-  return Number.isFinite(value) ? Math.max(0, Math.min(200, value)) : DEFAULT_FIELD_SAFE_Z_MM;
-}
-
-function updateOutlineFieldSafeZ() {
-  const input = document.getElementById("outline-field-safe-z");
-  const raw = String(input?.value ?? "").trim();
-  const value = Number(raw);
-  if (!input || raw === "" || !Number.isFinite(value) || value < 0 || value > 200) {
-    if (input) {
-      input.setCustomValidity("Enter a safe Z between 0 and 200 mm.");
-      input.reportValidity?.();
-    }
-    return;
-  }
-  input.setCustomValidity("");
-  state.outline.fieldSafeZMM = value;
-  clearControlDrafts(input);
-  renderOutlineCapture();
 }
 
 function fieldProbeCenterSpacing(gap = fieldProbeSpotGap()) {
@@ -2739,11 +2710,10 @@ async function runFieldProbe() {
     return;
   }
   const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin());
-  let fieldSafeZMM;
-  try {
-    fieldSafeZMM = fieldProbeSafeZ();
-  } catch (e) {
-    setOutlineFeedback(e.message, "error");
+  const startPosition = currentOutlineCapturePosition();
+  const startZMM = axisValue(startPosition?.machine, "z");
+  if (startZMM === null) {
+    setOutlineFeedback("Field Z probe needs the current machine Z position.", "error");
     return;
   }
   o.fieldProbePending = true;
@@ -2754,7 +2724,6 @@ async function runFieldProbe() {
   renderOutlineCapture();
   renderWorkArea();
   try {
-    let travelZMM = null;
     for (let i = 0; i < o.fieldProbePreview.length; i++) {
       o.fieldProbeIndex = i;
       o.feedback = "Probing field point " + (i + 1) + " of " + o.fieldProbePreview.length + "...";
@@ -2763,14 +2732,9 @@ async function runFieldProbe() {
       const probed = await probeZAtWorkPoint(p, {
         moveXY: true,
         origin,
-        safeZMM: travelZMM === null ? safeZForTapMove(normalizeMachineSettings(state.ui.machine)) : travelZMM,
-        retractAboveMM: travelZMM === null ? fieldSafeZMM : undefined,
-        retractZMM: travelZMM === null ? undefined : travelZMM,
+        safeZMM: startZMM,
+        retractZMM: startZMM,
       });
-      if (travelZMM === null) {
-        if (!Number.isFinite(probed.retract_z_mm)) throw new Error("first field probe did not report a safe Z");
-        travelZMM = probed.retract_z_mm;
-      }
       o.fieldProbeResults.push({
         id: p.id,
         x: probed.x,
@@ -2987,7 +2951,6 @@ function outlineJSONDocument() {
       origin: cloneOutlineOrigin(o.origin),
       probe_each_point: !!o.probeEachPoint,
       field_spot_gap_mm: fieldProbeSpotGap(),
-      field_safe_z_mm: fieldProbeSafeZ(),
       field_probe_results: o.fieldProbeResults.map(cloneOutlinePoint),
     },
   };
@@ -3046,7 +3009,6 @@ function outlineStateFromJSON(doc) {
   next.origin = outlineOriginFromJSON(raw.origin);
   next.probeEachPoint = !!raw.probe_each_point;
   next.fieldSpotGapMM = boundedOutlineNumber(raw.field_spot_gap_mm, 0, 250, DEFAULT_FIELD_SPOT_GAP_MM);
-  next.fieldSafeZMM = boundedOutlineNumber(raw.field_safe_z_mm, 0, 200, DEFAULT_FIELD_SAFE_Z_MM);
   const samples = raw.field_probe_results == null ? [] : raw.field_probe_results;
   if (!Array.isArray(samples) || samples.length > MAX_FIELD_PROBE_POINTS) {
     throw new Error("field probe samples are invalid");
@@ -6980,9 +6942,6 @@ function init() {
   const outlineSpacing = document.getElementById("outline-field-spacing");
   outlineSpacing.oninput = () => markControlDirty(outlineSpacing);
   outlineSpacing.onchange = updateOutlineFieldSpacing;
-  const outlineSafeZ = document.getElementById("outline-field-safe-z");
-  outlineSafeZ.oninput = () => markControlDirty(outlineSafeZ);
-  outlineSafeZ.onchange = updateOutlineFieldSafeZ;
   bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);
