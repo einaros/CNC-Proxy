@@ -199,10 +199,10 @@ type TracePoint struct {
 	Y float64 `json:"y"`
 }
 
-// TraceOutlineRequest describes a serialized probe-laser outline trace.
+// TraceOutlineRequest describes a serialized probe-laser outline trace at the
+// configured machine-coordinate safe Z height.
 type TraceOutlineRequest struct {
 	MachinePoints []TracePoint `json:"machine_points"`
-	MachineZ      float64      `json:"machine_z"`
 	SafeZMM       float64      `json:"safe_z_mm"`
 	FeedMM        float64      `json:"feed_mm_min"`
 	Closed        bool         `json:"closed"`
@@ -1768,8 +1768,10 @@ func (s *Service) ProbeZ(req ProbeZRequest) (ProbeZResult, error) {
 }
 
 // TraceOutline runs a serialized probe-laser trace around a machine-coordinate
-// outline. The probe laser is switched off again if any command after activation
-// fails, so the operator is not left with an active laser after a partial trace.
+// outline. It travels and traces entirely at SafeZMM: the probe laser does not
+// need to descend to the captured outline Z, and doing so can collide with the
+// workpiece. The trace deliberately leaves the probe laser on, matching the
+// controller's margin trace and preserving a useful visible result.
 func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, error) {
 	req.SafeZMM = s.SafeZTargetMM(req.SafeZMM)
 	if err := validateTraceOutlineRequest(req); err != nil {
@@ -1789,7 +1791,6 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 			CommandCount: 0,
 			Verified:     false,
 		}
-		laserOn := false
 		run := func(line string) error {
 			res.CommandCount++
 			_, err := s.sendTraceLine(c, line)
@@ -1798,28 +1799,14 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 		if err := run("M494.1"); err != nil {
 			return err
 		}
-		laserOn = true
 		var err error
 		first := points[0]
 		if err = run(fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM)); err == nil {
 			err = run(fmt.Sprintf("G53 G0 X%.4f Y%.4f", first.X, first.Y))
 		}
-		if err == nil {
-			err = run(fmt.Sprintf("G53 G0 Z%.4f", req.MachineZ))
-		}
 		for i := 1; err == nil && i < len(points); i++ {
 			p := points[i]
 			err = run(fmt.Sprintf("G53 G1 X%.4f Y%.4f F%.4f", p.X, p.Y, req.FeedMM))
-		}
-		if err == nil {
-			err = run("M400")
-		}
-		if laserOn {
-			offErr := run("M494.2")
-			laserOn = false
-			if err == nil {
-				err = offErr
-			}
 		}
 		if err != nil {
 			res.Message = "Trace outline failed: " + err.Error()
@@ -1917,7 +1904,6 @@ func validateTraceOutlineRequest(req TraceOutlineRequest) error {
 		return fmt.Errorf("service: trace outline supports at most %d points", maxTracePoints)
 	}
 	values := map[string]float64{
-		"machine_z":   req.MachineZ,
 		"safe_z_mm":   req.SafeZMM,
 		"feed_mm_min": req.FeedMM,
 	}

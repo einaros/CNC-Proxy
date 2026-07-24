@@ -1527,7 +1527,6 @@ func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
 
 	res, err := svc.TraceOutline(TraceOutlineRequest{
 		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 10, Y: 5}},
-		MachineZ:      -2,
 		SafeZMM:       5,
 		FeedMM:        600,
 		Closed:        true,
@@ -1535,22 +1534,22 @@ func TestTraceOutlineSendsProbeLaserTraceAndVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TraceOutline: %v", err)
 	}
-	if !res.Verified || res.Points != 4 || res.CommandCount != 9 {
+	if !res.Verified || res.Points != 4 || res.CommandCount != 6 {
 		t.Fatalf("trace result = %+v", res)
 	}
 	want := []string{
 		"M494.1",
 		"G53 G0 Z-3.0000",
 		"G53 G0 X0.0000 Y0.0000",
-		"G53 G0 Z-2.0000",
 		"G53 G1 X10.0000 Y0.0000 F600.0000",
 		"G53 G1 X10.0000 Y5.0000 F600.0000",
 		"G53 G1 X0.0000 Y0.0000 F600.0000",
-		"M400",
-		"M494.2",
 	}
 	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
 		t.Fatalf("trace gcodes = %v, want %v", got, want)
+	}
+	if !m.Snapshot().ProbeLaserActive {
+		t.Fatal("trace turned the probe laser off")
 	}
 }
 
@@ -1563,7 +1562,6 @@ func TestTraceOutlineRejectsInvalidStateAndInput(t *testing.T) {
 	}
 	req := TraceOutlineRequest{
 		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}},
-		MachineZ:      -2,
 		SafeZMM:       5,
 		FeedMM:        600,
 	}
@@ -1588,7 +1586,6 @@ func TestTraceOutlineRejectsInvalidStateAndInput(t *testing.T) {
 	}
 	if _, err := svc.TraceOutline(TraceOutlineRequest{
 		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: math.NaN(), Y: 1}},
-		MachineZ:      -2,
 		SafeZMM:       5,
 		FeedMM:        600,
 	}); err == nil {
@@ -1598,12 +1595,12 @@ func TestTraceOutlineRejectsInvalidStateAndInput(t *testing.T) {
 	for i := range points {
 		points[i] = TracePoint{X: float64(i), Y: 0}
 	}
-	if _, err := svc.TraceOutline(TraceOutlineRequest{MachinePoints: points, MachineZ: -2, SafeZMM: 5, FeedMM: 600}); err == nil {
+	if _, err := svc.TraceOutline(TraceOutlineRequest{MachinePoints: points, SafeZMM: 5, FeedMM: 600}); err == nil {
 		t.Fatal("expected excessive trace points to be rejected")
 	}
 }
 
-func TestTraceOutlineTurnsProbeLaserOffAfterFailure(t *testing.T) {
+func TestTraceOutlineKeepsProbeLaserEnabledAfterFailure(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
 	m.SetStatus(status)
@@ -1614,7 +1611,6 @@ func TestTraceOutlineTurnsProbeLaserOffAfterFailure(t *testing.T) {
 
 	_, err := svc.TraceOutline(TraceOutlineRequest{
 		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}},
-		MachineZ:      -2,
 		SafeZMM:       5,
 		FeedMM:        600,
 	})
@@ -1624,10 +1620,12 @@ func TestTraceOutlineTurnsProbeLaserOffAfterFailure(t *testing.T) {
 	want := []string{
 		"M494.1",
 		"G53 G0 Z-3.0000",
-		"M494.2",
 	}
 	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
 		t.Fatalf("trace failure gcodes = %v, want %v", got, want)
+	}
+	if !m.Snapshot().ProbeLaserActive {
+		t.Fatal("failed trace turned the probe laser off")
 	}
 }
 

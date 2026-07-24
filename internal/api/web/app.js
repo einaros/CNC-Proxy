@@ -2796,16 +2796,6 @@ function traceOutlineMachinePoints(origin) {
   return points.map((p) => ({ x: p.x, y: p.y }));
 }
 
-function traceOutlineMachineZ() {
-  const pos = currentOutlineCapturePosition();
-  if (axisValue(pos?.machine, "z") !== null) return pos.machine.z;
-  for (let i = state.outline.points.length - 1; i >= 0; i--) {
-    const z = axisValue(state.outline.points[i], "machine_z");
-    if (z !== null) return z;
-  }
-  return null;
-}
-
 async function traceOutline() {
   const o = state.outline;
   if (!o.active || o.points.length < 2) return;
@@ -2821,9 +2811,8 @@ async function traceOutline() {
   const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin());
   const ox = axisValue(origin, "x");
   const oy = axisValue(origin, "y");
-  const machineZ = traceOutlineMachineZ();
-  if (ox === null || oy === null || machineZ === null) {
-    setOutlineFeedback("Trace outline failed: current outline origin or Z level is unavailable.", "error");
+  if (ox === null || oy === null) {
+    setOutlineFeedback("Trace outline failed: current outline origin is unavailable.", "error");
     return;
   }
   let machinePoints;
@@ -2848,7 +2837,6 @@ async function traceOutline() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         machine_points: machinePoints,
-        machine_z: machineZ,
         safe_z_mm: safeZForTapMove(machine),
         feed_mm_min: currentTapFeed(),
         closed: !!o.closed,
