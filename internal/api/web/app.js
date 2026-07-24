@@ -1620,6 +1620,7 @@ function updateMachineSettings() {
     safe_z_mm: values["machine-safe-z"],
     safe_z_disabled: !!current.safe_z_disabled,
     learned: current.learned || {},
+    learned_profiles: current.learned_profiles || {},
   });
   clearControlDrafts(MACHINE_SETTING_IDS);
   queueSaveUISettings();

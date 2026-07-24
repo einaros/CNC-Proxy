@@ -217,6 +217,42 @@ test("jog motion keeps observed machine position distinct from its prediction", 
   assert.deepEqual(JSON.parse(JSON.stringify(state.jog.target)), { x: 10, y: 2, z: 3 });
 });
 
+test("saving Machine Settings keeps learned machine profiles", () => {
+  const ids = [
+    "machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max",
+    "machine-origin-x", "machine-origin-y", "machine-feed-min", "machine-feed-max",
+    "tap-feed-mm-min", "machine-safe-z",
+  ];
+  const elements = Object.fromEntries(ids.map((id, i) => [id, {
+    value: String(i + 1),
+    setCustomValidity: () => {},
+  }]));
+  const state = {
+    ui: {
+      machine: {
+        learned: { identity: { model: "Carvera" } },
+        learned_profiles: { "Carvera|1.0": { identity: { model: "Carvera" } } },
+      },
+    },
+  };
+  const ctx = buildContext(["updateMachineSettings"], [], {
+    state,
+    MACHINE_SETTING_IDS: ids,
+    document: { getElementById: (id) => elements[id] || null },
+    normalizeMachineSettings: (settings) => settings,
+    clearControlDrafts: () => {},
+    queueSaveUISettings: () => {},
+    renderMachineSettings: () => {},
+    renderJog: () => {},
+    renderWorkArea: () => {},
+  });
+  vm.runInContext("updateMachineSettings()", ctx);
+  assert.deepEqual(
+    state.ui.machine.learned_profiles,
+    { "Carvera|1.0": { identity: { model: "Carvera" } } },
+  );
+});
+
 test("Set XYZ leaves blank axes unchanged", () => {
   const values = {
     "origin-xyz-x": { value: "1.5" },
