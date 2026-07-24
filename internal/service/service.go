@@ -709,14 +709,18 @@ func mergeMachineLearnedProfiles(current, candidate map[string]store.MachineLear
 }
 
 // LearnMachineParameters refreshes read-only firmware-reported parameters into
-// local UI metadata. It mirrors the original controller's connection/config
-// queries where they expose durable machine parameters, and also asks diagnose
-// for the compact state tuple the controller parses for peripheral/endstop
-// status.
+// local UI metadata using the vendor controller's config-file download followed
+// by its model, version, and file-type queries.
 func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
-	var modelOut, versionOut, ftypeOut, diagnoseOut, configOut string
+	var modelOut, versionOut, ftypeOut, configOut string
 	err := s.arb.WithMachine(true, func(c *client.Conn) error {
 		var e error
+		// The vendor controller learns its settings by downloading
+		// /sd/config.txt through the file-transfer protocol. Do the same; do
+		// not probe unsupported config-get console commands.
+		if configOut, e = s.downloadMachineConfig(c); e != nil {
+			return e
+		}
 		if modelOut, e = s.sendLearnLine(c, "model"); e != nil {
 			return e
 		}
@@ -726,15 +730,6 @@ func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
 		if ftypeOut, e = s.sendLearnLine(c, "ftype"); e != nil {
 			return e
 		}
-		if diagnoseOut, e = s.sendLearnLine(c, "diagnose"); e != nil {
-			return e
-		}
-		// Older controller builds append -e to request an EOT byte, but current
-		// firmware interprets it as a config filename. Send the portable form;
-		// sendLearnLine already completes reply reads using a quiescence window.
-		if configOut, e = s.learnMachineConfig(c); e != nil {
-			return e
-		}
 		return nil
 	})
 	if err != nil {
@@ -742,7 +737,7 @@ func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
 		return MachineLearnResult{}, err
 	}
 
-	learned, err := buildMachineLearned(modelOut, versionOut, ftypeOut, diagnoseOut, configOut, time.Now())
+	learned, err := buildMachineLearned(modelOut, versionOut, ftypeOut, "", configOut, time.Now())
 	if err != nil {
 		return MachineLearnResult{}, err
 	}
@@ -825,85 +820,24 @@ func (s *Service) maybeLearnConnectedMachine(ctx context.Context) {
 	}()
 }
 
-// machineLearningConfigKeys are the settings that directly affect the control
-// UI's work envelope, safe travel, feeds, probe behavior, and anchor origins.
-// They are only queried individually when a firmware lacks config-get-all.
-var machineLearningConfigKeys = []string{
-	"soft_endstop.enable",
-	"soft_endstop.x_min", "soft_endstop.x_max",
-	"soft_endstop.y_min", "soft_endstop.y_max",
-	"soft_endstop.z_min", "soft_endstop.z_max",
-	"alpha_max", "beta_max", "gamma_max",
-	"default_feed_rate", "default_seek_rate",
-	"alpha_max_rate", "beta_max_rate", "gamma_max_rate",
-	"coordinate.clearance_x", "coordinate.clearance_y", "coordinate.clearance_z",
-	"coordinate.anchor1_x", "coordinate.anchor1_y",
-	"coordinate.anchor2_offset_x", "coordinate.anchor2_offset_y",
-	"atc.probe.fast_rate_mm_m", "atc.probe.slow_rate_mm_m", "atc.probe.retract_mm",
-}
+const machineConfigDownloadTimeout = 30 * time.Second
 
-func (s *Service) learnMachineConfig(c *client.Conn) (string, error) {
-	out, err := s.sendLearnLine(c, "config-get-all")
-	if err == nil {
-		return out, nil
-	}
-	if !isUnsupportedMachineCommand(out, err) {
+func (s *Service) downloadMachineConfig(c *client.Conn) (string, error) {
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "learn download /sd/config.txt")
+	var config bytes.Buffer
+	if _, _, err := c.Download("/sd/config.txt", &config, machineConfigDownloadTimeout, nil); err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
 		return "", err
 	}
-
-	// Some newer machine builds omit config-get-all but retain the standard
-	// cached config-get query. Query the bounded set we actually consume rather
-	// than retrying the unsupported command.
-	config := make([]string, 0, len(machineLearningConfigKeys))
-	for _, key := range machineLearningConfigKeys {
-		valueOut, valueErr := s.sendLearnLine(c, "config-get "+key)
-		if valueErr != nil {
-			if isUnsupportedMachineCommand(valueOut, valueErr) {
-				return "", fmt.Errorf("machine does not support configuration queries: %w", valueErr)
-			}
-			return "", valueErr
-		}
-		if value, ok := parseMachineConfigGetValue(valueOut, key); ok {
-			config = append(config, key+"="+value)
-		}
-	}
-	if len(config) == 0 {
-		return "", errors.New("machine did not return usable configuration values")
-	}
-	return strings.Join(config, "\n"), nil
-}
-
-func isUnsupportedMachineCommand(out string, err error) bool {
-	text := strings.ToLower(out)
-	if err != nil {
-		text += " " + strings.ToLower(err.Error())
-	}
-	return strings.Contains(text, "unsupported command") || strings.Contains(text, "unknown command")
-}
-
-func parseMachineConfigGetValue(out, key string) (string, bool) {
-	for _, line := range strings.Split(stripFirmwareEOT(out), "\n") {
-		line = strings.TrimSpace(line)
-		if left, value, ok := strings.Cut(line, "="); ok && strings.EqualFold(strings.TrimSpace(left), key) {
-			value = strings.TrimSpace(value)
-			return value, value != ""
-		}
-		if _, rest, ok := strings.Cut(line, ":"); ok {
-			line = strings.TrimSpace(rest)
-		}
-		name, value, ok := strings.Cut(line, " is set to ")
-		if !ok || !strings.EqualFold(strings.TrimSpace(name), key) {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		return value, value != ""
-	}
-	return "", false
+	return config.String(), nil
 }
 
 func (s *Service) sendLearnLine(c *client.Conn, line string) (string, error) {
 	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "learn "+line)
-	out, err := c.SendConsoleCommand(ensureWireLine(line), client.GcodeOpts{ExpectReply: true, Cap: gcodeReplyCap})
+	// Controller.queryModel/queryVersion/queryFtype use executeCommand, which
+	// sends these CTRL_MULTI payloads without a newline. Preserve that framing
+	// exactly; this is distinct from ordinary G-code lines.
+	out, err := c.SendConsoleCommand(line, client.GcodeOpts{ExpectReply: true, Cap: gcodeReplyCap})
 	if out != "" {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
 	}
@@ -1029,7 +963,11 @@ func parseMachineConfig(out string) map[string]string {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
-			continue
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			key, value = fields[0], strings.Join(fields[1:], " ")
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)

@@ -1054,8 +1054,7 @@ func TestLearnMachineParametersAPI(t *testing.T) {
 	m.SetFtype("lz")
 	m.SetGcodeReply("model", "model = CarveraAir")
 	m.SetGcodeReply("version", "version = 1.2.3")
-	m.SetGcodeReply("diagnose", "{E:0,1,0,1,1,0|P:1,0}")
-	m.SetGcodeReply("config-get-all", strings.Join([]string{
+	m.PutFile("/sd/config.txt", []byte(strings.Join([]string{
 		"soft_endstop.x_min=-371.0",
 		"soft_endstop.y_min=-250.0",
 		"soft_endstop.z_min=-135.0",
@@ -1069,7 +1068,7 @@ func TestLearnMachineParametersAPI(t *testing.T) {
 		"coordinate.anchor1_y=-202.11",
 		"coordinate.anchor2_offset_x=88.5",
 		"coordinate.anchor2_offset_y=45.0",
-	}, "\n")+"\x04")
+	}, "\n")))
 
 	resp := postJSON(t, srv.URL+"/api/machine/learn", map[string]any{})
 	defer resp.Body.Close()

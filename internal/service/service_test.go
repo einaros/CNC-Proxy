@@ -964,8 +964,7 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	m.SetFtype("lz")
 	m.SetGcodeReply("model", "model = CarveraAir,FACTORY,PROBE")
 	m.SetGcodeReply("version", "version = 1.2.3")
-	m.SetGcodeReply("diagnose", "{S:0,0|L:0,0|G:1,0,0,0,0|E:0,1,0,1,1,0|P:1,0|RSSI:-55}")
-	m.SetGcodeReply("config-get-all", strings.Join([]string{
+	m.PutFile("/sd/config.txt", []byte(strings.Join([]string{
 		"soft_endstop.enable=false",
 		"soft_endstop.x_min=-302.0",
 		"soft_endstop.y_min=-212.0",
@@ -992,7 +991,7 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 		"atc.probe.fast_rate_mm_m=300",
 		"atc.probe.slow_rate_mm_m=60",
 		"atc.probe.retract_mm=2",
-	}, "\n")+"\x04")
+	}, "\n")))
 
 	res, err := svc.LearnMachineParameters()
 	if err != nil {
@@ -1019,44 +1018,29 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	if got := res.Learned.Config["soft_endstop.x_min"]; got != "-302.0" {
 		t.Fatalf("raw config soft_endstop.x_min = %q", got)
 	}
-	if len(res.Learned.Diagnostics["E"]) != 6 || res.Learned.Diagnostics["RSSI"][0] != -55 {
-		t.Fatalf("diagnostics = %+v", res.Learned.Diagnostics)
-	}
 	gcodes := m.Gcodes()
-	for _, want := range []string{"model", "version", "diagnose", "config-get-all"} {
+	for _, want := range []string{"model", "version"} {
 		if !slices.Contains(gcodes, want) {
 			t.Fatalf("gcodes %v missing %q", gcodes, want)
 		}
 	}
+	for _, got := range gcodes {
+		if strings.HasPrefix(got, "config-") {
+			t.Fatalf("learning sent a console config command %q instead of downloading /sd/config.txt", got)
+		}
+	}
 }
 
-func TestLearnMachineParametersFallsBackToBoundedConfigGetQueries(t *testing.T) {
-	svc, m, _ := serviceWithMachine(t)
-	m.SetGcodeReply("config-get-all", "error:Unsupported command - config-get-all")
-
-	res, err := svc.LearnMachineParameters()
-	if err != nil {
-		t.Fatalf("LearnMachineParameters fallback: %v", err)
-	}
-	if !res.Learned.Anchors.Available || res.Learned.Anchors.Anchor1 != (store.XYPoint{X: -287.51, Y: -202.11}) || res.Learned.Anchors.Anchor2 != (store.XYPoint{X: -199.01, Y: -157.11}) {
-		t.Fatalf("fallback learned anchors = %+v", res.Learned.Anchors)
-	}
-	if res.Learned.Clearance.Z != -3 || res.Learned.ZMinMM != -121 {
-		t.Fatalf("fallback learned safety limits = %+v", res.Learned)
-	}
-	gcodes := m.Gcodes()
-	if countString(gcodes, "config-get-all") != 1 {
-		t.Fatalf("config-get-all attempts = %v, want exactly one", gcodes)
-	}
-	for _, want := range []string{"config-get coordinate.anchor1_x", "config-get coordinate.anchor2_offset_y", "config-get coordinate.clearance_z"} {
-		if !slices.Contains(gcodes, want) {
-			t.Fatalf("fallback gcodes %v missing %q", gcodes, want)
-		}
+func TestParseMachineConfigAcceptsVendorConfigFileSyntax(t *testing.T) {
+	config := parseMachineConfig("# vendor config\ncoordinate.anchor1_x -287.51\ncoordinate.anchor1_y\t-202.11\nsoft_endstop.enable true\n")
+	if config["coordinate.anchor1_x"] != "-287.51" || config["coordinate.anchor1_y"] != "-202.11" || config["soft_endstop.enable"] != "true" {
+		t.Fatalf("parsed config = %+v", config)
 	}
 }
 
 func TestBackgroundMachineLearningDoesNotRetryFailedGeneration(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
+	m.PutFile("/sd/config.txt", []byte("coordinate.anchor1_x -287.51\n"))
 	m.SetGcodeReply("model", "error:Unsupported command - model")
 	if err := svc.arb.WithMachine(false, func(*client.Conn) error { return nil }); err != nil {
 		t.Fatal(err)
@@ -1097,15 +1081,14 @@ func TestRunMachineLearningRefreshesEachNewConnectionAndPersistsProfile(t *testi
 	m.SetFtype("lz")
 	m.SetGcodeReply("model", "model = CarveraAir,FACTORY,PROBE")
 	m.SetGcodeReply("version", "version = 1.2.3")
-	m.SetGcodeReply("diagnose", "{E:0,1,0,1,1,0}")
-	m.SetGcodeReply("config-get-all", strings.Join([]string{
+	m.PutFile("/sd/config.txt", []byte(strings.Join([]string{
 		"soft_endstop.x_min=-302.0",
 		"soft_endstop.y_min=-212.0",
 		"coordinate.anchor1_x=-287.51",
 		"coordinate.anchor1_y=-202.11",
 		"coordinate.anchor2_offset_x=88.5",
 		"coordinate.anchor2_offset_y=45.0",
-	}, "\n")+"\x04")
+	}, "\n")))
 
 	if err := svc.arb.WithMachine(false, func(*client.Conn) error { return nil }); err != nil {
 		t.Fatal(err)
