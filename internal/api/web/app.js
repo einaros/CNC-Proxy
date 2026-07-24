@@ -5208,7 +5208,7 @@ function bindDataControlButtons() {
 
 function commandPanelPlacement(rect, preferredWidth, viewportWidth, viewportHeight) {
   const margin = 12;
-  const width = Math.min(preferredWidth, Math.max(280, viewportWidth - margin * 2));
+  const width = Math.max(0, Math.min(preferredWidth, viewportWidth - margin * 2));
   const maxLeft = Math.max(margin, viewportWidth - margin - width);
   const left = Math.round(Math.min(Math.max(rect.left + rect.width / 2 - width / 2, margin), maxLeft));
   const belowTop = rect.bottom + 8;
@@ -5219,7 +5219,9 @@ function commandPanelPlacement(rect, preferredWidth, viewportWidth, viewportHeig
     ? Math.max(margin, rect.top - 8 - Math.max(0, aboveHeight))
     : Math.max(margin, belowTop);
   const maxHeight = Math.max(0, placeAbove ? aboveHeight : belowHeight);
-  const arrowLeft = Math.round(Math.min(Math.max(rect.left + rect.width / 2 - left - 5, 16), width - 26));
+  const arrowMin = Math.min(16, Math.max(0, width - 10));
+  const arrowMax = Math.max(arrowMin, width - 26);
+  const arrowLeft = Math.round(Math.min(Math.max(rect.left + rect.width / 2 - left - 5, arrowMin), arrowMax));
   return { top: Math.round(top), left, width, maxHeight: Math.round(maxHeight), arrowLeft, placement: placeAbove ? "above" : "below" };
 }
 

@@ -300,6 +300,13 @@ test("command popovers use the side with usable viewport height", () => {
   assert.equal(above.placement, "above");
   assert.equal(above.top, 12);
   assert.equal(above.maxHeight, 240);
+
+  const narrow = vm.runInContext(
+    "commandPanelPlacement({ left: 50, width: 40, top: 80, bottom: 112 }, 440, 240, 480)",
+    ctx,
+  );
+  assert.equal(narrow.width, 216);
+  assert.ok(narrow.left >= 12 && narrow.left + narrow.width <= 228);
 });
 
 test("Set XYZ leaves blank axes unchanged", () => {
