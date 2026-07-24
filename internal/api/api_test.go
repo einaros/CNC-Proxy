@@ -825,7 +825,10 @@ func TestWebUIServed(t *testing.T) {
 	outlineSaveIdx := strings.Index(bodyText, `id="outline-save"`)
 	outlineExportIdx := strings.Index(bodyText, `id="outline-export"`)
 	if outlineLoadIdx < 0 || outlineSaveIdx < outlineLoadIdx || outlineExportIdx < outlineSaveIdx {
-		t.Error("outline load and save controls must appear above Export SVG")
+		t.Error("outline load and save controls must appear above Export DXF")
+	}
+	if !strings.Contains(bodyText, `id="outline-export">Export DXF</button>`) || strings.Contains(bodyText, `Export SVG`) {
+		t.Error("outline CAD export must be labeled DXF, not SVG")
 	}
 	for _, gone := range []string{`id="origin-z-probe"`, `id="origin-z-probe-status"`, "origin-row-probe", `id="machine-settings"`, `id="origin-action"`, `id="origin-apply"`, `anchor-origin-`, `Zero XY`, `Reset XY to Machine`} {
 		if strings.Contains(string(body), gone) {
@@ -887,16 +890,15 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), "renderWorkArea") || !strings.Contains(string(jsBody), "SPINDLE_DIAMETER_MM") || !strings.Contains(string(jsBody), "OUTLINE_POINT_DIAMETER_MM") || !strings.Contains(string(jsBody), "jogPanelMessage") || !strings.Contains(string(jsBody), "sendTapMove") || !strings.Contains(string(jsBody), "sendWorkCoordinateMove") || !strings.Contains(string(jsBody), "workMoveTargetsFromInputs") || !strings.Contains(string(jsBody), "resetWorkMoveInput") || !strings.Contains(string(jsBody), "workMoveInputIsLive") || !strings.Contains(string(jsBody), "renderWorkMoveFieldState") || !strings.Contains(string(jsBody), "stepTapFeed") || !strings.Contains(string(jsBody), "feedBoundsFor") || !strings.Contains(string(jsBody), "stepZ") || !strings.Contains(string(jsBody), "setOriginAxis") || !strings.Contains(string(jsBody), "applyXYZOrigin") || !strings.Contains(string(jsBody), "applyOriginSource") || !strings.Contains(string(jsBody), "originTargetsFromOriginSource") || !strings.Contains(string(jsBody), "originTargetsFromXYZ") || !strings.Contains(string(jsBody), "machineAnchorPoints") || !strings.Contains(string(jsBody), "runAutoZProbe") || !strings.Contains(string(jsBody), "recallSelectedOrigin") || !strings.Contains(string(jsBody), "saveCurrentOrigin") || !strings.Contains(string(jsBody), "deleteSelectedOrigin") || !strings.Contains(string(jsBody), "saved_origins") || !strings.Contains(string(jsBody), `type: "target"`) || !strings.Contains(string(jsBody), `type: "step"`) || !strings.Contains(string(jsBody), `type: "origin"`) || !strings.Contains(string(jsBody), "G10L20P0") || !strings.Contains(string(jsBody), "/api/probe/auto-z") || !strings.Contains(string(jsBody), "/api/machine/status") || !strings.Contains(string(jsBody), "motion_estimated") {
 		t.Errorf("app.js missing work area, tap move, jog status messaging, or cache-only status polling")
 	}
-	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "traceOutline", "traceOutlineMachinePoints", "/api/outline/trace", "runFieldProbe", "probeZAtWorkPoint", "fieldProbeSafeZ", "retract_above_mm", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "OUTLINE_CURVE_TOLERANCE_MM", "MAX_EFFECTIVE_OUTLINE_POINTS", "effectiveOutlineGeometry", "outlineEffectiveExportPoints", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "buildOutlineSVG", "outlineJSONDocument", "saveOutlineJSON", "loadOutlineFile", "outlineStateFromJSON", "application/json", "svgExportPoint", `viewBox="0 0`, "visible_svg", "field-probe-layer", "probe_diameter_mm", "spot_gap_mm", "center_spacing_mm", "effective_point_count", "exportHeightOBJ", "exportHeightImage", "zero_origin_machine_mm", "table-layer", "outline-layer", "data-z-mm", "safe_z_enabled", "safe_z_disabled"} {
+	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "traceOutline", "traceOutlineMachinePoints", "/api/outline/trace", "runFieldProbe", "probeZAtWorkPoint", "fieldProbeSafeZ", "retract_above_mm", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "OUTLINE_CURVE_TOLERANCE_MM", "MAX_EFFECTIVE_OUTLINE_POINTS", "effectiveOutlineGeometry", "outlineEffectiveExportPoints", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "outlineCubicSegments", "buildOutlineDXF", "outlineJSONDocument", "saveOutlineJSON", "loadOutlineFile", "outlineStateFromJSON", "application/json", "application/dxf", "$INSUNITS", "AC1009", "POLYLINE", "VERTEX", "SEQEND", "exportHeightOBJ", "exportHeightImage", "safe_z_enabled", "safe_z_disabled"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing outline capture behavior %s", want)
 		}
 	}
-	if strings.Contains(string(jsBody), `transform="scale(1 -1)"`) {
-		t.Errorf("app.js SVG export still uses flipped layer transforms")
-	}
-	if strings.Contains(string(jsBody), `vector-effect="non-scaling-stroke"`) {
-		t.Errorf("app.js SVG export still uses non-scaling hairline strokes")
+	for _, gone := range []string{"buildOutlineSVG", "svgExportPoint", "visible_svg", "field-probe-layer", "table-layer"} {
+		if strings.Contains(string(jsBody), gone) {
+			t.Errorf("app.js still contains removed SVG export marker %s", gone)
+		}
 	}
 	if got := js.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("app.js Cache-Control = %q, want no-store", got)

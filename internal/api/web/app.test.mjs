@@ -52,6 +52,77 @@ function buildContext(functionNames, constNames = [], globals = {}) {
   return context;
 }
 
+function parseDXFPairs(text) {
+  const lines = text.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  assert.equal(lines.length % 2, 0, "DXF contains complete code/value pairs");
+  const pairs = [];
+  for (let i = 0; i < lines.length; i += 2) {
+    pairs.push({ code: Number(lines[i].trim()), value: lines[i + 1].trim() });
+  }
+  return pairs;
+}
+
+function dxfHeaderValue(pairs, variable, code) {
+  const start = pairs.findIndex((pair) => pair.code === 9 && pair.value === variable);
+  assert.notEqual(start, -1, "DXF header contains " + variable);
+  const pair = pairs.slice(start + 1).find((candidate) => candidate.code === code || candidate.code === 9 || candidate.code === 0);
+  assert.equal(pair?.code, code, variable + " has group code " + code);
+  return pair.value;
+}
+
+function dxfEntities(pairs) {
+  const start = pairs.findIndex((pair, i) =>
+    pair.code === 0 && pair.value === "SECTION" &&
+    pairs[i + 1]?.code === 2 && pairs[i + 1]?.value === "ENTITIES"
+  );
+  assert.notEqual(start, -1, "DXF contains an ENTITIES section");
+  const entities = [];
+  let current = null;
+  for (let i = start + 2; i < pairs.length; i++) {
+    const pair = pairs[i];
+    if (pair.code === 0 && pair.value === "ENDSEC") break;
+    if (pair.code === 0) {
+      current = { type: pair.value, pairs: [] };
+      entities.push(current);
+    } else {
+      assert.ok(current, "entity data follows an entity marker");
+      current.pairs.push(pair);
+    }
+  }
+  return entities;
+}
+
+function dxfEntityValue(entity, code) {
+  return entity.pairs.find((pair) => pair.code === code)?.value;
+}
+
+function dxfEntityPoints(entity) {
+  const points = [];
+  for (let i = 0; i < entity.pairs.length; i++) {
+    const pair = entity.pairs[i];
+    if (pair.code !== 10) continue;
+    const y = entity.pairs.slice(i + 1).find((candidate) => candidate.code === 20 || candidate.code === 10);
+    assert.equal(y?.code, 20, "each DXF X coordinate has a Y coordinate");
+    points.push({ x: Number(pair.value), y: Number(y.value) });
+  }
+  return points;
+}
+
+function dxfRecords(pairs, type) {
+  const records = [];
+  for (let i = 0; i < pairs.length; i++) {
+    if (pairs[i].code !== 0 || pairs[i].value !== type) continue;
+    const end = pairs.findIndex((pair, j) => j > i && pair.code === 0);
+    records.push(pairs.slice(i + 1, end < 0 ? pairs.length : end));
+  }
+  return records;
+}
+
+function dxfRecordValue(record, code) {
+  return record.find((pair) => pair.code === code)?.value;
+}
+
 const settingsFunctions = [
   "normalizeMachineSettings",
   "normalizeMachineLearned",
@@ -71,6 +142,144 @@ const settingsConsts = [
   "DEFAULT_SAFE_Z_MM",
   "SAFE_Z_LIMIT_MARGIN_MM",
 ];
+
+const outlineDXFFunctions = [
+  "buildOutlineDXF",
+  "outlineExportPoints",
+  "outlineEffectiveExportPoints",
+  "effectiveOutlineGeometry",
+  "flattenCurveSegment",
+  "flattenCubic",
+  "cubicFlatEnough",
+  "distancePointToSegment",
+  "midpoint",
+  "addOutlinePolylineDXF",
+  "dxfBounds",
+  "dxfPair",
+  "dxfPairs",
+  "dxfNumber",
+  "pathNum",
+  "cloneOutlineOrigin",
+  "axisValue",
+];
+const outlineDXFConsts = [
+  "MAX_EFFECTIVE_OUTLINE_POINTS",
+  "OUTLINE_CURVE_TOLERANCE_MM",
+];
+
+test("outline DXF uses the conservative R12 sketch subset", () => {
+  const state = {
+    outline: {
+      closed: true,
+      curveFit: false,
+      points: [
+        { machine_x: 0, machine_y: 0, machine_z: 0, x: 0, y: 0, z: 0 },
+        { machine_x: 10, machine_y: 0, machine_z: 0, x: 10, y: 0, z: 0 },
+        { machine_x: 10, machine_y: 10, machine_z: 0, x: 10, y: 10, z: 0 },
+      ],
+    },
+  };
+  const ctx = buildContext(outlineDXFFunctions, outlineDXFConsts, {
+    state,
+    currentWorkOrigin: () => ({ x: 0, y: 0, z: 0 }),
+    visualWorkOrigin: () => ({ x: 0, y: 0, z: 0 }),
+  });
+  const dxf = vm.runInContext("buildOutlineDXF()", ctx);
+  const pairs = parseDXFPairs(dxf);
+
+  assert.equal(dxfHeaderValue(pairs, "$ACADVER", 1), "AC1009");
+  assert.equal(dxf.replaceAll("\r\n", "").includes("\n"), false, "ASCII DXF uses CRLF records");
+  const tables = dxfRecords(pairs, "TABLE");
+  assert.deepEqual(tables.map((table) => dxfRecordValue(table, 2)), ["LTYPE", "LAYER"]);
+
+  const layers = dxfRecords(pairs, "LAYER");
+  assert.deepEqual(layers.map((record) => dxfRecordValue(record, 2)), ["0", "OUTLINE"]);
+
+  const entities = dxfEntities(pairs);
+  assert.deepEqual(entities.map((entity) => entity.type), ["POLYLINE", "VERTEX", "VERTEX", "VERTEX", "SEQEND"]);
+  assert.equal(Number(dxfEntityValue(entities[0], 66)), 1, "polyline vertices follow");
+  assert.equal(Number(dxfEntityValue(entities[0], 70)), 1, "polyline is closed");
+  assert.ok(entities.every((entity) => dxfEntityValue(entity, 8) === "OUTLINE"));
+  assert.equal(pairs.some((pair) => [5, 100, 330].includes(pair.code)), false, "R2000 ownership records are absent");
+  assert.equal(pairs.some((pair) => ["LWPOLYLINE", "SPLINE", "BLOCK_RECORD"].includes(pair.value)), false);
+});
+
+test("outline DXF preserves millimetre work coordinates and work zero", () => {
+  const state = {
+    outline: {
+      closed: true,
+      curveFit: false,
+      points: [
+        { machine_x: -10, machine_y: -10, machine_z: 5, x: 999, y: 999, z: 999 },
+        { machine_x: 90, machine_y: -10, machine_z: 5, x: 999, y: 999, z: 999 },
+        { machine_x: 90, machine_y: 40, machine_z: 5, x: 999, y: 999, z: 999 },
+        { machine_x: -10, machine_y: 40, machine_z: 5, x: 999, y: 999, z: 999 },
+      ],
+    },
+  };
+  const ctx = buildContext(outlineDXFFunctions, outlineDXFConsts, {
+    state,
+    currentWorkOrigin: () => ({ x: -20, y: -30, z: 5 }),
+    visualWorkOrigin: () => ({ x: 0, y: 0, z: 0 }),
+  });
+  const dxf = vm.runInContext("buildOutlineDXF()", ctx);
+  const pairs = parseDXFPairs(dxf);
+
+  assert.equal(dxfHeaderValue(pairs, "$ACADVER", 1), "AC1009");
+  assert.equal(Number(dxfHeaderValue(pairs, "$INSUNITS", 70)), 4, "DXF declares millimetres");
+  assert.equal(Number(dxfHeaderValue(pairs, "$MEASUREMENT", 70)), 1, "DXF declares metric measurement");
+  assert.equal(Number(dxfHeaderValue(pairs, "$INSBASE", 10)), 0, "work zero is the insertion base");
+  assert.equal(Number(dxfHeaderValue(pairs, "$EXTMIN", 10)), 10);
+  assert.equal(Number(dxfHeaderValue(pairs, "$EXTMAX", 10)), 110);
+
+  const entities = dxfEntities(pairs);
+  assert.equal(entities.length, 6, "outline contains one polyline, four vertices, and a sequence terminator");
+  assert.equal(entities[0].type, "POLYLINE");
+  assert.equal(dxfEntityValue(entities[0], 8), "OUTLINE");
+  assert.equal(Number(dxfEntityValue(entities[0], 70)), 1, "the outline is closed");
+  const points = entities.filter((entity) => entity.type === "VERTEX").flatMap(dxfEntityPoints);
+  assert.deepEqual(points, [
+    { x: 10, y: 20 },
+    { x: 110, y: 20 },
+    { x: 110, y: 70 },
+    { x: 10, y: 70 },
+  ]);
+  assert.equal(Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x)), 100);
+  assert.equal(Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y)), 50);
+});
+
+test("curve-fit outline DXF flattens the curve into an R12 polyline", () => {
+  const state = {
+    outline: {
+      closed: false,
+      curveFit: true,
+      points: [
+        { machine_x: 0, machine_y: 0, machine_z: 0, x: 0, y: 0, z: 0 },
+        { machine_x: 60, machine_y: 0, machine_z: 0, x: 60, y: 0, z: 0 },
+        { machine_x: 60, machine_y: 30, machine_z: 0, x: 60, y: 30, z: 0 },
+      ],
+    },
+  };
+  const ctx = buildContext(outlineDXFFunctions, outlineDXFConsts, {
+    state,
+    currentWorkOrigin: () => ({ x: 0, y: 0, z: 0 }),
+    visualWorkOrigin: () => ({ x: 0, y: 0, z: 0 }),
+  });
+  const pairs = parseDXFPairs(vm.runInContext("buildOutlineDXF()", ctx));
+  const entities = dxfEntities(pairs);
+  const points = entities.filter((entity) => entity.type === "VERTEX").flatMap(dxfEntityPoints);
+  const effective = JSON.parse(vm.runInContext(
+    "JSON.stringify(outlineEffectiveExportPoints({ x: 0, y: 0, z: 0 }))",
+    ctx,
+  ));
+
+  assert.equal(entities[0].type, "POLYLINE");
+  assert.equal(Number(dxfEntityValue(entities[0], 70)), 0, "the outline remains open");
+  assert.ok(points.length > state.outline.points.length, "the curve is sampled to preserve its shape");
+  assert.deepEqual(points, effective);
+  assert.deepEqual(points[0], { x: 0, y: 0 });
+  assert.deepEqual(points.at(-1), { x: 60, y: 30 });
+});
 
 // F12: an operator feed_max of exactly 1200 (with feed_min 1 / tap 600) must
 // survive normalization instead of being silently reverted to the 3000 default.

@@ -2911,43 +2911,53 @@ function dxfPair(lines, code, value) {
   lines.push(String(code), String(value));
 }
 
+function dxfPairs(lines, pairs) {
+  for (const [code, value] of pairs) dxfPair(lines, code, value);
+}
+
 function dxfNumber(value) {
   if (!Number.isFinite(value)) throw new Error("outline contains an invalid coordinate");
   return pathNum(value);
 }
 
-function addOutlinePolylineDXF(lines, points, closed) {
-  dxfPair(lines, 0, "LWPOLYLINE");
-  dxfPair(lines, 100, "AcDbEntity");
-  dxfPair(lines, 8, "OUTLINE");
-  dxfPair(lines, 100, "AcDbPolyline");
-  dxfPair(lines, 90, points.length);
-  dxfPair(lines, 70, closed ? 1 : 0);
-  for (const point of points) {
-    dxfPair(lines, 10, dxfNumber(point.x));
-    dxfPair(lines, 20, dxfNumber(point.y));
-  }
+function dxfBounds(points) {
+  return points.reduce((bounds, point) => ({
+    minX: Math.min(bounds.minX, point.x),
+    minY: Math.min(bounds.minY, point.y),
+    maxX: Math.max(bounds.maxX, point.x),
+    maxY: Math.max(bounds.maxY, point.y),
+  }), {
+    minX: points[0].x,
+    minY: points[0].y,
+    maxX: points[0].x,
+    maxY: points[0].y,
+  });
 }
 
-function addOutlineSplineDXF(lines, segment) {
-  dxfPair(lines, 0, "SPLINE");
-  dxfPair(lines, 100, "AcDbEntity");
-  dxfPair(lines, 8, "OUTLINE");
-  dxfPair(lines, 100, "AcDbSpline");
-  dxfPair(lines, 210, 0);
-  dxfPair(lines, 220, 0);
-  dxfPair(lines, 230, 1);
-  dxfPair(lines, 70, 8);
-  dxfPair(lines, 71, 3);
-  dxfPair(lines, 72, 8);
-  dxfPair(lines, 73, 4);
-  dxfPair(lines, 74, 0);
-  for (const knot of [0, 0, 0, 0, 1, 1, 1, 1]) dxfPair(lines, 40, knot);
-  for (const point of [segment.start, segment.c1, segment.c2, segment.end]) {
-    dxfPair(lines, 10, dxfNumber(point.x));
-    dxfPair(lines, 20, dxfNumber(point.y));
-    dxfPair(lines, 30, 0);
+function addOutlinePolylineDXF(lines, points, closed) {
+  dxfPairs(lines, [
+    [0, "POLYLINE"],
+    [8, "OUTLINE"],
+    [66, 1],
+    [70, closed ? 1 : 0],
+    [10, 0],
+    [20, 0],
+    [30, 0],
+  ]);
+  for (const point of points) {
+    dxfPairs(lines, [
+      [0, "VERTEX"],
+      [8, "OUTLINE"],
+      [10, dxfNumber(point.x)],
+      [20, dxfNumber(point.y)],
+      [30, 0],
+      [70, 0],
+    ]);
   }
+  dxfPairs(lines, [
+    [0, "SEQEND"],
+    [8, "OUTLINE"],
+  ]);
 }
 
 function exportOutline() {
@@ -3088,67 +3098,83 @@ function downloadBlob(filename, content, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function buildOutlineSVG() {
+function buildOutlineDXF() {
   const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
-  const points = outlineExportPoints(origin);
-  const boundaryPoints = outlineEffectiveExportPoints(origin);
-  const fieldPoints = fieldProbeExportPoints(origin);
-  const table = relativeTableBounds(origin);
-  const ext = exportExtents(table, boundaryPoints.concat(points, fieldPoints));
-  const tableSVG = svgExportRect(table, ext);
-  const visiblePoints = points.map((p) => svgExportPoint(p, ext));
-  const visibleFieldPoints = fieldPoints.map((p) => svgExportPoint(p, ext));
-  const path = outlinePathD(visiblePoints, state.outline.closed, state.outline.curveFit);
-  const metadata = {
-    app: "cnc-proxy",
-    kind: "capture-outline",
-    version: 1,
-    units: "mm",
-    coordinate_space: "work_zero",
-    zero_origin_machine_mm: origin,
-    table_mm: table,
-    visible_svg: {
-      coordinate_space: "svg_viewbox",
-      x_mm: "work_zero_x_mm + " + pathNum(-ext.x_min),
-      y_mm: pathNum(ext.y_max) + " - work_zero_y_mm",
-    },
-    outline: {
-      closed: !!state.outline.closed,
-      curve_fit: !!state.outline.curveFit,
-      points,
-      effective_point_count: boundaryPoints.length,
-    },
-    field_probe: {
-      probe_diameter_mm: PROBE_SPOT_DIAMETER_MM,
-      spot_gap_mm: fieldProbeSpotGap(),
-      center_spacing_mm: fieldProbeCenterSpacing(),
-      samples: fieldPoints,
-    },
-  };
-  const pointMeta = points.map((p, i) =>
-    `<circle cx="${pathNum(visiblePoints[i].x)}" cy="${pathNum(visiblePoints[i].y)}" r="0.35" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probed="${p.probed ? "true" : "false"}"><title>${escapeHtml("Point " + (i + 1) + " " + outlinePointLabel(p))}</title></circle>`
-  ).join("\n      ");
-  const fieldMeta = fieldPoints.map((p, i) =>
-    `<circle cx="${pathNum(visibleFieldPoints[i].x)}" cy="${pathNum(visibleFieldPoints[i].y)}" r="${pathNum(PROBE_SPOT_RADIUS_MM)}" data-index="${i + 1}" data-x-mm="${pathNum(p.x)}" data-y-mm="${pathNum(p.y)}" data-z-mm="${pathNum(p.z)}" data-probe-diameter-mm="${pathNum(PROBE_SPOT_DIAMETER_MM)}"></circle>`
-  ).join("\n      ");
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${pathNum(ext.width)}mm" height="${pathNum(ext.height)}mm" viewBox="0 0 ${pathNum(ext.width)} ${pathNum(ext.height)}">
-  <title>CNC Proxy outline capture</title>
-  <metadata>${escapeHtml(JSON.stringify(metadata, null, 2))}</metadata>
-  <g id="table-layer" data-layer="table" inkscape:groupmode="layer" inkscape:label="Table">
-    <rect x="${pathNum(tableSVG.x)}" y="${pathNum(tableSVG.y)}" width="${pathNum(tableSVG.width)}" height="${pathNum(tableSVG.height)}" fill="none" stroke="#91a0ae" stroke-width="0.2" stroke-opacity="0.8" data-units="mm" data-x-min-mm="${pathNum(table.x_min)}" data-x-max-mm="${pathNum(table.x_max)}" data-y-min-mm="${pathNum(table.y_min)}" data-y-max-mm="${pathNum(table.y_max)}"></rect>
-  </g>
-  <g id="outline-layer" data-layer="outline" inkscape:groupmode="layer" inkscape:label="Outline" data-units="mm" data-closed="${state.outline.closed ? "true" : "false"}" data-curve-fit="${state.outline.curveFit ? "true" : "false"}">
-    <path id="outline-path" d="${escapeHtml(path)}" fill="none" stroke="#147eb3" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"></path>
-    <g id="outline-points" display="none">
-      ${pointMeta}
-    </g>
-  </g>
-  <g id="field-probe-layer" data-layer="field-probe" inkscape:groupmode="layer" inkscape:label="Field Z Probe" data-units="mm" display="none">
-    ${fieldMeta}
-  </g>
-</svg>
-`;
+  let points = state.outline.curveFit && state.outline.points.length >= 3
+    ? outlineEffectiveExportPoints(origin)
+    : outlineExportPoints(origin);
+  if (state.outline.closed && points.length > 2) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (Math.hypot(first.x - last.x, first.y - last.y) <= 0.00005) points = points.slice(0, -1);
+  }
+  if (points.length < 2) throw new Error("outline needs at least two valid points");
+  for (const point of points) {
+    dxfNumber(point.x);
+    dxfNumber(point.y);
+  }
+
+  const bounds = dxfBounds(points);
+  const lines = [];
+  dxfPairs(lines, [
+    [0, "SECTION"],
+    [2, "HEADER"],
+    [9, "$ACADVER"],
+    [1, "AC1009"],
+    [9, "$INSBASE"],
+    [10, 0],
+    [20, 0],
+    [30, 0],
+    [9, "$INSUNITS"],
+    [70, 4],
+    [9, "$MEASUREMENT"],
+    [70, 1],
+    [9, "$EXTMIN"],
+    [10, dxfNumber(bounds.minX)],
+    [20, dxfNumber(bounds.minY)],
+    [30, 0],
+    [9, "$EXTMAX"],
+    [10, dxfNumber(bounds.maxX)],
+    [20, dxfNumber(bounds.maxY)],
+    [30, 0],
+    [0, "ENDSEC"],
+    [0, "SECTION"],
+    [2, "TABLES"],
+    [0, "TABLE"],
+    [2, "LTYPE"],
+    [70, 1],
+    [0, "LTYPE"],
+    [2, "CONTINUOUS"],
+    [70, 64],
+    [3, "Solid line"],
+    [72, 65],
+    [73, 0],
+    [40, 0],
+    [0, "ENDTAB"],
+    [0, "TABLE"],
+    [2, "LAYER"],
+    [70, 2],
+    [0, "LAYER"],
+    [2, "0"],
+    [70, 0],
+    [62, 7],
+    [6, "CONTINUOUS"],
+    [0, "LAYER"],
+    [2, "OUTLINE"],
+    [70, 0],
+    [62, 7],
+    [6, "CONTINUOUS"],
+    [0, "ENDTAB"],
+    [0, "ENDSEC"],
+    [0, "SECTION"],
+    [2, "ENTITIES"],
+  ]);
+  addOutlinePolylineDXF(lines, points, state.outline.closed);
+  dxfPairs(lines, [
+    [0, "ENDSEC"],
+    [0, "EOF"],
+  ]);
+  return lines.join("\r\n") + "\r\n";
 }
 
 function outlineExportPoints(origin) {
@@ -3191,18 +3217,6 @@ function fieldProbeExportPoints(origin) {
       captured_at: p.captured_at,
     };
   });
-}
-
-function relativeTableBounds(origin) {
-  const b = workAreaBounds();
-  const ox = axisValue(origin, "x") ?? 0;
-  const oy = axisValue(origin, "y") ?? 0;
-  return {
-    x_min: b.x_min - ox,
-    x_max: b.x_max - ox,
-    y_min: b.y_min - oy,
-    y_max: b.y_max - oy,
-  };
 }
 
 function exportExtents(table, points) {
