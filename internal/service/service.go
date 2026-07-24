@@ -732,7 +732,7 @@ func (s *Service) LearnMachineParameters() (MachineLearnResult, error) {
 		// Older controller builds append -e to request an EOT byte, but current
 		// firmware interprets it as a config filename. Send the portable form;
 		// sendLearnLine already completes reply reads using a quiescence window.
-		if configOut, e = s.sendLearnLine(c, "config-get-all"); e != nil {
+		if configOut, e = s.learnMachineConfig(c); e != nil {
 			return e
 		}
 		return nil
@@ -778,8 +778,9 @@ func machineLearnedProfileKey(learned store.MachineLearned) string {
 
 // RunMachineLearning refreshes machine parameters once for every newly opened
 // machine connection. It waits for an observed Idle state, so the background
-// read-only queries never interrupt an active job, and a later Idle status
-// retries an earlier unavailable/busy attempt.
+// read-only queries never interrupt an active job. A failed attempt is still
+// terminal for that connection generation: status updates must never turn an
+// unsupported command into a request loop against the machine.
 func (s *Service) RunMachineLearning(ctx context.Context) {
 	statusCh, unsubscribe := s.arb.Tracker().Subscribe()
 	defer unsubscribe()
@@ -814,14 +815,90 @@ func (s *Service) maybeLearnConnectedMachine(ctx context.Context) {
 	s.autoLearnRunning = true
 	s.autoLearnMu.Unlock()
 	go func() {
-		_, err := s.LearnMachineParameters()
+		_, _ = s.LearnMachineParameters()
 		s.autoLearnMu.Lock()
 		defer s.autoLearnMu.Unlock()
 		s.autoLearnRunning = false
-		if err == nil && s.arb.ConnectionGeneration() == generation {
+		if s.arb.ConnectionGeneration() == generation {
 			s.autoLearnGeneration = generation
 		}
 	}()
+}
+
+// machineLearningConfigKeys are the settings that directly affect the control
+// UI's work envelope, safe travel, feeds, probe behavior, and anchor origins.
+// They are only queried individually when a firmware lacks config-get-all.
+var machineLearningConfigKeys = []string{
+	"soft_endstop.enable",
+	"soft_endstop.x_min", "soft_endstop.x_max",
+	"soft_endstop.y_min", "soft_endstop.y_max",
+	"soft_endstop.z_min", "soft_endstop.z_max",
+	"alpha_max", "beta_max", "gamma_max",
+	"default_feed_rate", "default_seek_rate",
+	"alpha_max_rate", "beta_max_rate", "gamma_max_rate",
+	"coordinate.clearance_x", "coordinate.clearance_y", "coordinate.clearance_z",
+	"coordinate.anchor1_x", "coordinate.anchor1_y",
+	"coordinate.anchor2_offset_x", "coordinate.anchor2_offset_y",
+	"atc.probe.fast_rate_mm_m", "atc.probe.slow_rate_mm_m", "atc.probe.retract_mm",
+}
+
+func (s *Service) learnMachineConfig(c *client.Conn) (string, error) {
+	out, err := s.sendLearnLine(c, "config-get-all")
+	if err == nil {
+		return out, nil
+	}
+	if !isUnsupportedMachineCommand(out, err) {
+		return "", err
+	}
+
+	// Some newer machine builds omit config-get-all but retain the standard
+	// cached config-get query. Query the bounded set we actually consume rather
+	// than retrying the unsupported command.
+	config := make([]string, 0, len(machineLearningConfigKeys))
+	for _, key := range machineLearningConfigKeys {
+		valueOut, valueErr := s.sendLearnLine(c, "config-get "+key)
+		if valueErr != nil {
+			if isUnsupportedMachineCommand(valueOut, valueErr) {
+				return "", fmt.Errorf("machine does not support configuration queries: %w", valueErr)
+			}
+			return "", valueErr
+		}
+		if value, ok := parseMachineConfigGetValue(valueOut, key); ok {
+			config = append(config, key+"="+value)
+		}
+	}
+	if len(config) == 0 {
+		return "", errors.New("machine did not return usable configuration values")
+	}
+	return strings.Join(config, "\n"), nil
+}
+
+func isUnsupportedMachineCommand(out string, err error) bool {
+	text := strings.ToLower(out)
+	if err != nil {
+		text += " " + strings.ToLower(err.Error())
+	}
+	return strings.Contains(text, "unsupported command") || strings.Contains(text, "unknown command")
+}
+
+func parseMachineConfigGetValue(out, key string) (string, bool) {
+	for _, line := range strings.Split(stripFirmwareEOT(out), "\n") {
+		line = strings.TrimSpace(line)
+		if left, value, ok := strings.Cut(line, "="); ok && strings.EqualFold(strings.TrimSpace(left), key) {
+			value = strings.TrimSpace(value)
+			return value, value != ""
+		}
+		if _, rest, ok := strings.Cut(line, ":"); ok {
+			line = strings.TrimSpace(rest)
+		}
+		name, value, ok := strings.Cut(line, " is set to ")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), key) {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		return value, value != ""
+	}
+	return "", false
 }
 
 func (s *Service) sendLearnLine(c *client.Conn, line string) (string, error) {

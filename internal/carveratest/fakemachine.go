@@ -963,6 +963,20 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		}
 		m.mu.Unlock()
 		m.send(c, protocol.CmdNormalInfo, strings.TrimRight(reply, "\r\n")+"\n")
+	case strings.HasPrefix(line, "config-get "):
+		key := strings.TrimSpace(strings.TrimPrefix(line, "config-get "))
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		reply, ok := m.gcodeReplies[line]
+		if !ok {
+			if value, found := m.config[key]; found {
+				reply = "cached: " + key + " is set to " + value
+			} else {
+				reply = "cached: " + key + " is not in config"
+			}
+		}
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, strings.TrimRight(reply, "\r\n")+"\n")
 	case strings.EqualFold(line, "diagnose"):
 		// Real firmware emits DIAG_RES for diagnose, not NORMAL_INFO. Keep the
 		// fake strict so tests catch callers that only listen for NORMAL_INFO.

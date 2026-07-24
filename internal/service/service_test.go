@@ -1030,6 +1030,68 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	}
 }
 
+func TestLearnMachineParametersFallsBackToBoundedConfigGetQueries(t *testing.T) {
+	svc, m, _ := serviceWithMachine(t)
+	m.SetGcodeReply("config-get-all", "error:Unsupported command - config-get-all")
+
+	res, err := svc.LearnMachineParameters()
+	if err != nil {
+		t.Fatalf("LearnMachineParameters fallback: %v", err)
+	}
+	if !res.Learned.Anchors.Available || res.Learned.Anchors.Anchor1 != (store.XYPoint{X: -287.51, Y: -202.11}) || res.Learned.Anchors.Anchor2 != (store.XYPoint{X: -199.01, Y: -157.11}) {
+		t.Fatalf("fallback learned anchors = %+v", res.Learned.Anchors)
+	}
+	if res.Learned.Clearance.Z != -3 || res.Learned.ZMinMM != -121 {
+		t.Fatalf("fallback learned safety limits = %+v", res.Learned)
+	}
+	gcodes := m.Gcodes()
+	if countString(gcodes, "config-get-all") != 1 {
+		t.Fatalf("config-get-all attempts = %v, want exactly one", gcodes)
+	}
+	for _, want := range []string{"config-get coordinate.anchor1_x", "config-get coordinate.anchor2_offset_y", "config-get coordinate.clearance_z"} {
+		if !slices.Contains(gcodes, want) {
+			t.Fatalf("fallback gcodes %v missing %q", gcodes, want)
+		}
+	}
+}
+
+func TestBackgroundMachineLearningDoesNotRetryFailedGeneration(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	m.SetGcodeReply("model", "error:Unsupported command - model")
+	if err := svc.arb.WithMachine(false, func(*client.Conn) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	tr.Observe(machine.Idle)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.RunMachineLearning(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && countString(m.Gcodes(), "model") == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := countString(m.Gcodes(), "model"); got != 1 {
+		t.Fatalf("initial learning attempts = %d, want 1", got)
+	}
+	for i := 0; i < 5; i++ {
+		tr.Observe(machine.Idle)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := countString(m.Gcodes(), "model"); got != 1 {
+		t.Fatalf("failed learning retried %d times in one connection generation", got)
+	}
+}
+
+func countString(values []string, want string) int {
+	count := 0
+	for _, value := range values {
+		if value == want {
+			count++
+		}
+	}
+	return count
+}
+
 func TestRunMachineLearningRefreshesEachNewConnectionAndPersistsProfile(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	m.SetFtype("lz")
