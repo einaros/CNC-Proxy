@@ -2564,34 +2564,27 @@ function updateFieldProbePreview() {
     o.fieldProbeIssue = "curve fit generated too many outline points";
     return;
   }
-  const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap(), outlineWorkPoints());
+  const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap());
   o.fieldProbePreview = built.points;
   o.fieldProbeTooDense = built.tooDense;
   o.fieldProbeIssue = built.issue || "";
 }
 
-function buildFieldProbePreview(points, spotGap, outlinePoints = points) {
+function buildFieldProbePreview(points, spotGap) {
   const spacing = fieldProbeCenterSpacing(spotGap);
   const polygon = normalizedClosedPolygon(points);
-  const boundary = buildBoundaryProbePoints(polygon, outlinePoints, spacing);
+  if (polygon.length < 3) return { points: [], tooDense: false, issue: "field probe needs a closed outline" };
+  const boundary = buildBoundaryProbePoints(polygon, spacing);
   if (boundary.issue || boundary.tooDense) {
     return { points: [], tooDense: !!boundary.tooDense, issue: boundary.issue || "spot gap creates too many probe points" };
   }
-  // Once the outline vertices and border are fixed, score deterministic hex
-  // lattices for the remaining interior. Reserved boundary points participate
-  // in the same center-spacing test as every interior point.
-  const rotations = [0, 10, 20, 30, 40, 50].map((deg) => deg * Math.PI / 180);
-  const offsetFractions = [0, 0.25, 0.5, 0.75];
-  let best = { points: [], tooDense: false, score: null };
-  for (const rotation of rotations) {
-    for (const ox of offsetFractions) {
-      for (const oy of offsetFractions) {
-        const candidate = buildHexProbeCandidate(polygon, spacing, rotation, ox, oy, boundary.points);
-        if (isBetterProbeCandidate(candidate, best)) best = candidate;
-      }
-    }
-  }
-  const ordered = boundary.points.concat(best.points);
+  // The boundary and interior are one distribution. Even perimeter samples
+  // seed a deterministic Poisson frontier which grows inward at the requested
+  // center spacing; a fine final scan fills any admissible holes the frontier
+  // could not reach. Captured outline vertices define the polygon, but are not
+  // arbitrary fixed probe sites that can push entire lattice rows away.
+  const field = buildPoissonProbePoints(polygon, spacing, boundary.points);
+  const ordered = boundary.points.concat(field.points);
   return {
     points: ordered.map((p, i) => ({
       id: "field-probe-" + String(i + 1).padStart(4, "0"),
@@ -2599,8 +2592,8 @@ function buildFieldProbePreview(points, spotGap, outlinePoints = points) {
       y: p.y,
       probe_kind: p.probe_kind,
     })),
-    tooDense: best.tooDense,
-    issue: best.tooDense ? "spot gap creates too many probe points" : "",
+    tooDense: field.tooDense,
+    issue: field.tooDense ? "spot gap creates too many probe points" : "",
   };
 }
 
@@ -2612,41 +2605,50 @@ function normalizedClosedPolygon(points) {
   return out;
 }
 
-function buildBoundaryProbePoints(polygon, outlinePoints, spacing) {
-  const vertices = normalizedClosedPolygon(outlinePoints);
-  const seeds = [];
-  const seedIndex = createProbeSpacingIndex([], spacing);
-  for (const vertex of vertices) {
-    const point = { x: Number(vertex.x.toFixed(4)), y: Number(vertex.y.toFixed(4)), probe_kind: "outline" };
-    if (seeds.some((p) => Math.hypot(p.x - point.x, p.y - point.y) <= 0.00005)) continue;
-    if (!probeSpacingIndexAllows(seedIndex, point)) {
-      return { points: [], tooDense: false, issue: "spot gap exceeds distance between outline points" };
-    }
-    seeds.push(point);
-    addProbeSpacingPoint(seedIndex, point);
+function buildBoundaryProbePoints(polygon, spacing) {
+  const path = closedPathSegments(polygon);
+  if (!path.segments.length || !Number.isFinite(spacing) || spacing <= 0) {
+    return { points: [], tooDense: false, issue: "field probe needs a valid outline" };
   }
-  if (seeds.length >= MAX_FIELD_PROBE_POINTS) {
-    return { points: [], tooDense: true, issue: "outline has too many probe points" };
+  const targetCount = Math.max(1, Math.floor(path.perimeter / spacing + 1e-9));
+  if (targetCount >= MAX_FIELD_PROBE_POINTS) {
+    return { points: [], tooDense: true, issue: "spot gap creates too many border probe points" };
   }
-  let best = seeds;
-  for (const offsetFraction of [0, 0.2, 0.4, 0.6, 0.8]) {
-    const candidate = seeds.slice();
-    const spacingIndex = createProbeSpacingIndex(candidate, spacing);
-    for (const sample of sampleClosedPath(polygon, spacing, offsetFraction * spacing)) {
-      const point = { x: Number(sample.x.toFixed(4)), y: Number(sample.y.toFixed(4)), probe_kind: "border" };
-      if (!probeSpacingIndexAllows(spacingIndex, point)) continue;
-      if (candidate.length >= MAX_FIELD_PROBE_POINTS) {
-        return { points: [], tooDense: true, issue: "spot gap creates too many border probe points" };
+  let best = { points: [], maxArcGap: Infinity };
+  // A phase which straddles a curved or sharp corner can put equal arc-length
+  // samples too close in Euclidean space. Try phases and, when necessary, one
+  // fewer sample until no lower-count candidate can beat the best result.
+  for (let count = targetCount; count > best.points.length; count--) {
+    for (let phaseIndex = 0; phaseIndex < 24; phaseIndex++) {
+      const samples = sampleClosedPath(path, count, phaseIndex / 24);
+      const candidate = [];
+      const spacingIndex = createProbeSpacingIndex([], spacing);
+      for (const sample of samples) {
+        const point = {
+          x: Number(sample.x.toFixed(4)),
+          y: Number(sample.y.toFixed(4)),
+          probe_kind: "border",
+          path_distance: sample.path_distance,
+        };
+        if (!probeSpacingIndexAllows(spacingIndex, point)) continue;
+        candidate.push(point);
+        addProbeSpacingPoint(spacingIndex, point);
       }
-      candidate.push(point);
-      addProbeSpacingPoint(spacingIndex, point);
+      const maxArcGap = closedPathMaxSampleGap(candidate, path.perimeter);
+      if (candidate.length > best.points.length ||
+          (candidate.length === best.points.length && maxArcGap < best.maxArcGap - 1e-9)) {
+        best = { points: candidate, maxArcGap };
+      }
     }
-    if (candidate.length > best.length) best = candidate;
   }
-  return { points: best, tooDense: false, issue: "" };
+  return {
+    points: best.points.map((point) => ({ x: point.x, y: point.y, probe_kind: "border" })),
+    tooDense: false,
+    issue: "",
+  };
 }
 
-function sampleClosedPath(points, spacing, offset) {
+function closedPathSegments(points) {
   const segments = [];
   let perimeter = 0;
   for (let i = 0; i < points.length; i++) {
@@ -2657,18 +2659,37 @@ function sampleClosedPath(points, spacing, offset) {
     segments.push({ a, b, start: perimeter, end: perimeter + length, length });
     perimeter += length;
   }
-  if (!segments.length || !Number.isFinite(spacing) || spacing <= 0) return [];
+  return { segments, perimeter };
+}
+
+function sampleClosedPath(path, count, phaseFraction = 0) {
+  if (!path?.segments?.length || !Number.isInteger(count) || count <= 0) return [];
+  const step = path.perimeter / count;
   const out = [];
-  for (let distance = offset; distance < perimeter - 1e-9; distance += spacing) {
-    const segment = segments.find((part) => distance <= part.end + 1e-9);
+  let segmentIndex = 0;
+  for (let i = 0; i < count; i++) {
+    const distance = ((i + phaseFraction) * step) % path.perimeter;
+    while (segmentIndex < path.segments.length - 1 && distance > path.segments[segmentIndex].end + 1e-9) {
+      segmentIndex++;
+    }
+    const segment = path.segments[segmentIndex];
     if (!segment) continue;
     const t = Math.max(0, Math.min(1, (distance - segment.start) / segment.length));
     out.push({
       x: segment.a.x + (segment.b.x - segment.a.x) * t,
       y: segment.a.y + (segment.b.y - segment.a.y) * t,
+      path_distance: distance,
     });
   }
   return out;
+}
+
+function closedPathMaxSampleGap(points, perimeter) {
+  if (!points.length) return perimeter;
+  const distances = points.map((point) => point.path_distance).sort((a, b) => a - b);
+  let maxGap = distances[0] + perimeter - distances.at(-1);
+  for (let i = 1; i < distances.length; i++) maxGap = Math.max(maxGap, distances[i] - distances[i - 1]);
+  return maxGap;
 }
 
 function createProbeSpacingIndex(points, spacing) {
@@ -2699,66 +2720,111 @@ function probeSpacingIndexAllows(index, candidate) {
   return true;
 }
 
-function buildHexProbeCandidate(points, spacing, rotation, offsetXFrac, offsetYFrac, reserved = []) {
-  const cos = Math.cos(rotation);
-  const sin = Math.sin(rotation);
-  const toLattice = (p) => ({ x: p.x * cos + p.y * sin, y: -p.x * sin + p.y * cos });
-  const fromLattice = (p) => ({ x: p.x * cos - p.y * sin, y: p.x * sin + p.y * cos });
-  const rotated = points.map(toLattice);
-  const b = pointBounds(rotated);
-  if (!Number.isFinite(b.x_min) || !Number.isFinite(b.y_min)) return scoredProbeCandidate([], false, points, rotation, offsetXFrac, offsetYFrac);
-  const rowGap = spacing * Math.sqrt(3) / 2;
-  const firstY = Math.floor((b.y_min - rowGap) / rowGap) * rowGap + offsetYFrac * rowGap;
-  const lastY = b.y_max + rowGap;
-  const firstXBase = Math.floor((b.x_min - spacing) / spacing) * spacing + offsetXFrac * spacing;
-  const lastX = b.x_max + spacing;
+function buildPoissonProbePoints(polygon, spacing, reserved = []) {
   const out = [];
   const spacingIndex = createProbeSpacingIndex(reserved, spacing);
+  const active = reserved.slice();
+  let activeIndex = 0;
   let tooDense = false;
-  let row = 0;
-  for (let y = firstY; y <= lastY + 1e-9; y += rowGap, row++) {
-    const rowOffset = row % 2 ? spacing / 2 : 0;
-    for (let x = firstXBase + rowOffset; x <= lastX + 1e-9; x += spacing) {
-      const p = fromLattice({ x, y });
-      const candidate = { x: Number(p.x.toFixed(4)), y: Number(p.y.toFixed(4)), probe_kind: "field" };
-      if (!probeSpotFitsPolygon(candidate, points)) continue;
-      if (!probeSpacingIndexAllows(spacingIndex, candidate)) continue;
-      if (reserved.length + out.length >= MAX_FIELD_PROBE_POINTS) {
+
+  const accept = (raw) => {
+    const candidate = {
+      x: Number(raw.x.toFixed(4)),
+      y: Number(raw.y.toFixed(4)),
+      probe_kind: "field",
+    };
+    if (!probeSpotFitsPolygon(candidate, polygon) || !probeSpacingIndexAllows(spacingIndex, candidate)) return false;
+    if (reserved.length + out.length >= MAX_FIELD_PROBE_POINTS) {
+      tooDense = true;
+      return false;
+    }
+    out.push(candidate);
+    active.push(candidate);
+    addProbeSpacingPoint(spacingIndex, candidate);
+    return true;
+  };
+
+  const growFrontier = () => {
+    const attempts = 24;
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    while (activeIndex < active.length && !tooDense) {
+      const base = active[activeIndex++];
+      const phase = (activeIndex * 0.6180339887498949 % 1) * Math.PI * 2;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const radiusBand = ((attempt * 11) % attempts) / (attempts - 1);
+        const radius = spacing * (1.00002 + radiusBand * 0.2);
+        const angle = phase + attempt * goldenAngle;
+        accept({
+          x: base.x + Math.cos(angle) * radius,
+          y: base.y + Math.sin(angle) * radius,
+        });
+        if (tooDense) break;
+      }
+    }
+  };
+
+  // Start with the equilateral sites implied by each adjacent pair of boundary
+  // samples. This makes the first interior row conform to the outline at the
+  // same spacing as the rest of the field instead of depending on arbitrary
+  // Poisson candidate angles.
+  for (let i = 0; i < reserved.length && !tooDense; i++) {
+    const a = reserved[i];
+    const b = reserved[(i + 1) % reserved.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (length <= 1e-9 || length > spacing * 2 + 0.0001) continue;
+    const height2 = spacing * spacing - (length * length) / 4;
+    if (height2 < -0.0001) continue;
+    const height = Math.sqrt(Math.max(0, height2));
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    const nx = -dy / length;
+    const ny = dx / length;
+    if (accept({ x: midX + nx * height, y: midY + ny * height })) continue;
+    accept({ x: midX - nx * height, y: midY - ny * height });
+  }
+
+  growFrontier();
+  if (!tooDense) {
+    // Bridson growth can leave a pocket when every nearby active site happens
+    // to aim away from it. A spacing/3 scan is a deterministic maximality pass:
+    // every accepted seed is grown immediately, so isolated gap zones cannot
+    // survive merely because of candidate angle or boundary shape.
+    const bounds = pointBounds(polygon);
+    const step = spacing / 3;
+    let row = 0;
+    for (let y = bounds.y_min; y <= bounds.y_max + 1e-9 && !tooDense; y += step, row++) {
+      const offset = row % 2 ? step / 2 : 0;
+      const leftToRight = row % 4 < 2;
+      const start = leftToRight ? bounds.x_min + offset : bounds.x_max - offset;
+      const end = leftToRight ? bounds.x_max : bounds.x_min;
+      const delta = leftToRight ? step : -step;
+      for (let x = start; leftToRight ? x <= end + 1e-9 : x >= end - 1e-9; x += delta) {
+        if (!accept({ x, y })) continue;
+        growFrontier();
+        if (tooDense) break;
+      }
+    }
+  }
+  if (!tooDense && !out.length) {
+    const center = polygonCentroid(polygon);
+    accept(center);
+    growFrontier();
+  }
+  if (!tooDense && reserved.length + out.length >= MAX_FIELD_PROBE_POINTS) {
+    const bounds = pointBounds(polygon);
+    const step = spacing / 3;
+    for (let y = bounds.y_min; y <= bounds.y_max + 1e-9 && !tooDense; y += step) {
+      for (let x = bounds.x_min; x <= bounds.x_max + 1e-9; x += step) {
+        const candidate = { x, y };
+        if (!probeSpotFitsPolygon(candidate, polygon) || !probeSpacingIndexAllows(spacingIndex, candidate)) continue;
         tooDense = true;
         break;
       }
-      out.push(candidate);
-      addProbeSpacingPoint(spacingIndex, candidate);
     }
-    if (tooDense) break;
   }
-  return scoredProbeCandidate(out, tooDense, points, rotation, offsetXFrac, offsetYFrac);
-}
-
-function scoredProbeCandidate(points, tooDense, polygon, rotation, offsetXFrac, offsetYFrac) {
-  const polyCentroid = polygonCentroid(polygon);
-  const sampleCentroid = points.length ? averagePoint(points) : { x: Infinity, y: Infinity };
-  const centroidOffset = distance2(polyCentroid, sampleCentroid);
-  return {
-    points,
-    tooDense,
-    score: {
-      count: points.length,
-      centroidOffset,
-      rotation,
-      offset: offsetXFrac * offsetXFrac + offsetYFrac * offsetYFrac,
-    },
-  };
-}
-
-function isBetterProbeCandidate(candidate, best) {
-  if (!best.score) return true;
-  if (candidate.score.count !== best.score.count) return candidate.score.count > best.score.count;
-  if (Math.abs(candidate.score.centroidOffset - best.score.centroidOffset) > 1e-9) {
-    return candidate.score.centroidOffset < best.score.centroidOffset;
-  }
-  if (Math.abs(candidate.score.offset - best.score.offset) > 1e-9) return candidate.score.offset < best.score.offset;
-  return candidate.score.rotation < best.score.rotation;
+  return { points: out, tooDense };
 }
 
 function pointBounds(points) {
@@ -2809,17 +2875,11 @@ function averagePoint(points) {
   if (!points.length) return { x: 0, y: 0 };
   let x = 0;
   let y = 0;
-  for (const p of points) {
-    x += p.x;
-    y += p.y;
+  for (const point of points) {
+    x += point.x;
+    y += point.y;
   }
   return { x: x / points.length, y: y / points.length };
-}
-
-function distance2(a, b) {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return dx * dx + dy * dy;
 }
 
 function pointInPolygon(point, polygon) {

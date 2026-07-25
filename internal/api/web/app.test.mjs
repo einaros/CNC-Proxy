@@ -173,19 +173,18 @@ const fieldProbeFunctions = [
   "fieldProbeCenterSpacing",
   "normalizedClosedPolygon",
   "buildBoundaryProbePoints",
+  "closedPathSegments",
   "sampleClosedPath",
+  "closedPathMaxSampleGap",
   "createProbeSpacingIndex",
   "addProbeSpacingPoint",
   "probeSpacingIndexAllows",
-  "buildHexProbeCandidate",
-  "scoredProbeCandidate",
-  "isBetterProbeCandidate",
+  "buildPoissonProbePoints",
   "pointBounds",
   "probeSpotFitsPolygon",
   "distancePointToSegment",
   "polygonCentroid",
   "averagePoint",
-  "distance2",
   "pointInPolygon",
 ];
 const fieldProbeConsts = [
@@ -194,7 +193,7 @@ const fieldProbeConsts = [
   "MAX_FIELD_PROBE_POINTS",
 ];
 
-test("field probe order covers outline vertices, border, then spaced interior", () => {
+test("field probes form one evenly spaced boundary-to-interior distribution", () => {
   const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
   const outline = [
     { x: 0, y: 0 },
@@ -208,13 +207,9 @@ test("field probe order covers outline vertices, border, then spaced interior", 
   ));
   assert.equal(built.issue, "");
   assert.equal(built.tooDense, false);
-  assert.deepEqual(
-    built.points.slice(0, 4).map(({ x, y, probe_kind }) => ({ x, y, probe_kind })),
-    outline.map(({ x, y }) => ({ x, y, probe_kind: "outline" })),
-  );
   const firstField = built.points.findIndex((point) => point.probe_kind === "field");
-  assert.ok(firstField > 4, "border probes follow the outline vertices");
-  assert.ok(built.points.slice(4, firstField).every((point) => point.probe_kind === "border"));
+  assert.ok(firstField > 0, "even border probes precede the interior");
+  assert.ok(built.points.slice(0, firstField).every((point) => point.probe_kind === "border"));
   assert.ok(built.points.slice(firstField).every((point) => point.probe_kind === "field"));
   for (let i = 0; i < built.points.length; i++) {
     for (let j = i + 1; j < built.points.length; j++) {
@@ -231,24 +226,89 @@ test("field probe order covers outline vertices, border, then spaced interior", 
     Math.abs(40 - point.x),
     Math.abs(40 - point.y),
   ) < 0.0001;
-  assert.ok(built.points.slice(4, firstField).every(onBorder), "border probes lie on the outline");
+  assert.ok(built.points.slice(0, firstField).every(onBorder), "border probes lie on the outline");
   assert.ok(built.points.slice(firstField).every((point) => !onBorder(point)), "interior probes follow the border probes");
+
+  let worstUncovered = 0;
+  for (let y = 1; y < 40; y++) {
+    for (let x = 1; x < 40; x++) {
+      const nearest = Math.min(...built.points.map((point) => Math.hypot(point.x - x, point.y - y)));
+      worstUncovered = Math.max(worstUncovered, nearest);
+    }
+  }
+  assert.ok(worstUncovered <= 12.5, `no interior gap zone exceeds 1.25 spacing (got ${worstUncovered})`);
+
+  const border = built.points.slice(0, firstField);
+  const field = built.points.slice(firstField);
+  for (const point of border) {
+    const alongEdge = point.x === 0 || point.x === 40 ? point.y : point.x;
+    if (alongEdge <= 10 || alongEdge >= 30) continue;
+    const nearestField = Math.min(...field.map((candidate) => Math.hypot(candidate.x - point.x, candidate.y - point.y)));
+    assert.ok(nearestField <= 12.5, `border-to-interior distance at ${point.x},${point.y} stays near the requested spacing (got ${nearestField})`);
+  }
 });
 
-test("field probe reports outline vertices that cannot satisfy spot gap", () => {
+test("captured vertex density does not distort the field probe spread", () => {
   const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
-  const outline = [
+  const simple = [
     { x: 0, y: 0 },
-    { x: 5, y: 0 },
+    { x: 40, y: 0 },
     { x: 40, y: 40 },
     { x: 0, y: 40 },
   ];
-  const built = JSON.parse(vm.runInContext(
-    `JSON.stringify(buildFieldProbePreview(${JSON.stringify(outline)}, 8, ${JSON.stringify(outline)}))`,
+  const dense = [
+    { x: 0, y: 0 },
+    { x: 5, y: 0 },
+    { x: 9, y: 0 },
+    { x: 40, y: 0 },
+    { x: 40, y: 40 },
+    { x: 0, y: 40 },
+  ];
+  const builds = JSON.parse(vm.runInContext(
+    `JSON.stringify([
+      buildFieldProbePreview(${JSON.stringify(simple)}, 8),
+      buildFieldProbePreview(${JSON.stringify(dense)}, 8)
+    ])`,
     ctx,
   ));
-  assert.equal(built.points.length, 0);
-  assert.equal(built.issue, "spot gap exceeds distance between outline points");
+  assert.equal(builds[1].issue, "");
+  assert.deepEqual(builds[1], builds[0]);
+});
+
+test("concave field probe distribution preserves spacing and fills narrow regions", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 60, y: 0 },
+    { x: 60, y: 20 },
+    { x: 25, y: 20 },
+    { x: 25, y: 60 },
+    { x: 0, y: 60 },
+  ];
+  const built = JSON.parse(vm.runInContext(
+    `JSON.stringify(buildFieldProbePreview(${JSON.stringify(outline)}, 8))`,
+    ctx,
+  ));
+  assert.equal(built.issue, "");
+  assert.equal(built.tooDense, false);
+  for (let i = 0; i < built.points.length; i++) {
+    for (let j = i + 1; j < built.points.length; j++) {
+      const distance = Math.hypot(
+        built.points[i].x - built.points[j].x,
+        built.points[i].y - built.points[j].y,
+      );
+      assert.ok(distance >= 9.9998, `concave probe points ${i} and ${j} keep the 10 mm center spacing`);
+    }
+  }
+  let worstUncovered = 0;
+  for (let y = 1; y < 60; y++) {
+    for (let x = 1; x < 60; x++) {
+      if (x > 25 && y > 20) continue;
+      const nearest = Math.min(...built.points.map((point) => Math.hypot(point.x - x, point.y - y)));
+      worstUncovered = Math.max(worstUncovered, nearest);
+    }
+  }
+  assert.ok(worstUncovered <= 12.5, `concave outline has no gap zone over 1.25 spacing (got ${worstUncovered})`);
 });
 
 test("field height samples are exported relative to the probed floor", () => {
