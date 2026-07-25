@@ -74,13 +74,14 @@ type GcodeSegment struct {
 
 // MachineActionResult is returned by synchronous machine-action endpoints.
 type MachineActionResult struct {
-	Action   string `json:"action"`
-	Path     string `json:"path,omitempty"`
-	ToolID   int    `json:"tool_id,omitempty"`
-	Command  string `json:"command,omitempty"`
-	Output   string `json:"output,omitempty"`
-	Message  string `json:"message"`
-	Verified bool   `json:"verified"`
+	Action   string             `json:"action"`
+	Path     string             `json:"path,omitempty"`
+	ToolID   int                `json:"tool_id,omitempty"`
+	Command  string             `json:"command,omitempty"`
+	Output   string             `json:"output,omitempty"`
+	Message  string             `json:"message"`
+	Verified bool               `json:"verified"`
+	Machine  machine.AxisValues `json:"machine,omitempty"`
 }
 
 // ActiveGcode returns the current proxy-side file selection.
@@ -495,6 +496,7 @@ func (s *Service) AutoZProbe() (MachineActionResult, error) {
 	var out string
 	var display string
 	var verified bool
+	var contact machine.AxisValues
 	err := s.arb.WithMachine(true, func(c *client.Conn) error {
 		st, err := s.queryRecoveryStatus(c)
 		if err != nil {
@@ -523,11 +525,13 @@ func (s *Service) AutoZProbe() (MachineActionResult, error) {
 		if err != nil {
 			return err
 		}
-		if _, hit, err := parseProbeResult(out); err != nil {
+		pos, hit, err := parseProbeResult(out)
+		if err != nil {
 			return err
 		} else if !hit {
 			return fmt.Errorf("%w: probe did not report contact", ErrProbeUnavailable)
 		}
+		contact = pos
 		if _, err := s.sendProbeLine(c, "G10 L20 P0 Z0", false); err != nil {
 			return err
 		}
@@ -549,6 +553,7 @@ func (s *Service) AutoZProbe() (MachineActionResult, error) {
 	res.Command = display
 	res.Output = out
 	res.Verified = verified
+	res.Machine = contact
 	res.Message = "Work Z zero verified at probe contact."
 	if err != nil {
 		res.Message = err.Error()

@@ -347,6 +347,9 @@
   .outline-probe-controls label, .outline-field-controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); min-height: 32px; }
   .outline-field-controls input[type="number"] { width: 88px; }
   .outline-summary { color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .outline-action-status { min-height: 17px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .outline-action-status[data-kind="ok"] { color: var(--ok); }
+  .outline-action-status[data-kind="error"] { color: var(--danger); }
   .origin-set-change { min-height: 18px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .z-step-controls { display: grid; grid-template-rows: minmax(68px, 1fr) auto minmax(68px, 1fr); gap: 8px; align-items: stretch; }
   .z-step-controls button { justify-content: center; min-height: 68px; font-size: 16px; font-weight: 650; }
@@ -359,6 +362,7 @@
   #workarea-outline-points circle { fill: #dff1fb; stroke: #12171c; stroke-width: .18; }
   #workarea-outline.closed #workarea-outline-path { stroke: var(--ok); }
   #workarea-field-probe-preview circle { fill: rgba(217,154,58,.32); stroke: var(--warn); stroke-width: .35; }
+  #workarea-field-probe-preview circle.boundary { fill: rgba(223,241,251,.42); stroke: var(--accent); }
   #workarea-field-probe-preview circle.done { fill: rgba(68,194,123,.36); stroke: var(--ok); }
   #workarea-field-probe-preview circle.current { fill: rgba(87,166,214,.52); stroke: var(--accent); stroke-width: .55; }
   #workarea-origin-x, #workarea-origin-y { display: none; }
@@ -963,6 +967,7 @@
             </div>
             <div id="outline-capture" class="outline-capture">
               <div id="outline-probe-controls" class="outline-probe-controls" hidden>
+                <button type="button" id="outline-probe-floor" class="primary">Probe floor</button>
                 <label id="outline-probe-point-wrap" hidden><input type="checkbox" id="outline-probe-point"> Probe Z</label>
               </div>
               <div id="outline-field-controls" class="outline-field-controls" hidden>
@@ -974,6 +979,7 @@
                 </div>
               </div>
               <div id="outline-summary" class="outline-summary"></div>
+              <div id="outline-action-status" class="outline-action-status" role="status" aria-live="polite"></div>
             </div>
           </div>
         </div>

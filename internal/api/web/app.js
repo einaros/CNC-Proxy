@@ -416,15 +416,20 @@ function defaultOutlineState() {
     probeEachPoint: false,
     pointProbePending: false,
     fieldSpotGapMM: DEFAULT_FIELD_SPOT_GAP_MM,
+    floorMachineZ: null,
+    floorProbePending: false,
     fieldProbePreview: [],
     fieldProbeResults: [],
     fieldProbePending: false,
     fieldProbeIndex: 0,
     fieldProbeTooDense: false,
+    fieldProbeIssue: "",
     tracePending: false,
     filePending: false,
     feedback: "",
     feedbackKind: "",
+    feedbackDisplay: "",
+    feedbackDisplayKind: "",
   };
 }
 
@@ -1926,7 +1931,7 @@ function setWorkAreaMarker(id, machinePoint) {
 }
 
 function cloneOutlinePoint(p) {
-  return {
+  const out = {
     id: p.id,
     x: p.x,
     y: p.y,
@@ -1938,6 +1943,8 @@ function cloneOutlinePoint(p) {
     probed: !!p.probed,
     probe_output: p.probe_output || "",
   };
+  if (p.probe_kind) out.probe_kind = p.probe_kind;
+  return out;
 }
 
 function cloneOutlineOrigin(origin) {
@@ -1962,10 +1969,19 @@ function outlineSnapshot() {
 
 function restoreOutlineSnapshot(snap) {
   const o = state.outline;
+  const floorZ = Number(o.floorMachineZ);
   o.active = !!snap.active;
   o.points = snap.points.map(cloneOutlinePoint);
   o.closed = !!snap.closed;
   o.origin = cloneOutlineOrigin(snap.origin);
+  if (Number.isFinite(floorZ)) {
+    o.origin = o.origin || {};
+    o.origin.z = floorZ;
+    for (const point of o.points) {
+      const machineZ = Number(point.machine_z);
+      if (Number.isFinite(machineZ)) point.z = machineZ - floorZ;
+    }
+  }
   clearFieldProbeData();
   if (o.closed) updateFieldProbePreview();
 }
@@ -2011,11 +2027,17 @@ function currentOutlineCapturePosition() {
 function startOutlineCapture() {
   const current = state.outline;
   const keepCurveFit = !!current.curveFit;
+  const floorZ = Number(current.floorMachineZ);
   const pos = currentOutlineCapturePosition();
   state.outline = defaultOutlineState();
   state.outline.active = true;
   state.outline.curveFit = keepCurveFit;
+  if (Number.isFinite(floorZ)) state.outline.floorMachineZ = floorZ;
   state.outline.origin = cloneOutlineOrigin(pos?.origin || currentWorkOrigin());
+  if (Number.isFinite(floorZ)) {
+    state.outline.origin = state.outline.origin || {};
+    state.outline.origin.z = floorZ;
+  }
   state.outline.feedback = "Outline capture started.";
   state.outline.feedbackKind = "ok";
   renderOutlineCapture();
@@ -2026,8 +2048,10 @@ function endOutlineCapture() {
   const current = state.outline;
   if (current.points.length && !confirm("End outline capture and clear the captured outline?")) return;
   const keepCurveFit = !!current.curveFit;
+  const floorZ = Number(current.floorMachineZ);
   state.outline = defaultOutlineState();
   state.outline.curveFit = keepCurveFit;
+  if (Number.isFinite(floorZ)) state.outline.floorMachineZ = floorZ;
   state.outline.feedback = "Outline cleared.";
   renderOutlineCapture();
   renderWorkArea();
@@ -2168,14 +2192,15 @@ function isProbeToolActive() {
 
 function outlineSummaryText() {
   const o = state.outline;
-  if (!o.active) return "";
+  if (!o.active) return Number.isFinite(o.floorMachineZ) ? "floor Z0 at M " + fmtCoord(o.floorMachineZ) : "";
   const count = o.points.length;
   const parts = [count + " point" + (count === 1 ? "" : "s")];
   if (o.closed) parts.push("closed");
   if (o.curveFit) parts.push("curve fit");
   if (o.fieldProbePreview.length) parts.push(o.fieldProbePreview.length + " field probes");
   if (o.fieldProbeResults.length) parts.push(o.fieldProbeResults.length + " Z samples");
-  if (o.fieldProbeTooDense) parts.push("spot gap too dense");
+  if (Number.isFinite(o.floorMachineZ)) parts.push("floor Z0 at M " + fmtCoord(o.floorMachineZ));
+  if (o.fieldProbeIssue) parts.push(o.fieldProbeIssue);
   return parts.join(" | ");
 }
 
@@ -2195,6 +2220,7 @@ function renderOutlineCapture() {
   const probeControls = document.getElementById("outline-probe-controls");
   const probeWrap = document.getElementById("outline-probe-point-wrap");
   const probePoint = document.getElementById("outline-probe-point");
+  const probeFloor = document.getElementById("outline-probe-floor");
   const exp = document.getElementById("outline-export");
   const fieldControls = document.getElementById("outline-field-controls");
   const spacing = document.getElementById("outline-field-spacing");
@@ -2203,7 +2229,8 @@ function renderOutlineCapture() {
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
-  const busy = !!o.pointProbePending || !!o.fieldProbePending || !!o.tracePending || !!o.filePending;
+  const actionStatus = document.getElementById("outline-action-status");
+  const busy = !!o.pointProbePending || !!o.floorProbePending || !!o.fieldProbePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
   if (start) {
@@ -2242,12 +2269,17 @@ function renderOutlineCapture() {
     curve.checked = !!o.curveFit;
     curve.disabled = busy || o.points.length < 2;
   }
-  if (probeControls) probeControls.hidden = !o.active || !probeActive;
+  if (probeControls) probeControls.hidden = !probeActive;
   if (probeWrap) probeWrap.hidden = !o.active || !probeActive;
   if (probePoint) {
     if (!probeActive) o.probeEachPoint = false;
     probePoint.checked = !!o.probeEachPoint;
     probePoint.disabled = busy;
+  }
+  if (probeFloor) {
+    probeFloor.disabled = busy;
+    setSoftDisabled(probeFloor, !busy && (!probeActive || state.jog.armed || !machineReadyForOriginSet()));
+    setTextIfChanged(probeFloor, o.floorProbePending ? "Probing floor..." : "Probe floor");
   }
   if (exp) {
     exp.disabled = busy;
@@ -2265,18 +2297,27 @@ function renderOutlineCapture() {
   if (fieldProbe) {
     setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe field Z");
     fieldProbe.disabled = busy;
-    setSoftDisabled(fieldProbe, !busy && (!probeActive || state.jog.armed || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
+    setSoftDisabled(fieldProbe, !busy && (!probeActive || state.jog.armed || !Number.isFinite(o.floorMachineZ) || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
   }
   if (exportControls) exportControls.hidden = !o.fieldProbeResults.length;
   if (exportObj) {
     exportObj.disabled = busy;
-    setSoftDisabled(exportObj, !busy && o.fieldProbeResults.length < 3);
+    setSoftDisabled(exportObj, !busy && (o.fieldProbeResults.length < 3 || !Number.isFinite(o.floorMachineZ)));
   }
   if (exportHeight) {
     exportHeight.disabled = busy;
-    setSoftDisabled(exportHeight, !busy && o.fieldProbeResults.length < 3);
+    setSoftDisabled(exportHeight, !busy && (o.fieldProbeResults.length < 3 || !Number.isFinite(o.floorMachineZ)));
   }
   if (summary) summary.textContent = outlineSummaryText();
+  if (o.feedback) {
+    o.feedbackDisplay = o.feedback;
+    o.feedbackDisplayKind = o.feedbackKind;
+  }
+  if (actionStatus) {
+    actionStatus.textContent = o.feedbackDisplay || "";
+    if (o.feedbackDisplayKind) actionStatus.dataset.kind = o.feedbackDisplayKind;
+    else delete actionStatus.dataset.kind;
+  }
   consumeStatusFeedback("outline", o, "feedback", "feedbackKind");
 }
 
@@ -2443,7 +2484,7 @@ function renderWorkAreaFieldProbePreview() {
     return;
   }
   group.innerHTML = points.map((p, i) =>
-    `<circle class="${[done.has(p.src.id) ? "done" : "", o.fieldProbePending && i === o.fieldProbeIndex ? "current" : ""].filter(Boolean).join(" ")}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`
+    `<circle class="${[p.src.probe_kind === "outline" || p.src.probe_kind === "border" ? "boundary" : "", done.has(p.src.id) ? "done" : "", o.fieldProbePending && i === o.fieldProbeIndex ? "current" : ""].filter(Boolean).join(" ")}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`
   ).join("");
   group.removeAttribute("display");
 }
@@ -2461,6 +2502,7 @@ function clearFieldProbeData(keepPreview = false) {
   o.fieldProbeResults = [];
   o.fieldProbeIndex = 0;
   o.fieldProbeTooDense = false;
+  o.fieldProbeIssue = "";
   if (!keepPreview) o.fieldProbePreview = [];
 }
 
@@ -2469,42 +2511,152 @@ function updateFieldProbePreview() {
   if (!o.closed || o.points.length < 3) {
     o.fieldProbePreview = [];
     o.fieldProbeTooDense = false;
+    o.fieldProbeIssue = "";
     return;
   }
   const geometry = effectiveOutlineGeometry(outlineWorkPoints(), o.closed, o.curveFit);
   if (geometry.limited) {
     o.fieldProbePreview = [];
     o.fieldProbeTooDense = true;
+    o.fieldProbeIssue = "curve fit generated too many outline points";
     return;
   }
-  const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap());
+  const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap(), outlineWorkPoints());
   o.fieldProbePreview = built.points;
   o.fieldProbeTooDense = built.tooDense;
+  o.fieldProbeIssue = built.issue || "";
 }
 
-function buildFieldProbePreview(points, spotGap) {
-  // Fixed-diameter probe spots are placed on a hex lattice, then clipped to the
-  // polygon; several deterministic offsets/rotations are scored to reduce
-  // boundary bias for arbitrary outlines.
+function buildFieldProbePreview(points, spotGap, outlinePoints = points) {
   const spacing = fieldProbeCenterSpacing(spotGap);
+  const polygon = normalizedClosedPolygon(points);
+  const boundary = buildBoundaryProbePoints(polygon, outlinePoints, spacing);
+  if (boundary.issue || boundary.tooDense) {
+    return { points: [], tooDense: !!boundary.tooDense, issue: boundary.issue || "spot gap creates too many probe points" };
+  }
+  // Once the outline vertices and border are fixed, score deterministic hex
+  // lattices for the remaining interior. Reserved boundary points participate
+  // in the same center-spacing test as every interior point.
   const rotations = [0, 10, 20, 30, 40, 50].map((deg) => deg * Math.PI / 180);
   const offsetFractions = [0, 0.25, 0.5, 0.75];
   let best = { points: [], tooDense: false, score: null };
   for (const rotation of rotations) {
     for (const ox of offsetFractions) {
       for (const oy of offsetFractions) {
-        const candidate = buildHexProbeCandidate(points, spacing, rotation, ox, oy);
+        const candidate = buildHexProbeCandidate(polygon, spacing, rotation, ox, oy, boundary.points);
         if (isBetterProbeCandidate(candidate, best)) best = candidate;
       }
     }
   }
+  const ordered = boundary.points.concat(best.points);
   return {
-    points: best.points.map((p, i) => ({ id: "field-probe-" + String(i + 1).padStart(4, "0"), x: p.x, y: p.y })),
+    points: ordered.map((p, i) => ({
+      id: "field-probe-" + String(i + 1).padStart(4, "0"),
+      x: p.x,
+      y: p.y,
+      probe_kind: p.probe_kind,
+    })),
     tooDense: best.tooDense,
+    issue: best.tooDense ? "spot gap creates too many probe points" : "",
   };
 }
 
-function buildHexProbeCandidate(points, spacing, rotation, offsetXFrac, offsetYFrac) {
+function normalizedClosedPolygon(points) {
+  const out = (points || [])
+    .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (out.length > 1 && Math.hypot(out[0].x - out.at(-1).x, out[0].y - out.at(-1).y) <= 0.00005) out.pop();
+  return out;
+}
+
+function buildBoundaryProbePoints(polygon, outlinePoints, spacing) {
+  const vertices = normalizedClosedPolygon(outlinePoints);
+  const seeds = [];
+  const seedIndex = createProbeSpacingIndex([], spacing);
+  for (const vertex of vertices) {
+    const point = { x: Number(vertex.x.toFixed(4)), y: Number(vertex.y.toFixed(4)), probe_kind: "outline" };
+    if (seeds.some((p) => Math.hypot(p.x - point.x, p.y - point.y) <= 0.00005)) continue;
+    if (!probeSpacingIndexAllows(seedIndex, point)) {
+      return { points: [], tooDense: false, issue: "spot gap exceeds distance between outline points" };
+    }
+    seeds.push(point);
+    addProbeSpacingPoint(seedIndex, point);
+  }
+  if (seeds.length >= MAX_FIELD_PROBE_POINTS) {
+    return { points: [], tooDense: true, issue: "outline has too many probe points" };
+  }
+  let best = seeds;
+  for (const offsetFraction of [0, 0.2, 0.4, 0.6, 0.8]) {
+    const candidate = seeds.slice();
+    const spacingIndex = createProbeSpacingIndex(candidate, spacing);
+    for (const sample of sampleClosedPath(polygon, spacing, offsetFraction * spacing)) {
+      const point = { x: Number(sample.x.toFixed(4)), y: Number(sample.y.toFixed(4)), probe_kind: "border" };
+      if (!probeSpacingIndexAllows(spacingIndex, point)) continue;
+      if (candidate.length >= MAX_FIELD_PROBE_POINTS) {
+        return { points: [], tooDense: true, issue: "spot gap creates too many border probe points" };
+      }
+      candidate.push(point);
+      addProbeSpacingPoint(spacingIndex, point);
+    }
+    if (candidate.length > best.length) best = candidate;
+  }
+  return { points: best, tooDense: false, issue: "" };
+}
+
+function sampleClosedPath(points, spacing, offset) {
+  const segments = [];
+  let perimeter = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    if (length <= 1e-9) continue;
+    segments.push({ a, b, start: perimeter, end: perimeter + length, length });
+    perimeter += length;
+  }
+  if (!segments.length || !Number.isFinite(spacing) || spacing <= 0) return [];
+  const out = [];
+  for (let distance = offset; distance < perimeter - 1e-9; distance += spacing) {
+    const segment = segments.find((part) => distance <= part.end + 1e-9);
+    if (!segment) continue;
+    const t = Math.max(0, Math.min(1, (distance - segment.start) / segment.length));
+    out.push({
+      x: segment.a.x + (segment.b.x - segment.a.x) * t,
+      y: segment.a.y + (segment.b.y - segment.a.y) * t,
+    });
+  }
+  return out;
+}
+
+function createProbeSpacingIndex(points, spacing) {
+  const index = { spacing, cells: new Map() };
+  for (const point of points) addProbeSpacingPoint(index, point);
+  return index;
+}
+
+function addProbeSpacingPoint(index, point) {
+  const cellX = Math.floor(point.x / index.spacing);
+  const cellY = Math.floor(point.y / index.spacing);
+  const key = cellX + ":" + cellY;
+  const cell = index.cells.get(key) || [];
+  cell.push(point);
+  index.cells.set(key, cell);
+}
+
+function probeSpacingIndexAllows(index, candidate) {
+  const cellX = Math.floor(candidate.x / index.spacing);
+  const cellY = Math.floor(candidate.y / index.spacing);
+  for (let y = cellY - 1; y <= cellY + 1; y++) {
+    for (let x = cellX - 1; x <= cellX + 1; x++) {
+      for (const point of index.cells.get(x + ":" + y) || []) {
+        if (Math.hypot(candidate.x - point.x, candidate.y - point.y) < index.spacing - 0.0001) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function buildHexProbeCandidate(points, spacing, rotation, offsetXFrac, offsetYFrac, reserved = []) {
   const cos = Math.cos(rotation);
   const sin = Math.sin(rotation);
   const toLattice = (p) => ({ x: p.x * cos + p.y * sin, y: -p.x * sin + p.y * cos });
@@ -2518,19 +2670,22 @@ function buildHexProbeCandidate(points, spacing, rotation, offsetXFrac, offsetYF
   const firstXBase = Math.floor((b.x_min - spacing) / spacing) * spacing + offsetXFrac * spacing;
   const lastX = b.x_max + spacing;
   const out = [];
+  const spacingIndex = createProbeSpacingIndex(reserved, spacing);
   let tooDense = false;
   let row = 0;
   for (let y = firstY; y <= lastY + 1e-9; y += rowGap, row++) {
     const rowOffset = row % 2 ? spacing / 2 : 0;
     for (let x = firstXBase + rowOffset; x <= lastX + 1e-9; x += spacing) {
       const p = fromLattice({ x, y });
-      const candidate = { x: Number(p.x.toFixed(4)), y: Number(p.y.toFixed(4)) };
+      const candidate = { x: Number(p.x.toFixed(4)), y: Number(p.y.toFixed(4)), probe_kind: "field" };
       if (!probeSpotFitsPolygon(candidate, points)) continue;
-      if (out.length >= MAX_FIELD_PROBE_POINTS) {
+      if (!probeSpacingIndexAllows(spacingIndex, candidate)) continue;
+      if (reserved.length + out.length >= MAX_FIELD_PROBE_POINTS) {
         tooDense = true;
         break;
       }
-      out.push({ x: candidate.x, y: candidate.y });
+      out.push(candidate);
+      addProbeSpacingPoint(spacingIndex, candidate);
     }
     if (tooDense) break;
   }
@@ -2692,6 +2847,68 @@ async function probeZAtWorkPoint(workPoint, opts = {}) {
   };
 }
 
+function rebaseOutlineToFloor(machineZ) {
+  const floorZ = Number(machineZ);
+  if (!Number.isFinite(floorZ)) throw new Error("floor probe did not report a machine Z coordinate");
+  const o = state.outline;
+  o.floorMachineZ = floorZ;
+  const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin()) || {};
+  origin.z = floorZ;
+  o.origin = origin;
+  for (const point of [...o.points, ...o.fieldProbeResults]) {
+    const z = Number(point.machine_z);
+    if (Number.isFinite(z)) point.z = z - floorZ;
+  }
+}
+
+async function probeFloor() {
+  const o = state.outline;
+  if (state.jog.zProbePending || o.floorProbePending || o.pointProbePending || o.fieldProbePending || o.tracePending) return;
+  if (state.jog.armed) {
+    setOutlineFeedback("Disarm tap move before probing the floor.", "error");
+    return;
+  }
+  if (!machineReadyForOriginSet()) {
+    setOutlineFeedback("Machine must be connected and Idle to probe the floor.", "error");
+    return;
+  }
+  if (!isProbeToolActive()) {
+    setOutlineFeedback("Floor probe requires the probe tool to be active.", "error");
+    return;
+  }
+  if (!confirm("Probe the floor at the current XY? The detected floor will become work Z zero.")) return;
+  o.floorProbePending = true;
+  state.jog.zProbePending = true;
+  o.feedback = "Probing floor and updating work Z zero...";
+  o.feedbackKind = "";
+  renderOutlineCapture();
+  renderJog();
+  try {
+    const resp = await request("/api/probe/auto-z", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const result = await resp.json();
+    const floorZ = axisValue(result.machine, "z");
+    if (!result.verified || floorZ === null) {
+      throw new Error(result.message || "work Z zero could not be verified");
+    }
+    rebaseOutlineToFloor(floorZ);
+    o.feedback = "Floor verified. Work Z zero is M Z " + fmtCoord(floorZ) + " mm.";
+    o.feedbackKind = "ok";
+  } catch (e) {
+    o.feedback = "Floor probe failed: " + e.message;
+    o.feedbackKind = "error";
+  } finally {
+    o.floorProbePending = false;
+    state.jog.zProbePending = false;
+    await pollMachine();
+    renderOutlineCapture();
+    renderJog();
+  }
+}
+
 async function runFieldProbe() {
   const o = state.outline;
   if (!o.active || !o.closed || o.points.length < 3) return;
@@ -2703,9 +2920,18 @@ async function runFieldProbe() {
     setOutlineFeedback("Disarm tap move before running field Z probe.", "error");
     return;
   }
+  if (!Number.isFinite(o.floorMachineZ)) {
+    setOutlineFeedback("Probe the floor before running field Z probe.", "error");
+    return;
+  }
   updateFieldProbePreview();
+  if (o.fieldProbeIssue) {
+    setOutlineFeedback(o.fieldProbeIssue + ".", "error");
+    renderOutlineCapture();
+    return;
+  }
   if (o.fieldProbeTooDense) {
-    setOutlineFeedback("Spot gap creates too many probe points.", "error");
+    setOutlineFeedback(o.fieldProbeIssue || "Spot gap creates too many probe points.", "error");
     renderOutlineCapture();
     return;
   }
@@ -2748,6 +2974,7 @@ async function runFieldProbe() {
         machine_x: probed.machine_x,
         machine_y: probed.machine_y,
         machine_z: probed.machine_z,
+        probe_kind: p.probe_kind,
         captured_at: new Date().toISOString(),
         probe_output: probed.output,
       });
@@ -2960,6 +3187,7 @@ function outlineJSONDocument() {
       origin: cloneOutlineOrigin(o.origin),
       probe_each_point: !!o.probeEachPoint,
       field_spot_gap_mm: fieldProbeSpotGap(),
+      floor_machine_z: Number.isFinite(o.floorMachineZ) ? o.floorMachineZ : null,
       field_probe_results: o.fieldProbeResults.map(cloneOutlinePoint),
     },
   };
@@ -3018,6 +3246,10 @@ function outlineStateFromJSON(doc) {
   next.origin = outlineOriginFromJSON(raw.origin);
   next.probeEachPoint = !!raw.probe_each_point;
   next.fieldSpotGapMM = boundedOutlineNumber(raw.field_spot_gap_mm, 0, 250, DEFAULT_FIELD_SPOT_GAP_MM);
+  const floorMachineZ = Number(raw.floor_machine_z);
+  next.floorMachineZ = raw.floor_machine_z !== null && raw.floor_machine_z !== "" && Number.isFinite(floorMachineZ)
+    ? floorMachineZ
+    : null;
   const samples = raw.field_probe_results == null ? [] : raw.field_probe_results;
   if (!Array.isArray(samples) || samples.length > MAX_FIELD_PROBE_POINTS) {
     throw new Error("field probe samples are invalid");
@@ -3054,6 +3286,7 @@ function outlinePointFromJSON(raw, index) {
   point.id = typeof raw.id === "string" && raw.id ? raw.id.slice(0, 160) : newID("outline-point");
   point.captured_at = typeof raw.captured_at === "string" ? raw.captured_at.slice(0, 80) : "";
   point.probed = !!raw.probed;
+  point.probe_kind = typeof raw.probe_kind === "string" ? raw.probe_kind.slice(0, 24) : "";
   point.probe_output = typeof raw.probe_output === "string" ? raw.probe_output.slice(0, 4096) : "";
   return point;
 }
@@ -3176,7 +3409,8 @@ function outlineEffectiveExportPoints(origin) {
 function fieldProbeExportPoints(origin) {
   const ox = axisValue(origin, "x");
   const oy = axisValue(origin, "y");
-  const oz = axisValue(origin, "z");
+  const floorZ = Number(state.outline.floorMachineZ);
+  if (!Number.isFinite(floorZ)) throw new Error("probe the floor before exporting field heights");
   return state.outline.fieldProbeResults.map((p) => {
     const mx = Number(p.machine_x);
     const my = Number(p.machine_y);
@@ -3184,7 +3418,7 @@ function fieldProbeExportPoints(origin) {
     return {
       x: Number.isFinite(mx) && ox !== null ? mx - ox : p.x,
       y: Number.isFinite(my) && oy !== null ? my - oy : p.y,
-      z: Number.isFinite(mz) && oz !== null ? mz - oz : p.z,
+      z: Number.isFinite(mz) ? mz - floorZ : p.z,
       captured_at: p.captured_at,
     };
   });
@@ -3225,7 +3459,9 @@ function exportHeightOBJ() {
     const lines = [
       "# CNC Proxy outline field Z probe",
       "# units: mm",
-      "# coordinates: current work zero",
+      "# xy coordinates: current work zero",
+      "# z coordinates: probed floor zero",
+      "# floor_machine_z_mm: " + pathNum(state.outline.floorMachineZ),
       "o outline_field_probe",
     ];
     const index = Array.from({ length: mesh.rows }, () => Array(mesh.cols).fill(0));
@@ -3269,7 +3505,9 @@ function exportHeightImage() {
       "P2",
       "# CNC Proxy outline height image",
       "# units: mm",
-      "# coordinates: current work zero",
+      "# xy coordinates: current work zero",
+      "# z coordinates: probed floor zero",
+      "# floor_machine_z_mm: " + pathNum(state.outline.floorMachineZ),
       "# x_min_mm: " + pathNum(mesh.xMin),
       "# y_min_mm: " + pathNum(mesh.yMin),
       "# probe_diameter_mm: " + pathNum(PROBE_SPOT_DIAMETER_MM),
@@ -7010,6 +7248,7 @@ function init() {
   outlineSpacing.oninput = () => markControlDirty(outlineSpacing);
   outlineSpacing.onchange = updateOutlineFieldSpacing;
   bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
+  bindButtonAction(document.getElementById("outline-probe-floor"), probeFloor);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);
   bindButtonAction(document.getElementById("machine-settings-open"), openMachineSettings);

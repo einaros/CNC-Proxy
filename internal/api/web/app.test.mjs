@@ -167,6 +167,191 @@ const outlineDXFConsts = [
   "OUTLINE_CURVE_TOLERANCE_MM",
 ];
 
+const fieldProbeFunctions = [
+  "buildFieldProbePreview",
+  "fieldProbeCenterSpacing",
+  "normalizedClosedPolygon",
+  "buildBoundaryProbePoints",
+  "sampleClosedPath",
+  "createProbeSpacingIndex",
+  "addProbeSpacingPoint",
+  "probeSpacingIndexAllows",
+  "buildHexProbeCandidate",
+  "scoredProbeCandidate",
+  "isBetterProbeCandidate",
+  "pointBounds",
+  "probeSpotFitsPolygon",
+  "distancePointToSegment",
+  "polygonCentroid",
+  "averagePoint",
+  "distance2",
+  "pointInPolygon",
+];
+const fieldProbeConsts = [
+  "PROBE_SPOT_DIAMETER_MM",
+  "PROBE_SPOT_RADIUS_MM",
+  "MAX_FIELD_PROBE_POINTS",
+];
+
+test("field probe order covers outline vertices, border, then spaced interior", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 40, y: 0 },
+    { x: 40, y: 40 },
+    { x: 0, y: 40 },
+  ];
+  const built = JSON.parse(vm.runInContext(
+    `JSON.stringify(buildFieldProbePreview(${JSON.stringify(outline)}, 8, ${JSON.stringify(outline)}))`,
+    ctx,
+  ));
+  assert.equal(built.issue, "");
+  assert.equal(built.tooDense, false);
+  assert.deepEqual(
+    built.points.slice(0, 4).map(({ x, y, probe_kind }) => ({ x, y, probe_kind })),
+    outline.map(({ x, y }) => ({ x, y, probe_kind: "outline" })),
+  );
+  const firstField = built.points.findIndex((point) => point.probe_kind === "field");
+  assert.ok(firstField > 4, "border probes follow the outline vertices");
+  assert.ok(built.points.slice(4, firstField).every((point) => point.probe_kind === "border"));
+  assert.ok(built.points.slice(firstField).every((point) => point.probe_kind === "field"));
+  for (let i = 0; i < built.points.length; i++) {
+    for (let j = i + 1; j < built.points.length; j++) {
+      const distance = Math.hypot(
+        built.points[i].x - built.points[j].x,
+        built.points[i].y - built.points[j].y,
+      );
+      assert.ok(distance >= 9.9998, `probe points ${i} and ${j} keep the 10 mm center spacing`);
+    }
+  }
+  const onBorder = (point) => Math.min(
+    point.x,
+    point.y,
+    Math.abs(40 - point.x),
+    Math.abs(40 - point.y),
+  ) < 0.0001;
+  assert.ok(built.points.slice(4, firstField).every(onBorder), "border probes lie on the outline");
+  assert.ok(built.points.slice(firstField).every((point) => !onBorder(point)), "interior probes follow the border probes");
+});
+
+test("field probe reports outline vertices that cannot satisfy spot gap", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 5, y: 0 },
+    { x: 40, y: 40 },
+    { x: 0, y: 40 },
+  ];
+  const built = JSON.parse(vm.runInContext(
+    `JSON.stringify(buildFieldProbePreview(${JSON.stringify(outline)}, 8, ${JSON.stringify(outline)}))`,
+    ctx,
+  ));
+  assert.equal(built.points.length, 0);
+  assert.equal(built.issue, "spot gap exceeds distance between outline points");
+});
+
+test("field height samples are exported relative to the probed floor", () => {
+  const state = {
+    outline: {
+      floorMachineZ: -12.5,
+      fieldProbeResults: [
+        { x: 1, y: 2, z: 99, machine_x: 11, machine_y: 22, machine_z: -10 },
+        { x: 3, y: 4, z: 99, machine_x: 13, machine_y: 24, machine_z: -13 },
+      ],
+    },
+  };
+  const ctx = buildContext(["fieldProbeExportPoints", "axisValue"], [], { state });
+  const points = JSON.parse(vm.runInContext(
+    "JSON.stringify(fieldProbeExportPoints({ x: 10, y: 20, z: 500 }))",
+    ctx,
+  ));
+  assert.deepEqual(points.map(({ x, y, z }) => ({ x, y, z })), [
+    { x: 1, y: 2, z: 2.5 },
+    { x: 3, y: 4, z: -0.5 },
+  ]);
+});
+
+test("Probe floor records the verified contact and rebases captured Z values", async () => {
+  const state = {
+    outline: {
+      floorProbePending: false,
+      pointProbePending: false,
+      fieldProbePending: false,
+      tracePending: false,
+      origin: { x: 10, y: 20, z: 30 },
+      points: [{ machine_z: -10, z: 99 }],
+      fieldProbeResults: [{ machine_z: -13, z: 99 }],
+      feedback: "",
+      feedbackKind: "",
+    },
+    jog: { armed: false, zProbePending: false },
+  };
+  const requests = [];
+  const ctx = buildContext(
+    ["probeFloor", "rebaseOutlineToFloor", "cloneOutlineOrigin", "finiteOr", "axisValue"],
+    [],
+    {
+      state,
+      confirm: () => true,
+      machineReadyForOriginSet: () => true,
+      isProbeToolActive: () => true,
+      request: async (path, options) => {
+        requests.push({ path, options });
+        return { json: async () => ({ verified: true, machine: { x: 1, y: 2, z: -12.5 } }) };
+      },
+      currentWorkOrigin: () => ({ x: 10, y: 20, z: 30 }),
+      renderOutlineCapture: () => {},
+      renderJog: () => {},
+      pollMachine: async () => {},
+      fmtCoord: (value) => String(value),
+      setOutlineFeedback: () => {},
+    },
+  );
+  await vm.runInContext("probeFloor()", ctx);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/probe/auto-z");
+  assert.equal(state.outline.floorMachineZ, -12.5);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.outline.origin)), { x: 10, y: 20, z: -12.5 });
+  assert.equal(state.outline.points[0].z, 2.5);
+  assert.equal(state.outline.fieldProbeResults[0].z, -0.5);
+  assert.equal(state.outline.floorProbePending, false);
+  assert.equal(state.jog.zProbePending, false);
+  assert.equal(state.outline.feedbackKind, "ok");
+});
+
+test("outline undo keeps the machine floor Z origin", () => {
+  const state = {
+    outline: {
+      floorMachineZ: -12.5,
+      active: true,
+      points: [],
+      closed: true,
+      origin: { x: 10, y: 20, z: -12.5 },
+    },
+  };
+  const ctx = buildContext(
+    ["restoreOutlineSnapshot", "cloneOutlinePoint", "cloneOutlineOrigin", "axisValue"],
+    [],
+    {
+      state,
+      clearFieldProbeData: () => {},
+      updateFieldProbePreview: () => {},
+    },
+  );
+  vm.runInContext(
+    `restoreOutlineSnapshot({
+      active: true,
+      points: [{ id: "p1", x: 0, y: 0, z: 30, machine_x: 10, machine_y: 20, machine_z: 30 }],
+      closed: false,
+      origin: { x: 10, y: 20, z: 30 }
+    })`,
+    ctx,
+  );
+  assert.equal(state.outline.floorMachineZ, -12.5);
+  assert.equal(state.outline.origin.z, -12.5);
+  assert.equal(state.outline.points[0].z, 42.5);
+});
+
 test("outline DXF uses the conservative R12 sketch subset", () => {
   const state = {
     outline: {
