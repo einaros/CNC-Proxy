@@ -1489,6 +1489,7 @@ function renderMachineSettings() {
   const learn = document.getElementById("machine-learn");
   if (learn) {
     learn.disabled = state.machineLearnPending;
+    learn.setAttribute("aria-busy", state.machineLearnPending ? "true" : "false");
     setTextIfChanged(learn, state.machineLearnPending ? "Learning..." : "Learn from machine");
   }
   const learnStatus = document.getElementById("machine-learn-status");

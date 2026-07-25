@@ -859,10 +859,39 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index still contains removed Probe Z row marker %s", gone)
 		}
 	}
-	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="tap-primary-controls"`, `class="tap-feed-stepper"`, `class="tap-safe-z-field"`, `class="tap-safe-z-toggle"`, `class="tap-coordinate-panel"`, `class="tap-coordinate-row"`, `grid-template-columns: repeat(3, 112px) 64px`, `class="work-move-label"`, `class="work-move-field is-live"`, `class="work-move-reset"`, `class="icon-reset"`, `class="tap-origin-panel"`, `class="origin-action-grid"`, `class="origin-modal"`, `class="origin-modal-fields"`, `class="origin-modal-source"`, `id="origin-set-change"`, `class="origin-set-change"`, `class="origin-row origin-row-preset"`, `class="origin-row origin-row-save"`, `class="saved-origin-label-field"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="workarea-controls"`, `class="outline-preview-controls"`, `width: min(178px, calc(100% - 86px))`, `.tap-move-toolbar button, .tap-safe-z-toggle`, `#jog-arm { width: 100%; min-width: 0;`, `white-space: nowrap; overflow: hidden; text-overflow: ellipsis;`, `class="outline-active-controls"`, `class="outline-capture" hidden`, `class="outline-probe-actions"`, `id="outline-action-status"`, `class="machine-settings-actions"`, `class="machine-settings-modal-body"`, `class="machine-learned-summary"`, `class="z-step-controls"`, `class="table-scroll"`} {
+	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="tap-primary-controls"`, `class="tap-feed-stepper"`, `class="tap-safe-z-field"`, `class="tap-safe-z-toggle"`, `class="tap-coordinate-panel"`, `class="tap-coordinate-row"`, `grid-template-columns: repeat(3, 112px) 64px`, `class="work-move-label"`, `class="work-move-field is-live"`, `class="work-move-reset"`, `class="icon-reset"`, `class="tap-origin-panel"`, `class="origin-action-grid"`, `class="origin-modal"`, `class="origin-modal-fields"`, `class="origin-modal-source"`, `id="origin-set-change"`, `class="origin-set-change"`, `class="origin-row origin-row-preset"`, `class="origin-row origin-row-save"`, `class="saved-origin-label-field"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="workarea-controls"`, `class="outline-preview-controls"`, `width: min(178px, calc(100% - 86px))`, `.tap-move-toolbar button, .tap-safe-z-toggle`, `#jog-arm { width: 100%; min-width: 0;`, `white-space: nowrap; overflow: hidden; text-overflow: ellipsis;`, `class="outline-active-controls"`, `class="outline-capture" hidden`, `class="outline-probe-actions"`, `id="outline-action-status"`, `class="machine-settings-actions"`, `class="machine-settings-modal-body"`, `class="machine-settings-section"`, `class="machine-settings-fields machine-settings-travel-fields"`, `class="machine-settings-fields machine-settings-origin-fields"`, `class="machine-settings-fields machine-settings-motion-fields"`, `class="machine-settings-field"`, `class="machine-learned-summary"`, `class="z-step-controls"`, `class="table-scroll"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing layout marker %s", want)
 		}
+	}
+	for _, want := range []string{
+		`#machine-settings-modal { width: min(680px, calc(100vw - 24px)); --machine-settings-control-h: 36px; --machine-settings-label-h: 14px; }`,
+		`#machine-settings-modal .machine-settings-modal-body { gap: 0; }`,
+		`.machine-settings-travel-fields { grid-template-columns: repeat(4, minmax(0, 1fr)); }`,
+		`.machine-settings-origin-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }`,
+		`.machine-settings-motion-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }`,
+		`.machine-settings-field > input { width: 100%; min-width: 0; height: var(--machine-settings-control-h); min-height: var(--machine-settings-control-h); }`,
+		`.machine-settings-travel-fields, .machine-settings-motion-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }`,
+		`@media (max-width: 440px)`,
+		`.machine-settings-travel-fields, .machine-settings-origin-fields, .machine-settings-motion-fields { grid-template-columns: 1fr; }`,
+	} {
+		if !strings.Contains(bodyText, want) {
+			t.Errorf("index missing stable Machine settings layout marker %s", want)
+		}
+	}
+	machineSettingsIdx := strings.Index(bodyText, `id="machine-settings-modal"`)
+	machineTravelIdx := strings.Index(bodyText, `id="machine-settings-travel-title"`)
+	machineOriginIdx := strings.Index(bodyText, `id="machine-settings-origin-title"`)
+	machineMotionIdx := strings.Index(bodyText, `id="machine-settings-motion-title"`)
+	machineControllerIdx := strings.Index(bodyText, `id="machine-settings-controller-title"`)
+	machineLearnIdx := strings.Index(bodyText, `id="machine-learn"`)
+	machineLearnStatusIdx := strings.Index(bodyText, `id="machine-learn-status"`)
+	machineLearnSummaryIdx := strings.Index(bodyText, `id="machine-learned-summary"`)
+	if machineSettingsIdx < 0 || machineTravelIdx < machineSettingsIdx || machineOriginIdx < machineTravelIdx || machineMotionIdx < machineOriginIdx || machineControllerIdx < machineMotionIdx || machineLearnIdx < machineControllerIdx || machineLearnStatusIdx < machineLearnIdx || machineLearnSummaryIdx < machineLearnStatusIdx {
+		t.Error("Machine settings must remain grouped as travel, display origin, motion limits, then Learn with both status surfaces below it")
+	}
+	if strings.Contains(bodyText, `class="machine-settings-grid"`) || strings.Contains(bodyText, `.machine-settings-grid`) {
+		t.Error("Machine settings must not use the old auto-fit grid or Jog-scoped sizing contract")
 	}
 	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `<summary><h2>Gamepad</h2></summary>`, `class="tap-control-title">Jog Settings</div>`, `class="tap-control-title">Move To Work</div>`, `class="origin-group-title">Work Zero</div>`, `<span>Saved Zero</span><select id="saved-origin-select"`, `id="run-history-panel" open`, `id="jog-step-distance"`, `data-jog-step-axis=`, `id="jog-step-feedback"`, `id="jog-plot"`, `id="jog-axes"`, `id="jog-mpos"`, `id="jog-wpos"`, `id="jog-target-pos"`, `id="tap-mpos-x"`, `id="tap-mpos-y"`, `id="tap-wpos-x"`, `id="tap-wpos-y"`, `id="workarea-axis-overlay"`, `class="tap-position-readout"`, `class="outline-toolbar"`, `id="outline-probe-point"`, `probe_each_point`, `Arm Tap Move`, `class="tap-arm-panel"`, `id="alarm-feedback"`, `id="tool-feedback"`, `id="active-gcode-feedback"`, `id="tap-move-feedback"`, `id="outline-feedback"`, `id="jog-error"`, `id="backup-status"`, `class="action-feedback"`, `data-origin-feedback`, `button:not(#jog-arm)`, `min-height: 64px`, `>X</button>`} {
 		if strings.Contains(string(body), gone) {

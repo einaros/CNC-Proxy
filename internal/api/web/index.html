@@ -266,8 +266,8 @@
   .tap-control-group, .tap-coordinate-panel, .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
   .origin-group-title { min-height: var(--tap-label-h); color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; line-height: 1.1; }
   .tap-primary-controls { display: grid; grid-template-columns: minmax(150px, 174px) 96px; gap: 8px; align-items: end; }
-  .tap-move-toolbar label, .tap-field, .machine-settings-grid label { display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
-  .tap-move-toolbar label > span:first-child, .tap-field-label, .machine-settings-grid label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
+  .tap-move-toolbar label, .tap-field { display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
+  .tap-move-toolbar label > span:first-child, .tap-field-label { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
   .tap-move-toolbar input:not([type="checkbox"]), .tap-move-toolbar select, .tap-move-toolbar button, .tap-safe-z-toggle { height: var(--tap-control-h); min-height: var(--tap-control-h); }
   #jog-arm { width: 100%; min-width: 0; justify-content: center; padding: 0 10px; border-color: rgba(87,166,214,.62); background: rgba(87,166,214,.12); color: var(--text); font-size: 13px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #jog-arm:hover:not(:disabled) { border-color: rgba(87,166,214,.9); background: rgba(87,166,214,.18); }
@@ -393,7 +393,9 @@
   #workarea-target-marker { fill: none; stroke: var(--warn); stroke-width: .2; }
   dialog { width: min(760px, calc(100vw - 24px)); max-height: min(760px, calc(100dvh - 24px)); margin: auto; padding: 0; color: var(--text); background: #1a2022; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 24px 58px rgba(0,0,0,.46), 0 0 0 1px rgba(255,255,255,.025) inset; }
   dialog::backdrop { background: rgba(0,0,0,.58); backdrop-filter: blur(2px); }
+  #machine-settings-modal { width: min(680px, calc(100vw - 24px)); --machine-settings-control-h: 36px; --machine-settings-label-h: 14px; }
   .machine-settings-modal-body { max-height: calc(100dvh - 96px); overflow: auto; padding: 16px; display: grid; gap: 12px; }
+  #machine-settings-modal .machine-settings-modal-body { gap: 0; }
   .machine-settings-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
   .machine-settings-modal-head h2 { color: var(--text); }
   .probe-confirm-modal { width: min(520px, calc(100vw - 24px)); }
@@ -403,13 +405,22 @@
   .probe-confirm-warning[hidden] { display: none; }
   .probe-confirm-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .probe-confirm-actions button { min-height: 40px; justify-content: center; }
-  .machine-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+  .machine-settings-section { min-width: 0; display: grid; gap: 8px; }
+  .machine-settings-section + .machine-settings-section { padding-top: 16px; border-top: 1px solid rgba(48,56,58,.72); }
+  .machine-settings-section h3 { min-height: var(--machine-settings-label-h); margin: 0; color: var(--muted); font-size: 10px; font-weight: 700; line-height: var(--machine-settings-label-h); text-transform: uppercase; letter-spacing: .05em; }
+  .machine-settings-fields { min-width: 0; display: grid; gap: 8px; align-items: end; }
+  .machine-settings-travel-fields { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .machine-settings-origin-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .machine-settings-motion-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .machine-settings-field { min-width: 0; display: grid; grid-template-rows: var(--machine-settings-label-h) var(--machine-settings-control-h); gap: 4px; color: var(--muted); font-size: 11px; line-height: 1.2; }
+  .machine-settings-field > span { min-width: 0; min-height: var(--machine-settings-label-h); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; }
+  .machine-settings-field > input { width: 100%; min-width: 0; height: var(--machine-settings-control-h); min-height: var(--machine-settings-control-h); }
   .machine-settings-actions { display: flex; justify-content: flex-start; align-items: center; }
-  .machine-settings-actions button { min-width: 148px; }
-  #machine-learn-status { min-width: 0; min-height: 32px; display: grid; align-content: center; overflow: auto; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .machine-settings-actions button { width: 168px; min-width: 168px; height: var(--machine-settings-control-h); min-height: var(--machine-settings-control-h); }
+  #machine-learn-status { min-width: 0; height: 40px; min-height: 40px; display: grid; align-content: center; overflow: auto; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #machine-learn-status[data-kind="ok"] { color: var(--ok); }
   #machine-learn-status[data-kind="error"] { color: var(--err); }
-  .machine-learned-summary { display: grid; gap: 3px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .machine-learned-summary { min-width: 0; height: 88px; min-height: 88px; display: grid; align-content: start; gap: 3px; overflow: auto; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
   .jog-summary { display: grid; grid-template-columns: repeat(4, minmax(110px, auto)); gap: 8px 14px; align-items: center; color: var(--muted); }
   .jog-summary span { min-width: 0; }
   .jog-summary b { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
@@ -525,6 +536,7 @@
     #folder-actions { justify-content: stretch; }
     #status-bar { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); align-items: stretch; }
     #notice-clear { align-self: flex-start; }
+    .machine-settings-travel-fields, .machine-settings-motion-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 600px) {
     main { padding-inline: 10px; }
@@ -550,6 +562,9 @@
     #folder-sidebar { display: none; }
     .action-row, #alarm-actions, #folder-actions { display: grid; grid-template-columns: 1fr; }
     .action-row input[type="number"] { width: 100%; }
+  }
+  @media (max-width: 440px) {
+    .machine-settings-travel-fields, .machine-settings-origin-fields, .machine-settings-motion-fields { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -1129,22 +1144,38 @@
     <button type="button" id="machine-settings-close" aria-label="Close machine settings">Close</button>
   </div>
   <div class="machine-settings-modal-body">
-    <div class="machine-settings-grid">
-      <label><span>Travel X Min</span><input id="machine-x-min" type="number" step="1" inputmode="decimal"></label>
-      <label><span>Travel X Max</span><input id="machine-x-max" type="number" step="1" inputmode="decimal"></label>
-      <label><span>Travel Y Min</span><input id="machine-y-min" type="number" step="1" inputmode="decimal"></label>
-      <label><span>Travel Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
-      <label><span>Display Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
-      <label><span>Display Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
-      <label><span>Feed Min</span><input id="machine-feed-min" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
-      <label><span>Feed Max</span><input id="machine-feed-max" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
-      <label><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
-    </div>
-    <div class="machine-settings-actions">
-      <button type="button" id="machine-learn">Learn from machine</button>
-    </div>
-    <div id="machine-learn-status" aria-live="polite"></div>
-    <div id="machine-learned-summary" class="machine-learned-summary"></div>
+    <section class="machine-settings-section" aria-labelledby="machine-settings-travel-title">
+      <h3 id="machine-settings-travel-title">Travel envelope</h3>
+      <div class="machine-settings-fields machine-settings-travel-fields">
+        <label class="machine-settings-field"><span>Travel X Min</span><input id="machine-x-min" type="number" step="1" inputmode="decimal"></label>
+        <label class="machine-settings-field"><span>Travel X Max</span><input id="machine-x-max" type="number" step="1" inputmode="decimal"></label>
+        <label class="machine-settings-field"><span>Travel Y Min</span><input id="machine-y-min" type="number" step="1" inputmode="decimal"></label>
+        <label class="machine-settings-field"><span>Travel Y Max</span><input id="machine-y-max" type="number" step="1" inputmode="decimal"></label>
+      </div>
+    </section>
+    <section class="machine-settings-section" aria-labelledby="machine-settings-origin-title">
+      <h3 id="machine-settings-origin-title">Display origin</h3>
+      <div class="machine-settings-fields machine-settings-origin-fields">
+        <label class="machine-settings-field"><span>Display Origin X</span><input id="machine-origin-x" type="number" step="1" inputmode="decimal"></label>
+        <label class="machine-settings-field"><span>Display Origin Y</span><input id="machine-origin-y" type="number" step="1" inputmode="decimal"></label>
+      </div>
+    </section>
+    <section class="machine-settings-section" aria-labelledby="machine-settings-motion-title">
+      <h3 id="machine-settings-motion-title">Motion limits</h3>
+      <div class="machine-settings-fields machine-settings-motion-fields">
+        <label class="machine-settings-field"><span>Feed Min</span><input id="machine-feed-min" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
+        <label class="machine-settings-field"><span>Feed Max</span><input id="machine-feed-max" type="number" min="1" max="10000" step="100" inputmode="decimal"></label>
+        <label class="machine-settings-field"><span>Safe Z</span><input id="machine-safe-z" type="number" step="0.1" inputmode="decimal"></label>
+      </div>
+    </section>
+    <section class="machine-settings-section" aria-labelledby="machine-settings-controller-title">
+      <h3 id="machine-settings-controller-title">Controller profile</h3>
+      <div class="machine-settings-actions">
+        <button type="button" id="machine-learn" aria-controls="machine-learn-status machine-learned-summary">Learn from machine</button>
+      </div>
+      <div id="machine-learn-status" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="machine-learned-summary" class="machine-learned-summary"></div>
+    </section>
   </div>
 </dialog>
 <dialog id="probe-confirm-modal" class="probe-confirm-modal" aria-labelledby="probe-confirm-title" aria-describedby="probe-confirm-message probe-confirm-warning">
