@@ -260,7 +260,7 @@ test("field height samples are exported relative to the probed floor", () => {
       ],
     },
   };
-  const ctx = buildContext(["fieldProbeExportPoints", "axisValue"], [], { state });
+  const ctx = buildContext(["fieldProbeExportPoints", "fieldProbeHeightReference", "finiteOr", "axisValue"], [], { state });
   const points = JSON.parse(vm.runInContext(
     "JSON.stringify(fieldProbeExportPoints({ x: 10, y: 20, z: 500 }))",
     ctx,
@@ -269,6 +269,156 @@ test("field height samples are exported relative to the probed floor", () => {
     { x: 1, y: 2, z: 2.5 },
     { x: 3, y: 4, z: -0.5 },
   ]);
+});
+
+test("field height samples can use the captured Z origin without a floor probe", () => {
+  const state = {
+    outline: {
+      floorMachineZ: null,
+      fieldReferenceMachineZ: -20,
+      fieldReferenceKind: "work_origin",
+      fieldProbeResults: [
+        { x: 1, y: 2, z: 99, machine_x: 11, machine_y: 22, machine_z: -18.5 },
+      ],
+    },
+  };
+  const ctx = buildContext(["fieldProbeExportPoints", "fieldProbeHeightReference", "finiteOr", "axisValue"], [], { state });
+  const points = JSON.parse(vm.runInContext(
+    "JSON.stringify(fieldProbeExportPoints({ x: 10, y: 20, z: -99 }))",
+    ctx,
+  ));
+  assert.deepEqual(points.map(({ x, y, z }) => ({ x, y, z })), [
+    { x: 1, y: 2, z: 1.5 },
+  ]);
+});
+
+test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation, and captured origin", () => {
+  const results = [];
+  for (const y of [0, 10, 20]) {
+    for (const x of [0, 10, 20]) {
+      const probe_kind = x === 0 || x === 20 || y === 0 || y === 20 ? "border" : "field";
+      results.push({ x, y, z: (x + y) / 20, machine_x: -100 + x, machine_y: -50 + y, machine_z: -20 + (x + y) / 20, probe_kind });
+    }
+  }
+  const state = {
+    outline: {
+      origin: { x: -100, y: -50, z: -20 },
+      floorMachineZ: null,
+      fieldReferenceMachineZ: -20,
+      fieldReferenceKind: "work_origin",
+      fieldProbeResults: results,
+    },
+  };
+  const ctx = buildContext(
+    [
+      "buildHeightOBJ",
+      "triangleCCW",
+      "constrainedOutlineTriangles",
+      "orderedOutlineBoundaryIndices",
+      "projectPointToClosedPath",
+      "polygonIndexArea",
+      "triangulateBoundaryRing",
+      "insertTriangulationPoint",
+      "triangleCross",
+      "pointInTriangle2D",
+      "pointOnSegment2D",
+      "fieldProbeExportPoints",
+      "fieldProbeHeightReference",
+      "fieldProbeExportOrigin",
+      "cloneOutlineOrigin",
+      "finiteOr",
+      "axisValue",
+      "pathNum",
+    ],
+    [],
+    {
+      state,
+      currentWorkOrigin: () => ({ x: 500, y: 600, z: 700 }),
+      visualWorkOrigin: () => ({ x: 800, y: 900, z: 1000 }),
+      outlineEffectiveExportPoints: () => [
+        { x: 0, y: 0 },
+        { x: 20, y: 0 },
+        { x: 20, y: 20 },
+        { x: 0, y: 20 },
+      ],
+    },
+  );
+  const obj = vm.runInContext("buildHeightOBJ(fieldProbeExportOrigin())", ctx);
+  const vertices = obj.split("\n").filter((line) => line.startsWith("v "));
+  const faces = obj.split("\n").filter((line) => line.startsWith("f "));
+  assert.equal(vertices.length, 9);
+  assert.ok(faces.length >= 8, `expected a triangulated 3x3 field, got ${faces.length} faces`);
+  assert.ok(faces.every((line) => line.slice(2).split(" ").every((index) => Number(index) >= 1 && Number(index) <= 9)));
+  assert.match(obj, /# units: millimeters \(OBJ is unitless; choose Millimeter in Fusion Insert Mesh\)/);
+  assert.match(obj, /# coordinate system: CNC work coordinates, right-handed Z-up/);
+  assert.match(obj, /# axis mapping: OBJ X=CNC X, OBJ Y=CNC Y, OBJ Z=CNC Z/);
+  assert.match(obj, /# cnc_work_origin_machine_mm: -100 -50 -20/);
+  assert.ok(vertices.includes("v 0 0 0"), "captured work origin remains OBJ 0,0,0");
+  assert.ok(vertices.includes("v 10 20 1.5"), "CNC X10 Y20 Z1.5 remains OBJ X10 Y20 Z1.5");
+  assert.ok(vertices.includes("v 20 20 2"), "millimeter extents are preserved without scaling");
+  const faceIndices = faces.map((line) => line.slice(2).split(" ").map(Number));
+  const faceEdges = new Set(faceIndices.flatMap(([a, b, c]) => [[a, b], [b, c], [c, a]])
+    .map(([a, b]) => Math.min(a, b) + ":" + Math.max(a, b)));
+  const boundaryRing = [1, 2, 3, 6, 9, 8, 7, 4];
+  for (let index = 0; index < boundaryRing.length; index++) {
+    const a = boundaryRing[index];
+    const b = boundaryRing[(index + 1) % boundaryRing.length];
+    assert.ok(faceEdges.has(Math.min(a, b) + ":" + Math.max(a, b)), `outline edge ${a}-${b} is retained`);
+  }
+  assert.deepEqual([...new Set(faceIndices.flat())].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  const parsedVertices = vertices.map((line) => line.slice(2).split(" ").map(Number));
+  for (const line of faces) {
+    const [a, b, c] = line.slice(2).split(" ").map((value) => parsedVertices[Number(value) - 1]);
+    const ab = b.map((value, index) => value - a[index]);
+    const ac = c.map((value, index) => value - a[index]);
+    const normalZ = ab[0] * ac[1] - ab[1] * ac[0];
+    assert.ok(normalZ > 0, `face ${line} should point toward OBJ +Z / CNC +Z`);
+  }
+
+  state.outline.fieldProbeResults[8] = { ...state.outline.fieldProbeResults[0], machine_z: -19 };
+  const duplicateOBJ = vm.runInContext("buildHeightOBJ(fieldProbeExportOrigin())", ctx);
+  assert.equal(duplicateOBJ.split("\n").filter((line) => line.startsWith("v ")).length, 9);
+  assert.match(duplicateOBJ, /^p 9$/m, "a coincident ninth sample remains an explicit OBJ point");
+});
+
+test("OBJ triangulation locks a concave outline before covering every internal sample", () => {
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 30, y: 0 },
+    { x: 30, y: 10 },
+    { x: 10, y: 10 },
+    { x: 10, y: 30 },
+    { x: 0, y: 30 },
+  ];
+  const points = outline.map((point) => ({ ...point, probe_kind: "outline" })).concat([
+    { x: 5, y: 5, probe_kind: "field" },
+    { x: 20, y: 5, probe_kind: "field" },
+    { x: 5, y: 20, probe_kind: "field" },
+  ]);
+  const ctx = buildContext([
+    "constrainedOutlineTriangles",
+    "orderedOutlineBoundaryIndices",
+    "projectPointToClosedPath",
+    "polygonIndexArea",
+    "triangulateBoundaryRing",
+    "insertTriangulationPoint",
+    "triangleCross",
+    "triangleCCW",
+    "pointInTriangle2D",
+    "pointOnSegment2D",
+  ]);
+  const faces = JSON.parse(vm.runInContext(
+    `JSON.stringify(constrainedOutlineTriangles(${JSON.stringify(points)}, ${JSON.stringify(outline)}))`,
+    ctx,
+  ));
+  const edges = new Set(faces.flatMap(([a, b, c]) => [[a, b], [b, c], [c, a]])
+    .map(([a, b]) => Math.min(a, b) + ":" + Math.max(a, b)));
+  for (let index = 0; index < outline.length; index++) {
+    const next = (index + 1) % outline.length;
+    assert.ok(edges.has(Math.min(index, next) + ":" + Math.max(index, next)), `concave outline edge ${index}-${next} is retained`);
+  }
+  assert.equal(edges.has("2:4"), false, "triangulation does not bridge across the concave cutout");
+  assert.deepEqual([...new Set(faces.flat())].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
 test("Probe floor records the verified contact and rebases captured Z values", async () => {
@@ -286,12 +436,16 @@ test("Probe floor records the verified contact and rebases captured Z values", a
     jog: { armed: false, zProbePending: false },
   };
   const requests = [];
+  let confirmation = null;
   const ctx = buildContext(
     ["probeFloor", "rebaseOutlineToFloor", "cloneOutlineOrigin", "finiteOr", "axisValue"],
     [],
     {
       state,
-      confirm: () => true,
+      confirmProbeAction: async (options) => {
+        confirmation = options;
+        return true;
+      },
       machineReadyForOriginSet: () => true,
       isProbeToolActive: () => true,
       request: async (path, options) => {
@@ -301,6 +455,7 @@ test("Probe floor records the verified contact and rebases captured Z values", a
             verified: true,
             message: "Floor zero verified and spindle retracted to safe Z.",
             machine: { x: 1, y: 2, z: -12.5 },
+            output: "[PRB:1,2,-12.5:1]",
           }),
         };
       },
@@ -314,8 +469,19 @@ test("Probe floor records the verified contact and rebases captured Z values", a
   );
   await vm.runInContext("probeFloor()", ctx);
   assert.equal(requests.length, 1);
+  assert.equal(confirmation.title, "Probe Floor");
+  assert.match(confirmation.warning, /update the current Z origin/);
+  assert.match(confirmation.warning, /Safe Z/);
   assert.equal(requests[0].path, "/api/probe/floor");
   assert.equal(state.outline.floorMachineZ, -12.5);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.outline.floorProbe)), {
+    machine_x: 1,
+    machine_y: 2,
+    machine_z: -12.5,
+    captured_at: state.outline.floorProbe.captured_at,
+    probe_output: "[PRB:1,2,-12.5:1]",
+    verified: true,
+  });
   assert.deepEqual(JSON.parse(JSON.stringify(state.outline.origin)), { x: 10, y: 20, z: -12.5 });
   assert.equal(state.outline.points[0].z, 2.5);
   assert.equal(state.outline.fieldProbeResults[0].z, -0.5);
@@ -335,7 +501,7 @@ test("outline undo keeps the machine floor Z origin", () => {
     },
   };
   const ctx = buildContext(
-    ["restoreOutlineSnapshot", "cloneOutlinePoint", "cloneOutlineOrigin", "axisValue"],
+    ["restoreOutlineSnapshot", "cloneOutlinePoint", "cloneOutlineOrigin", "finiteOr", "axisValue"],
     [],
     {
       state,

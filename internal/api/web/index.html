@@ -348,17 +348,20 @@
   .outline-preview-controls > #outline-start { border-color: rgba(87,166,214,.72); background: rgba(87,166,214,.18); }
   .outline-active-controls { display: grid; gap: 5px; align-items: stretch; }
   .outline-active-controls label { min-height: 30px; display: flex; gap: 6px; align-items: center; justify-content: center; padding: 4px 8px; color: var(--muted); background: rgba(18,23,28,.88); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
-  .outline-capture { display: grid; gap: 8px; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
+  .outline-capture { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: 20px 36px 32px; grid-template-areas: "title title title title" "actions actions exports exports" "settings summary summary status"; gap: 6px; align-items: stretch; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
   .outline-capture[hidden] { display: none; }
-  .outline-probe-title { color: var(--text); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; }
+  .outline-probe-title { grid-area: title; display: flex; align-items: center; min-width: 0; color: var(--text); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
   .outline-probe-actions, .outline-export-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; min-width: 0; }
-  .outline-probe-actions button { width: 100%; min-width: 0; min-height: 36px; justify-content: center; }
-  .outline-probe-settings { display: grid; grid-template-columns: minmax(0, 180px); gap: 6px; align-items: end; padding-top: 4px; border-top: 1px solid var(--border); }
-  .outline-probe-settings label { display: grid; grid-template-columns: 1fr 88px; gap: 8px; align-items: center; color: var(--muted); min-height: 32px; }
-  .outline-probe-settings input[type="number"] { width: 88px; }
-  .outline-export-controls { padding-top: 4px; border-top: 1px solid var(--border); }
-  .outline-summary { color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .outline-action-status { min-height: 17px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .outline-probe-actions { grid-area: actions; }
+  .outline-probe-actions button { width: 100%; min-width: 0; height: 36px; min-height: 36px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .outline-probe-settings { grid-area: settings; display: flex; min-width: 0; align-items: center; justify-self: start; }
+  .outline-probe-settings label { display: grid; grid-template-columns: max-content 72px; gap: 8px; align-items: center; width: max-content; min-width: 0; height: 32px; color: var(--muted); }
+  .outline-probe-settings input[type="number"] { width: 72px; min-width: 0; height: 32px; }
+  .outline-export-controls { grid-area: exports; }
+  .outline-export-controls button { min-width: 0; height: 36px; min-height: 36px; padding-inline: 8px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .outline-summary, .outline-action-status { min-width: 0; height: 32px; overflow: auto; align-content: center; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .outline-summary { grid-area: summary; }
+  .outline-action-status { grid-area: status; }
   .outline-action-status[data-kind="ok"] { color: var(--ok); }
   .outline-action-status[data-kind="error"] { color: var(--danger); }
   .origin-set-change { min-height: 18px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -391,6 +394,13 @@
   .machine-settings-modal-body { max-height: calc(100dvh - 96px); overflow: auto; padding: 16px; display: grid; gap: 12px; }
   .machine-settings-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
   .machine-settings-modal-head h2 { color: var(--text); }
+  .probe-confirm-modal { width: min(520px, calc(100vw - 24px)); }
+  .probe-confirm-body { padding: 16px; display: grid; gap: 12px; }
+  .probe-confirm-message, .probe-confirm-warning { margin: 0; line-height: 1.45; }
+  .probe-confirm-warning { padding: 10px 12px; color: var(--warn); background: rgba(217,154,58,.1); border: 1px solid rgba(217,154,58,.42); border-radius: var(--radius); }
+  .probe-confirm-warning[hidden] { display: none; }
+  .probe-confirm-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .probe-confirm-actions button { min-height: 40px; justify-content: center; }
   .machine-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
   .machine-settings-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 8px; align-items: center; }
   .machine-settings-actions button { flex: 0 1 auto; }
@@ -481,6 +491,7 @@
   }
   @media (max-width: 760px) {
     header, .toolbar, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    .outline-capture { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: 20px 36px 36px 32px 32px; grid-template-areas: "title title" "actions actions" "exports exports" "settings settings" "summary status"; }
     .control-command-drawer .gamepad-axis-row, .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row label:last-child { grid-column: auto; }
     .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
@@ -986,12 +997,12 @@
                 <button type="button" id="outline-probe-floor" class="primary">Probe Floor</button>
                 <button type="button" id="outline-field-probe" class="primary">Probe Field Z</button>
               </div>
-              <div class="outline-probe-settings">
-                <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
-              </div>
               <div id="outline-export-controls" class="outline-export-controls" hidden>
                 <button type="button" id="outline-export-obj">Export OBJ</button>
                 <button type="button" id="outline-export-height">Export Height PGM</button>
+              </div>
+              <div class="outline-probe-settings">
+                <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
               </div>
               <div id="outline-summary" class="outline-summary"></div>
               <div id="outline-action-status" class="outline-action-status" role="status" aria-live="polite"></div>
@@ -1129,6 +1140,20 @@
     </div>
     <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
     <div id="machine-learned-summary" class="machine-learned-summary"></div>
+  </div>
+</dialog>
+<dialog id="probe-confirm-modal" class="probe-confirm-modal" aria-labelledby="probe-confirm-title" aria-describedby="probe-confirm-message probe-confirm-warning">
+  <div class="machine-settings-modal-head">
+    <h2 id="probe-confirm-title">Confirm probe</h2>
+    <button type="button" id="probe-confirm-close" aria-label="Cancel probe">Close</button>
+  </div>
+  <div class="probe-confirm-body">
+    <p id="probe-confirm-message" class="probe-confirm-message"></p>
+    <p id="probe-confirm-warning" class="probe-confirm-warning" hidden></p>
+    <div class="probe-confirm-actions">
+      <button type="button" id="probe-confirm-cancel">Cancel</button>
+      <button type="button" id="probe-confirm-accept" class="primary">Probe</button>
+    </div>
   </div>
 </dialog>
 <div id="status-bar" role="status" aria-live="polite" hidden>

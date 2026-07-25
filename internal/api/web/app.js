@@ -118,6 +118,8 @@ const state = {
   workarea: defaultWorkAreaView(),
 };
 
+let probeConfirmResolve = null;
+
 const gcodeView = {
   key: "",
   canvas: null,
@@ -423,7 +425,10 @@ function defaultOutlineState() {
     redo: [],
     fieldSpotGapMM: DEFAULT_FIELD_SPOT_GAP_MM,
     floorMachineZ: null,
+    floorProbe: null,
     floorProbePending: false,
+    fieldReferenceMachineZ: null,
+    fieldReferenceKind: "",
     fieldProbePreview: [],
     fieldProbeResults: [],
     fieldProbePending: false,
@@ -1967,6 +1972,22 @@ function cloneOutlineOrigin(origin) {
   return Object.keys(out).length ? out : null;
 }
 
+function cloneFloorProbe(probe) {
+  if (!probe || typeof probe !== "object") return null;
+  const machineX = Number(probe.machine_x);
+  const machineY = Number(probe.machine_y);
+  const machineZ = Number(probe.machine_z);
+  if (![machineX, machineY, machineZ].every(Number.isFinite)) return null;
+  return {
+    machine_x: machineX,
+    machine_y: machineY,
+    machine_z: machineZ,
+    captured_at: typeof probe.captured_at === "string" ? probe.captured_at : "",
+    probe_output: typeof probe.probe_output === "string" ? probe.probe_output : "",
+    verified: probe.verified !== false,
+  };
+}
+
 function outlineSnapshot() {
   const o = state.outline;
   return {
@@ -1979,7 +2000,7 @@ function outlineSnapshot() {
 
 function restoreOutlineSnapshot(snap) {
   const o = state.outline;
-  const floorZ = Number(o.floorMachineZ);
+  const floorZ = finiteOr(o.floorMachineZ, NaN);
   o.active = !!snap.active;
   o.points = snap.points.map(cloneOutlinePoint);
   o.closed = !!snap.closed;
@@ -2037,12 +2058,16 @@ function currentOutlineCapturePosition() {
 function startOutlineCapture() {
   const current = state.outline;
   const keepCurveFit = !!current.curveFit;
-  const floorZ = Number(current.floorMachineZ);
+  const floorZ = finiteOr(current.floorMachineZ, NaN);
+  const floorProbe = cloneFloorProbe(current.floorProbe);
   const pos = currentOutlineCapturePosition();
   state.outline = defaultOutlineState();
   state.outline.active = true;
   state.outline.curveFit = keepCurveFit;
-  if (Number.isFinite(floorZ)) state.outline.floorMachineZ = floorZ;
+  if (Number.isFinite(floorZ)) {
+    state.outline.floorMachineZ = floorZ;
+    state.outline.floorProbe = floorProbe;
+  }
   state.outline.origin = cloneOutlineOrigin(pos?.origin || currentWorkOrigin());
   if (Number.isFinite(floorZ)) {
     state.outline.origin = state.outline.origin || {};
@@ -2058,10 +2083,14 @@ function endOutlineCapture() {
   const current = state.outline;
   if (current.points.length && !confirm("End outline capture and clear the captured outline?")) return;
   const keepCurveFit = !!current.curveFit;
-  const floorZ = Number(current.floorMachineZ);
+  const floorZ = finiteOr(current.floorMachineZ, NaN);
+  const floorProbe = cloneFloorProbe(current.floorProbe);
   state.outline = defaultOutlineState();
   state.outline.curveFit = keepCurveFit;
-  if (Number.isFinite(floorZ)) state.outline.floorMachineZ = floorZ;
+  if (Number.isFinite(floorZ)) {
+    state.outline.floorMachineZ = floorZ;
+    state.outline.floorProbe = floorProbe;
+  }
   state.outline.feedback = "Outline cleared.";
   renderOutlineCapture();
   renderWorkArea();
@@ -2156,6 +2185,29 @@ function setOutlineFeedback(text, kind = "") {
   renderOutlineCapture();
 }
 
+function confirmProbeAction({ title, message, warning = "", confirmLabel = "Probe" }) {
+  const dialog = document.getElementById("probe-confirm-modal");
+  if (!dialog || dialog.open || probeConfirmResolve) return Promise.resolve(false);
+  document.getElementById("probe-confirm-title").textContent = title;
+  document.getElementById("probe-confirm-message").textContent = message;
+  const warningEl = document.getElementById("probe-confirm-warning");
+  warningEl.textContent = warning;
+  warningEl.hidden = !warning;
+  document.getElementById("probe-confirm-accept").textContent = confirmLabel;
+  return new Promise((resolve) => {
+    probeConfirmResolve = resolve;
+    dialog.showModal();
+    document.getElementById("probe-confirm-accept").focus();
+  });
+}
+
+function settleProbeConfirmation(accepted) {
+  const resolve = probeConfirmResolve;
+  probeConfirmResolve = null;
+  document.getElementById("probe-confirm-modal")?.close();
+  if (resolve) resolve(!!accepted);
+}
+
 function outlinePointLabel(p) {
   return "X " + fmtCoord(p.x) + " Y " + fmtCoord(p.y) + " Z " + fmtCoord(p.z);
 }
@@ -2174,6 +2226,9 @@ function outlineSummaryText() {
   if (o.fieldProbePreview.length) parts.push(o.fieldProbePreview.length + " field probes");
   if (o.fieldProbeResults.length) parts.push(o.fieldProbeResults.length + " Z samples");
   if (Number.isFinite(o.floorMachineZ)) parts.push("floor Z0 at M " + fmtCoord(o.floorMachineZ));
+  else if (o.fieldProbeResults.length && Number.isFinite(o.fieldReferenceMachineZ)) {
+    parts.push("field Z0 at M " + fmtCoord(o.fieldReferenceMachineZ));
+  }
   if (o.fieldProbeIssue) parts.push(o.fieldProbeIssue);
   return parts.join(" | ");
 }
@@ -2261,16 +2316,16 @@ function renderOutlineCapture() {
   if (fieldProbe) {
     setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe Field Z");
     fieldProbe.disabled = busy;
-    setSoftDisabled(fieldProbe, !busy && (!fieldReady || !probeActive || state.jog.armed || !Number.isFinite(o.floorMachineZ) || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
+    setSoftDisabled(fieldProbe, !busy && (!fieldReady || !probeActive || state.jog.armed || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
   }
   if (exportControls) exportControls.hidden = !o.fieldProbeResults.length;
   if (exportObj) {
     exportObj.disabled = busy;
-    setSoftDisabled(exportObj, !busy && (o.fieldProbeResults.length < 3 || !Number.isFinite(o.floorMachineZ)));
+    setSoftDisabled(exportObj, !busy && o.fieldProbeResults.length < 3);
   }
   if (exportHeight) {
     exportHeight.disabled = busy;
-    setSoftDisabled(exportHeight, !busy && (o.fieldProbeResults.length < 3 || !Number.isFinite(o.floorMachineZ)));
+    setSoftDisabled(exportHeight, !busy && o.fieldProbeResults.length < 3);
   }
   if (summary) summary.textContent = outlineSummaryText();
   if (o.feedback) {
@@ -2459,6 +2514,8 @@ function workAreaMMRadius(mm) {
 function clearFieldProbeData(keepPreview = false) {
   const o = state.outline;
   o.fieldProbeResults = [];
+  o.fieldReferenceMachineZ = null;
+  o.fieldReferenceKind = "";
   o.fieldProbeIndex = 0;
   o.fieldProbeTooDense = false;
   o.fieldProbeIssue = "";
@@ -2811,6 +2868,8 @@ function rebaseOutlineToFloor(machineZ) {
   if (!Number.isFinite(floorZ)) throw new Error("floor probe did not report a machine Z coordinate");
   const o = state.outline;
   o.floorMachineZ = floorZ;
+  o.fieldReferenceMachineZ = floorZ;
+  o.fieldReferenceKind = "floor";
   const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin()) || {};
   origin.z = floorZ;
   o.origin = origin;
@@ -2835,7 +2894,12 @@ async function probeFloor() {
     setOutlineFeedback("Floor probe requires the probe tool to be active.", "error");
     return;
   }
-  if (!confirm("Probe the floor at the current XY? The detected floor will become work Z zero.")) return;
+  if (!await confirmProbeAction({
+    title: "Probe Floor",
+    message: "Probe the floor at the current XY position?",
+    warning: "The detected contact will update the current Z origin to floor Z0. After verification, the spindle will move to Safe Z.",
+    confirmLabel: "Probe Floor",
+  })) return;
   o.floorProbePending = true;
   state.jog.zProbePending = true;
   o.feedback = "Probing floor and updating work Z zero...";
@@ -2854,6 +2918,14 @@ async function probeFloor() {
       throw new Error(result.message || "work Z zero could not be verified");
     }
     rebaseOutlineToFloor(floorZ);
+    o.floorProbe = {
+      machine_x: axisValue(result.machine, "x"),
+      machine_y: axisValue(result.machine, "y"),
+      machine_z: floorZ,
+      captured_at: new Date().toISOString(),
+      probe_output: result.output || "",
+      verified: true,
+    };
     o.feedback = (result.message || "Floor zero verified and spindle retracted to safe Z.") +
       " Work Z zero is M Z " + fmtCoord(floorZ) + " mm.";
     o.feedbackKind = "ok";
@@ -2884,10 +2956,6 @@ async function runFieldProbe() {
     setOutlineFeedback("Disarm Movement before running field Z probe.", "error");
     return;
   }
-  if (!Number.isFinite(o.floorMachineZ)) {
-    setOutlineFeedback("Probe the floor before running field Z probe.", "error");
-    return;
-  }
   updateFieldProbePreview();
   if (o.fieldProbeIssue) {
     setOutlineFeedback(o.fieldProbeIssue + ".", "error");
@@ -2903,7 +2971,26 @@ async function runFieldProbe() {
     setOutlineFeedback("Field Z probe needs at least one preview point inside the outline.", "error");
     return;
   }
-  const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin());
+  const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin()) || {};
+  const floorZ = finiteOr(o.floorMachineZ, NaN);
+  const liveOrigin = currentOutlineCapturePosition()?.origin;
+  const liveOriginZ = axisValue(liveOrigin, "z");
+  const referenceZ = Number.isFinite(floorZ) ? floorZ : (liveOriginZ === null ? axisValue(origin, "z") : liveOriginZ);
+  if (referenceZ === null || !Number.isFinite(referenceZ)) {
+    setOutlineFeedback("Field Z probe needs the current Z origin.", "error");
+    return;
+  }
+  origin.z = referenceZ;
+  const hasFloor = Number.isFinite(floorZ);
+  const referenceText = "machine Z " + fmtCoord(referenceZ) + " mm";
+  if (!await confirmProbeAction({
+    title: "Probe Field Z",
+    message: "Run " + o.fieldProbePreview.length + " field Z probes inside the captured outline?",
+    warning: hasFloor
+      ? "Z coordinates and exports will be relative to the current Z origin at " + referenceText + ", established by the recorded floor probe."
+      : "No floor probe is recorded. Z coordinates and exports will be relative to the current Z origin at " + referenceText + ". Consider probing the floor first.",
+    confirmLabel: "Probe Field Z",
+  })) return;
   const startPosition = currentOutlineCapturePosition();
   const startZMM = axisValue(startPosition?.machine, "z");
   if (startZMM === null) {
@@ -2912,6 +2999,8 @@ async function runFieldProbe() {
   }
   o.fieldProbePending = true;
   o.fieldProbeResults = [];
+  o.fieldReferenceMachineZ = referenceZ;
+  o.fieldReferenceKind = hasFloor ? "floor" : "work_origin";
   o.fieldProbeIndex = 0;
   o.feedback = "Starting field Z probe...";
   o.feedbackKind = "";
@@ -3151,6 +3240,9 @@ function outlineJSONDocument() {
       origin: cloneOutlineOrigin(o.origin),
       field_spot_gap_mm: fieldProbeSpotGap(),
       floor_machine_z: Number.isFinite(o.floorMachineZ) ? o.floorMachineZ : null,
+      floor_probe: cloneFloorProbe(o.floorProbe),
+      field_reference_machine_z: Number.isFinite(o.fieldReferenceMachineZ) ? o.fieldReferenceMachineZ : null,
+      field_reference_kind: o.fieldReferenceKind || "",
       field_probe_results: o.fieldProbeResults.map(cloneOutlinePoint),
     },
   };
@@ -3171,22 +3263,19 @@ async function loadOutlineFile(file) {
   const current = state.outline;
   if (current.points.length && !confirm("Load this outline and replace the current captured outline?")) return;
   current.filePending = true;
-  current.feedback = "Loading outline...";
-  current.feedbackKind = "";
+  setStatusMessage("outline", "Loading outline...", "", { force: true });
   renderOutlineCapture();
   try {
     const next = outlineStateFromJSON(JSON.parse(await file.text()));
     state.outline = next;
     if (next.closed && !next.fieldProbeResults.length) updateFieldProbePreview();
-    next.feedback = "Loaded outline with " + next.points.length + " points.";
-    next.feedbackKind = "ok";
     renderOutlineCapture();
     renderWorkArea();
+    setStatusMessage("outline", "Loaded outline with " + next.points.length + " points.", "ok", { force: true });
   } catch (e) {
     current.filePending = false;
-    current.feedback = "Load outline failed: " + e.message;
-    current.feedbackKind = "error";
     renderOutlineCapture();
+    setStatusMessage("outline", "Load outline failed: " + e.message, "error", { force: true });
   }
 }
 
@@ -3208,16 +3297,31 @@ function outlineStateFromJSON(doc) {
   next.curveFit = !!raw.curve_fit;
   next.origin = outlineOriginFromJSON(raw.origin);
   next.fieldSpotGapMM = boundedOutlineNumber(raw.field_spot_gap_mm, 0, 250, DEFAULT_FIELD_SPOT_GAP_MM);
+  next.floorProbe = floorProbeFromJSON(raw.floor_probe);
   const floorMachineZ = Number(raw.floor_machine_z);
-  next.floorMachineZ = raw.floor_machine_z !== null && raw.floor_machine_z !== "" && Number.isFinite(floorMachineZ)
-    ? floorMachineZ
-    : null;
+  next.floorMachineZ = next.floorProbe?.machine_z ??
+    (raw.floor_machine_z !== null && raw.floor_machine_z !== "" && Number.isFinite(floorMachineZ) ? floorMachineZ : null);
+  const fieldReferenceMachineZ = Number(raw.field_reference_machine_z);
+  next.fieldReferenceMachineZ = raw.field_reference_machine_z !== null && raw.field_reference_machine_z !== "" && Number.isFinite(fieldReferenceMachineZ)
+    ? fieldReferenceMachineZ
+    : (Number.isFinite(next.floorMachineZ) ? next.floorMachineZ : axisValue(next.origin, "z"));
+  next.fieldReferenceKind = raw.field_reference_kind === "floor" || raw.field_reference_kind === "work_origin"
+    ? raw.field_reference_kind
+    : (Number.isFinite(next.floorMachineZ) ? "floor" : (Number.isFinite(next.fieldReferenceMachineZ) ? "work_origin" : ""));
   const samples = raw.field_probe_results == null ? [] : raw.field_probe_results;
   if (!Array.isArray(samples) || samples.length > MAX_FIELD_PROBE_POINTS) {
     throw new Error("field probe samples are invalid");
   }
   next.fieldProbeResults = samples.map((point, i) => outlinePointFromJSON(point, i + 1));
   return next;
+}
+
+function floorProbeFromJSON(raw) {
+  if (raw == null) return null;
+  if (typeof raw !== "object") throw new Error("floor probe is invalid");
+  const probe = cloneFloorProbe(raw);
+  if (!probe) throw new Error("floor probe coordinates are invalid");
+  return probe;
 }
 
 function outlineOriginFromJSON(raw) {
@@ -3371,8 +3475,7 @@ function outlineEffectiveExportPoints(origin) {
 function fieldProbeExportPoints(origin) {
   const ox = axisValue(origin, "x");
   const oy = axisValue(origin, "y");
-  const floorZ = Number(state.outline.floorMachineZ);
-  if (!Number.isFinite(floorZ)) throw new Error("probe the floor before exporting field heights");
+  const reference = fieldProbeHeightReference(origin);
   return state.outline.fieldProbeResults.map((p) => {
     const mx = Number(p.machine_x);
     const my = Number(p.machine_y);
@@ -3380,10 +3483,28 @@ function fieldProbeExportPoints(origin) {
     return {
       x: Number.isFinite(mx) && ox !== null ? mx - ox : p.x,
       y: Number.isFinite(my) && oy !== null ? my - oy : p.y,
-      z: Number.isFinite(mz) ? mz - floorZ : p.z,
+      z: Number.isFinite(mz) ? mz - reference.machineZ : p.z,
       captured_at: p.captured_at,
+      probe_kind: p.probe_kind,
     };
   });
+}
+
+function fieldProbeHeightReference(origin) {
+  const o = state.outline;
+  const floorZ = finiteOr(o.floorMachineZ, NaN);
+  if (Number.isFinite(floorZ)) return { machineZ: floorZ, kind: "floor", label: "probed floor" };
+  const storedZ = finiteOr(o.fieldReferenceMachineZ, NaN);
+  if (Number.isFinite(storedZ)) return { machineZ: storedZ, kind: "work_origin", label: "captured Z origin" };
+  const originZ = axisValue(origin, "z");
+  if (originZ !== null) return { machineZ: originZ, kind: "work_origin", label: "current Z origin" };
+  throw new Error("field probe Z reference is unavailable");
+}
+
+function fieldProbeExportOrigin() {
+  const captured = cloneOutlineOrigin(state.outline.origin);
+  if (axisValue(captured, "x") !== null && axisValue(captured, "y") !== null) return captured;
+  return cloneOutlineOrigin(currentWorkOrigin() || visualWorkOrigin()) || { x: 0, y: 0 };
 }
 
 function exportExtents(table, points) {
@@ -3416,39 +3537,212 @@ function exportExtents(table, points) {
 
 function exportHeightOBJ() {
   try {
-    const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
-    const mesh = buildInterpolatedHeightGrid(origin);
-    const lines = [
-      "# CNC Proxy outline field Z probe",
-      "# units: mm",
-      "# xy coordinates: current work zero",
-      "# z coordinates: probed floor zero",
-      "# floor_machine_z_mm: " + pathNum(state.outline.floorMachineZ),
-      "o outline_field_probe",
-    ];
-    const index = Array.from({ length: mesh.rows }, () => Array(mesh.cols).fill(0));
-    let next = 1;
-    for (let r = 0; r < mesh.rows; r++) {
-      for (let c = 0; c < mesh.cols; c++) {
-        const p = mesh.points[r][c];
-        if (!p) continue;
-        index[r][c] = next++;
-        lines.push("v " + pathNum(p.x) + " " + pathNum(p.y) + " " + pathNum(p.z));
-      }
-    }
-    for (let r = 0; r < mesh.rows - 1; r++) {
-      for (let c = 0; c < mesh.cols - 1; c++) {
-        const a = index[r][c], b = index[r][c + 1], d = index[r + 1][c], e = index[r + 1][c + 1];
-        if (a && b && d) lines.push("f " + a + " " + b + " " + d);
-        if (b && e && d) lines.push("f " + b + " " + e + " " + d);
-      }
-    }
+    const origin = fieldProbeExportOrigin();
+    const obj = buildHeightOBJ(origin);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    downloadBlob("cnc-outline-height-" + stamp + ".obj", lines.join("\n") + "\n", "text/plain");
+    downloadBlob("cnc-outline-height-" + stamp + ".obj", obj, "text/plain");
     setOutlineFeedback("OBJ export started.", "ok");
   } catch (e) {
     setOutlineFeedback("OBJ export failed: " + e.message, "error");
   }
+}
+
+function buildHeightOBJ(origin) {
+  const outline = outlineEffectiveExportPoints(origin);
+  if (outline.length < 3) throw new Error("closed outline needs at least three points");
+  const samples = fieldProbeExportPoints(origin).filter((point) => [point.x, point.y, point.z].every(Number.isFinite));
+  if (samples.length < 3) throw new Error("field probe needs at least three samples");
+  const triangulationPoints = [];
+  const triangulationVertexIndices = [];
+  for (let index = 0; index < samples.length; index++) {
+    const point = samples[index];
+    if (triangulationPoints.some((seen) => Math.hypot(seen.x - point.x, seen.y - point.y) <= 0.000001)) continue;
+    triangulationPoints.push(point);
+    triangulationVertexIndices.push(index);
+  }
+  if (triangulationPoints.length < 3) throw new Error("field probe needs at least three distinct XY sample positions");
+  const faces = constrainedOutlineTriangles(triangulationPoints, outline)
+    .map((face) => face.map((index) => triangulationVertexIndices[index]));
+  if (!faces.length) throw new Error("field probe samples could not form a mesh inside the outline");
+  const reference = fieldProbeHeightReference(origin);
+  const originX = axisValue(origin, "x") ?? 0;
+  const originY = axisValue(origin, "y") ?? 0;
+  const lines = [
+    "# CNC Proxy outline field Z probe",
+    "# units: millimeters (OBJ is unitless; choose Millimeter in Fusion Insert Mesh)",
+    "# coordinate system: CNC work coordinates, right-handed Z-up",
+    "# axis mapping: OBJ X=CNC X, OBJ Y=CNC Y, OBJ Z=CNC Z",
+    "# origin: captured CNC work origin",
+    "# cnc_work_origin_machine_mm: " + pathNum(originX) + " " + pathNum(originY) + " " + pathNum(reference.machineZ),
+    "# CNC Z coordinates: " + reference.label,
+    "# z_reference_machine_mm: " + pathNum(reference.machineZ),
+    "# sample_count: " + samples.length,
+    "o outline_field_probe",
+  ];
+  for (const point of samples) {
+    lines.push("v " + pathNum(point.x) + " " + pathNum(point.y) + " " + pathNum(point.z));
+  }
+  for (const face of faces) lines.push("f " + face.map((index) => index + 1).join(" "));
+  const used = new Set(faces.flat());
+  for (let index = 0; index < samples.length; index++) {
+    if (!used.has(index)) lines.push("p " + (index + 1));
+  }
+  return lines.join("\n") + "\n";
+}
+
+function triangleCCW(points, face) {
+  const a = points[face[0]], b = points[face[1]], c = points[face[2]];
+  const twiceArea = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  return twiceArea < 0 ? [face[0], face[2], face[1]] : face;
+}
+
+function constrainedOutlineTriangles(points, outline) {
+  const boundary = orderedOutlineBoundaryIndices(points, outline);
+  if (boundary.length < 3) throw new Error("field probe needs at least three outline or border samples");
+  let faces = triangulateBoundaryRing(points, boundary);
+  const boundarySet = new Set(boundary);
+  for (let index = 0; index < points.length; index++) {
+    if (boundarySet.has(index)) continue;
+    faces = insertTriangulationPoint(points, faces, index);
+  }
+  return faces;
+}
+
+function orderedOutlineBoundaryIndices(points, outline) {
+  const projections = points.map((point, index) => ({
+    index,
+    kind: point.probe_kind,
+    projection: projectPointToClosedPath(point, outline),
+  }));
+  const hasKinds = projections.some(({ kind }) => kind === "outline" || kind === "border");
+  const boundary = projections.filter(({ kind, projection }) =>
+    hasKinds ? kind === "outline" || kind === "border" : projection.distance <= 0.05
+  );
+  boundary.sort((a, b) => a.projection.along - b.projection.along || a.index - b.index);
+  const indices = boundary.map(({ index }) => index);
+  if (polygonIndexArea(points, indices) < 0) indices.reverse();
+  return indices;
+}
+
+function projectPointToClosedPath(point, outline) {
+  let along = 0;
+  let best = { distance: Infinity, along: 0 };
+  for (let index = 0; index < outline.length; index++) {
+    const a = outline[index];
+    const b = outline[(index + 1) % outline.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (length <= 1e-12) continue;
+    const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / (length * length)));
+    const x = a.x + dx * t;
+    const y = a.y + dy * t;
+    const distance = Math.hypot(point.x - x, point.y - y);
+    if (distance < best.distance - 1e-9 || (Math.abs(distance - best.distance) <= 1e-9 && along + t * length < best.along)) {
+      best = { distance, along: along + t * length };
+    }
+    along += length;
+  }
+  return best;
+}
+
+function polygonIndexArea(points, indices) {
+  let twiceArea = 0;
+  for (let index = 0; index < indices.length; index++) {
+    const a = points[indices[index]];
+    const b = points[indices[(index + 1) % indices.length]];
+    twiceArea += a.x * b.y - b.x * a.y;
+  }
+  return twiceArea / 2;
+}
+
+function triangulateBoundaryRing(points, boundary) {
+  const remaining = boundary.slice();
+  const faces = [];
+  let guard = remaining.length * remaining.length;
+  while (remaining.length > 3 && guard-- > 0) {
+    let clipped = false;
+    for (let index = 0; index < remaining.length; index++) {
+      const prev = remaining[(index - 1 + remaining.length) % remaining.length];
+      const current = remaining[index];
+      const next = remaining[(index + 1) % remaining.length];
+      if (triangleCross(points[prev], points[current], points[next]) <= 1e-10) continue;
+      const containsBoundary = remaining.some((candidate) =>
+        candidate !== prev && candidate !== current && candidate !== next &&
+        pointInTriangle2D(points[candidate], points[prev], points[current], points[next])
+      );
+      if (containsBoundary) continue;
+      faces.push([prev, current, next]);
+      remaining.splice(index, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) throw new Error("probed outline boundary could not be triangulated");
+  }
+  if (remaining.length === 3 && Math.abs(triangleCross(points[remaining[0]], points[remaining[1]], points[remaining[2]])) > 1e-10) {
+    faces.push(triangleCCW(points, remaining));
+  }
+  if (!faces.length) throw new Error("probed outline boundary could not form a mesh");
+  return faces;
+}
+
+function insertTriangulationPoint(points, faces, pointIndex) {
+  const point = points[pointIndex];
+  const containingIndex = faces.findIndex((face) =>
+    pointInTriangle2D(point, points[face[0]], points[face[1]], points[face[2]])
+  );
+  if (containingIndex < 0) throw new Error("field probe sample lies outside the probed outline boundary");
+  const containing = faces[containingIndex];
+  const hitEdge = [[containing[0], containing[1]], [containing[1], containing[2]], [containing[2], containing[0]]]
+    .find(([a, b]) => pointOnSegment2D(point, points[a], points[b]));
+  if (hitEdge) {
+    const [edgeA, edgeB] = hitEdge;
+    const adjacent = [];
+    for (let index = 0; index < faces.length; index++) {
+      if (faces[index].includes(edgeA) && faces[index].includes(edgeB)) adjacent.push(index);
+    }
+    const adjacentSet = new Set(adjacent);
+    const nextFaces = faces.filter((_, index) => !adjacentSet.has(index));
+    for (const index of adjacent) {
+      const opposite = faces[index].find((vertex) => vertex !== edgeA && vertex !== edgeB);
+      nextFaces.push(triangleCCW(points, [edgeA, pointIndex, opposite]));
+      nextFaces.push(triangleCCW(points, [pointIndex, edgeB, opposite]));
+    }
+    return nextFaces;
+  }
+  const nextFaces = faces.slice();
+  nextFaces.splice(containingIndex, 1,
+    triangleCCW(points, [containing[0], containing[1], pointIndex]),
+    triangleCCW(points, [containing[1], containing[2], pointIndex]),
+    triangleCCW(points, [containing[2], containing[0], pointIndex]));
+  return nextFaces;
+}
+
+function triangleCross(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function pointInTriangle2D(point, a, b, c) {
+  const epsilon = 1e-8;
+  const ab = triangleCross(a, b, point);
+  const bc = triangleCross(b, c, point);
+  const ca = triangleCross(c, a, point);
+  return ab >= -epsilon && bc >= -epsilon && ca >= -epsilon;
+}
+
+function pointOnSegment2D(point, a, b) {
+  const length = Math.hypot(b.x - a.x, b.y - a.y);
+  if (length <= 1e-12 || Math.abs(triangleCross(a, b, point)) > Math.max(1, length) * 1e-8) return false;
+  const dot = (point.x - a.x) * (point.x - b.x) + (point.y - a.y) * (point.y - b.y);
+  return dot < -1e-8;
+}
+
+function pointInPolygonOrBoundary(point, polygon) {
+  if (pointInPolygon(point, polygon)) return true;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    if (distancePointToSegment(point, polygon[j], polygon[i]) <= 0.00001) return true;
+  }
+  return false;
 }
 
 function exportHeightImage() {
@@ -3463,13 +3757,14 @@ function exportHeightImage() {
     const minZ = Math.min(...values);
     const maxZ = Math.max(...values);
     const span = maxZ - minZ || 1;
+    const reference = fieldProbeHeightReference(origin);
     const rows = [
       "P2",
       "# CNC Proxy outline height image",
       "# units: mm",
       "# xy coordinates: current work zero",
-      "# z coordinates: probed floor zero",
-      "# floor_machine_z_mm: " + pathNum(state.outline.floorMachineZ),
+      "# z coordinates: " + reference.label,
+      "# z_reference_machine_mm: " + pathNum(reference.machineZ),
       "# x_min_mm: " + pathNum(mesh.xMin),
       "# y_min_mm: " + pathNum(mesh.yMin),
       "# probe_diameter_mm: " + pathNum(PROBE_SPOT_DIAMETER_MM),
@@ -3515,7 +3810,7 @@ function buildInterpolatedHeightGrid(origin) {
     const row = [];
     for (let c = 0; c < cols; c++) {
       const x = ext.x_min + c * actualX;
-      if (!pointInPolygon({ x, y }, outline)) {
+      if (!pointInPolygonOrBoundary({ x, y }, outline)) {
         row.push(null);
         continue;
       }
@@ -7439,6 +7734,13 @@ function init() {
   bindButtonAction(document.getElementById("outline-probe-floor"), probeFloor);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);
+  bindButtonAction(document.getElementById("probe-confirm-close"), () => settleProbeConfirmation(false));
+  bindButtonAction(document.getElementById("probe-confirm-cancel"), () => settleProbeConfirmation(false));
+  bindButtonAction(document.getElementById("probe-confirm-accept"), () => settleProbeConfirmation(true));
+  document.getElementById("probe-confirm-modal").addEventListener("cancel", (e) => {
+    e.preventDefault();
+    settleProbeConfirmation(false);
+  });
   bindButtonAction(document.getElementById("machine-settings-open"), openMachineSettings);
   bindButtonAction(document.getElementById("machine-settings-close"), closeMachineSettings);
   bindButtonAction(document.getElementById("machine-learn"), learnMachineParameters);

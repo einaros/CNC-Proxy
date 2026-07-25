@@ -817,6 +817,16 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing %s", want)
 		}
 	}
+	for _, want := range []string{`id="probe-confirm-modal"`, `id="probe-confirm-message"`, `id="probe-confirm-warning"`, `id="probe-confirm-accept"`, `id="probe-confirm-cancel"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing %s", want)
+		}
+	}
+	for _, want := range []string{`grid-template-rows: 20px 36px 32px`, `grid-template-areas: "title title title title" "actions actions exports exports" "settings summary summary status"`, `grid-template-columns: max-content 72px`, `grid-template-areas: "title title" "actions actions" "exports exports" "settings settings" "summary status"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing compact Outline Probe layout %s", want)
+		}
+	}
 	for _, want := range []string{`Arm Movement`, `class="command-movement-arm"`, `Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `data-origin-zero="x"`, `data-origin-zero="y"`, `data-origin-zero="z"`, `Set XYZ`, `id="origin-set-xyz-open"`, `id="origin-xyz-modal"`, `id="origin-xyz-x"`, `id="origin-xyz-y"`, `id="origin-xyz-z"`, `id="origin-xyz-apply"`, `Set Origin`, `id="origin-set-open"`, `id="origin-set-modal"`, `id="origin-set-source"`, `id="origin-set-x"`, `id="origin-set-y"`, `id="origin-set-apply"`, `Origin Presets`, `id="origin-presets-open"`, `id="origin-presets-modal"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="origin-probe-z"`, `Probe Z`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `aria-label="Machine XY travel area"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `Outline Probe`, `id="outline-probe-floor"`, `Probe Floor`, `id="outline-close"`, `id="outline-load"`, `id="outline-save"`, `id="outline-file"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `Probe Field Z`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings-open"`, `id="machine-settings-modal"`, `id="machine-settings-close"`, `Travel X Min`, `Travel X Max`, `Travel Y Min`, `Travel Y Max`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learn-status"`, `id="machine-learned-summary"`, `<summary>Gamepad</summary>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-outline-button"`, `gamepad-outline-button-help`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
@@ -830,10 +840,10 @@ func TestWebUIServed(t *testing.T) {
 	}
 	probeFloorIndex := strings.Index(indexText, `id="outline-probe-floor"`)
 	probeFieldIndex := strings.Index(indexText, `id="outline-field-probe"`)
-	probeSettingsIndex := strings.Index(indexText, `class="outline-probe-settings"`)
 	probeExportIndex := strings.Index(indexText, `id="outline-export-controls"`)
-	if probeFloorIndex < 0 || probeFieldIndex < probeFloorIndex || probeSettingsIndex < probeFieldIndex || probeExportIndex < probeSettingsIndex {
-		t.Errorf("Outline Probe controls are not ordered as primary actions, settings, then exports")
+	probeSettingsIndex := strings.Index(indexText, `class="outline-probe-settings"`)
+	if probeFloorIndex < 0 || probeFieldIndex < probeFloorIndex || probeExportIndex < probeFieldIndex || probeSettingsIndex < probeExportIndex {
+		t.Errorf("Outline Probe controls are not ordered as title, button row, then settings")
 	}
 	outlineLoadIdx := strings.Index(bodyText, `id="outline-load"`)
 	outlineSaveIdx := strings.Index(bodyText, `id="outline-save"`)
@@ -907,6 +917,11 @@ func TestWebUIServed(t *testing.T) {
 	for _, want := range []string{"defaultOutlineState", "startOutlineCapture", "endOutlineCapture", "addOutlinePoint", "undoOutline", "redoOutline", "closeOutline", "toggleOutlineCurveFit", "traceOutline", "traceOutlineMachinePoints", "/api/outline/trace", "probeFloor", "rebaseOutlineToFloor", "/api/probe/floor", "floor_machine_z", "runFieldProbe", "probeZAtWorkPoint", "currentOutlineCapturePosition", "retractZMM: startZMM", "/api/probe/z", "PROBE_SPOT_DIAMETER_MM", "OUTLINE_CURVE_TOLERANCE_MM", "MAX_EFFECTIVE_OUTLINE_POINTS", "effectiveOutlineGeometry", "outlineEffectiveExportPoints", "buildBoundaryProbePoints", "buildHexProbeCandidate", "probeSpotFitsPolygon", "renderWorkAreaOutline", "renderWorkAreaFieldProbePreview", "outlinePathD", "outlineCubicSegments", "buildOutlineDXF", "outlineJSONDocument", "saveOutlineJSON", "loadOutlineFile", "outlineStateFromJSON", "application/json", "application/dxf", "$INSUNITS", "AC1009", "POLYLINE", "VERTEX", "SEQEND", "exportHeightOBJ", "exportHeightImage", "safe_z_enabled", "safe_z_disabled"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing outline capture behavior %s", want)
+		}
+	}
+	for _, want := range []string{"confirmProbeAction", "floor_probe", "field_reference_machine_z", "fieldProbeHeightReference", "fieldProbeExportOrigin", "buildHeightOBJ", "constrainedOutlineTriangles"} {
+		if !strings.Contains(string(jsBody), want) {
+			t.Errorf("app.js missing probe confirmation, persistence, or mesh behavior %s", want)
 		}
 	}
 	for _, gone := range []string{"fieldProbeSafeZ", "field_safe_z_mm", "retractAboveMM: travelZMM"} {
