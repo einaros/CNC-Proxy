@@ -89,6 +89,7 @@ const state = {
     armQueuedAction: "",
     targetPending: 0,
     targetMotionPending: 0,
+    workMovePending: 0,
     targetLabel: "",
     zStepPending: 0,
     zStepLabel: "",
@@ -5484,6 +5485,7 @@ function connectJog() {
     if (state.jog.targetPending || state.jog.targetMotionPending) {
       state.jog.targetPending = 0;
       state.jog.targetMotionPending = 0;
+      cancelWorkCoordinateMove();
       state.jog.tapFeedback = "Move failed: jog service disconnected.";
       state.jog.tapFeedbackKind = "error";
     }
@@ -5703,6 +5705,24 @@ function resetWorkMoveInput(axis) {
   renderWorkMoveControls();
 }
 
+function completeWorkCoordinateMove(seq) {
+  if (!seq || seq !== state.jog.workMovePending) return false;
+  state.jog.workMovePending = 0;
+  clearControlDrafts("work-move-x", "work-move-y", "work-move-z");
+  const { wpos } = currentAxisValues();
+  for (const axis of ["x", "y", "z"]) {
+    const value = axisValue(wpos, axis);
+    const input = workMoveInput(axis);
+    if (input && value !== null) input.value = formatOriginValue(value);
+  }
+  return true;
+}
+
+function cancelWorkCoordinateMove(seq) {
+  if (!state.jog.workMovePending || (seq && seq !== state.jog.workMovePending)) return;
+  state.jog.workMovePending = 0;
+}
+
 function workMoveTargetsFromInputs() {
   const origin = currentWorkOrigin();
   if (!origin) throw new Error("Current work origin is unavailable.");
@@ -5763,6 +5783,7 @@ function sendWorkCoordinateMove() {
   state.jog.target = { ...base, ...move.machineTargets };
   state.jog.targetPending = seq;
   state.jog.targetMotionPending = seq;
+  state.jog.workMovePending = seq;
   state.jog.targetLabel = move.label;
   state.jog.tapFeedback = "Sending move to " + move.label + "...";
   state.jog.tapFeedbackKind = "";
@@ -6421,6 +6442,7 @@ function applyJogEvent(ev) {
       state.jog.targetPending = 0;
       state.jog.targetMotionPending = 0;
       state.jog.target = ev.target || state.jog.target;
+      completeWorkCoordinateMove(ev.seq);
       state.jog.tapFeedback = "Reached " + state.jog.targetLabel + ".";
       state.jog.tapFeedbackKind = "ok";
     }
@@ -6442,6 +6464,7 @@ function applyJogEvent(ev) {
     if (ev.seq && (ev.seq === state.jog.targetPending || ev.seq === state.jog.targetMotionPending)) {
       state.jog.targetPending = 0;
       state.jog.targetMotionPending = 0;
+      cancelWorkCoordinateMove(ev.seq);
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
@@ -6458,6 +6481,7 @@ function applyJogEvent(ev) {
     if (!ev.seq && (state.jog.targetPending || state.jog.targetMotionPending)) {
       state.jog.targetPending = 0;
       state.jog.targetMotionPending = 0;
+      cancelWorkCoordinateMove();
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }

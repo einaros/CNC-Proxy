@@ -482,6 +482,35 @@ test("Trace outline waits for a pending Tap Move target", async () => {
   assert.equal(requests, 0);
 });
 
+test("completed Move To Work returns its coordinate fields to live values", () => {
+  const inputs = {
+    "work-move-x": { value: "stale", dataset: { dirty: "1" }, setCustomValidity: () => {} },
+    "work-move-y": { value: "stale", dataset: { dirty: "1" }, setCustomValidity: () => {} },
+    "work-move-z": { value: "stale", dataset: { dirty: "1" }, setCustomValidity: () => {} },
+  };
+  const state = {
+    jog: { workMovePending: 42, armed: true, wpos: { x: 1.25, y: -2.5, z: 0 } },
+    machine: { wpos: { x: 99, y: 99, z: 99 } },
+  };
+  const ctx = buildContext(["axisValue", "currentAxisValues", "workMoveInput", "workMoveInputIsLive", "formatOriginValue", "completeWorkCoordinateMove"], [], {
+    state,
+    document: { getElementById: (id) => inputs[id] || null },
+    clearControlDrafts: (...ids) => {
+      for (const id of ids) delete inputs[id].dataset.dirty;
+    },
+  });
+  assert.equal(vm.runInContext("completeWorkCoordinateMove(42)", ctx), true);
+  assert.equal(state.jog.workMovePending, 0);
+  for (const input of Object.values(inputs)) {
+    assert.equal(ctx.workMoveInputIsLive(input), true);
+  }
+  assert.deepEqual(Object.fromEntries(Object.entries(inputs).map(([id, input]) => [id, input.value])), {
+    "work-move-x": "1.25",
+    "work-move-y": "-2.5",
+    "work-move-z": "0",
+  });
+});
+
 test("jog motion keeps observed machine position distinct from its prediction", () => {
   const state = {
     jog: {
