@@ -919,7 +919,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("app.js missing outline capture behavior %s", want)
 		}
 	}
-	for _, want := range []string{"confirmProbeAction", "floor_probe", "field_reference_machine_z", "fieldProbeHeightReference", "fieldProbeExportOrigin", "buildHeightOBJ", "constrainedOutlineTriangles"} {
+	for _, want := range []string{"confirmProbeAction", "floor_probe", "field_reference_machine_z", "fieldProbeHeightReference", "fieldProbeExportOrigin", "buildHeightOBJ", "constrainedOutlineTriangles", "improveConstrainedDelaunay"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing probe confirmation, persistence, or mesh behavior %s", want)
 		}

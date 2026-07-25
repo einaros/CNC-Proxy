@@ -3572,6 +3572,7 @@ function buildHeightOBJ(origin) {
     "# units: millimeters (OBJ is unitless; choose Millimeter in Fusion Insert Mesh)",
     "# coordinate system: CNC work coordinates, right-handed Z-up",
     "# axis mapping: OBJ X=CNC X, OBJ Y=CNC Y, OBJ Z=CNC Z",
+    "# triangulation: constrained Delaunay with locked outline edges",
     "# origin: captured CNC work origin",
     "# cnc_work_origin_machine_mm: " + pathNum(originX) + " " + pathNum(originY) + " " + pathNum(reference.machineZ),
     "# CNC Z coordinates: " + reference.label,
@@ -3605,7 +3606,10 @@ function constrainedOutlineTriangles(points, outline) {
     if (boundarySet.has(index)) continue;
     faces = insertTriangulationPoint(points, faces, index);
   }
-  return faces;
+  const constrainedEdges = new Set(boundary.map((vertex, index) =>
+    triangulationEdgeKey(vertex, boundary[(index + 1) % boundary.length])
+  ));
+  return improveConstrainedDelaunay(points, faces, constrainedEdges);
 }
 
 function orderedOutlineBoundaryIndices(points, outline) {
@@ -3735,6 +3739,77 @@ function pointOnSegment2D(point, a, b) {
   if (length <= 1e-12 || Math.abs(triangleCross(a, b, point)) > Math.max(1, length) * 1e-8) return false;
   const dot = (point.x - a.x) * (point.x - b.x) + (point.y - a.y) * (point.y - b.y);
   return dot < -1e-8;
+}
+
+function improveConstrainedDelaunay(points, faces, constrainedEdges) {
+  const optimized = faces.map((face) => triangleCCW(points, face));
+  const maxPasses = Math.max(16, points.length * 4);
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let flipCount = 0;
+    const touchedFaces = new Set();
+    for (const edge of triangulationEdges(optimized).values()) {
+      if (edge.faces.length !== 2 || constrainedEdges.has(edge.key)) continue;
+      const [firstIndex, secondIndex] = edge.faces;
+      if (touchedFaces.has(firstIndex) || touchedFaces.has(secondIndex)) continue;
+      const oppositeA = optimized[firstIndex].find((vertex) => vertex !== edge.a && vertex !== edge.b);
+      const oppositeB = optimized[secondIndex].find((vertex) => vertex !== edge.a && vertex !== edge.b);
+      if (oppositeA === undefined || oppositeB === undefined || oppositeA === oppositeB) continue;
+      if (!quadrilateralAllowsFlip(points, edge.a, edge.b, oppositeA, oppositeB)) continue;
+      if (!pointInsideCircumcircle(points[edge.a], points[edge.b], points[oppositeA], points[oppositeB])) continue;
+      optimized[firstIndex] = triangleCCW(points, [oppositeA, oppositeB, edge.a]);
+      optimized[secondIndex] = triangleCCW(points, [oppositeB, oppositeA, edge.b]);
+      touchedFaces.add(firstIndex);
+      touchedFaces.add(secondIndex);
+      flipCount++;
+    }
+    if (!flipCount) return optimized;
+  }
+  throw new Error("constrained field triangulation did not converge");
+}
+
+function triangulationEdges(faces) {
+  const edges = new Map();
+  for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
+    const face = faces[faceIndex];
+    for (const [a, b] of [[face[0], face[1]], [face[1], face[2]], [face[2], face[0]]]) {
+      const key = triangulationEdgeKey(a, b);
+      const edge = edges.get(key) || { key, a: Math.min(a, b), b: Math.max(a, b), faces: [] };
+      edge.faces.push(faceIndex);
+      edges.set(key, edge);
+    }
+  }
+  return edges;
+}
+
+function triangulationEdgeKey(a, b) {
+  return Math.min(a, b) + ":" + Math.max(a, b);
+}
+
+function quadrilateralAllowsFlip(points, edgeA, edgeB, oppositeA, oppositeB) {
+  const sideA = triangleCross(points[oppositeA], points[oppositeB], points[edgeA]);
+  const sideB = triangleCross(points[oppositeA], points[oppositeB], points[edgeB]);
+  const scale = Math.max(
+    Math.hypot(points[oppositeB].x - points[oppositeA].x, points[oppositeB].y - points[oppositeA].y),
+    1,
+  );
+  return sideA * sideB < -Math.pow(scale, 4) * 1e-18;
+}
+
+function pointInsideCircumcircle(a, b, c, point) {
+  const ax = a.x - point.x;
+  const ay = a.y - point.y;
+  const bx = b.x - point.x;
+  const by = b.y - point.y;
+  const cx = c.x - point.x;
+  const cy = c.y - point.y;
+  const determinant =
+    (ax * ax + ay * ay) * (bx * cy - by * cx) -
+    (bx * bx + by * by) * (ax * cy - ay * cx) +
+    (cx * cx + cy * cy) * (ax * by - ay * bx);
+  const orientation = triangleCross(a, b, c);
+  const scale = Math.max(Math.abs(ax), Math.abs(ay), Math.abs(bx), Math.abs(by), Math.abs(cx), Math.abs(cy), 1);
+  const epsilon = Math.pow(scale, 4) * 1e-12;
+  return orientation > 0 ? determinant > epsilon : determinant < -epsilon;
 }
 
 function pointInPolygonOrBoundary(point, polygon) {

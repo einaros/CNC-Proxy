@@ -322,6 +322,11 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
       "triangleCross",
       "pointInTriangle2D",
       "pointOnSegment2D",
+      "improveConstrainedDelaunay",
+      "triangulationEdges",
+      "triangulationEdgeKey",
+      "quadrilateralAllowsFlip",
+      "pointInsideCircumcircle",
       "fieldProbeExportPoints",
       "fieldProbeHeightReference",
       "fieldProbeExportOrigin",
@@ -352,6 +357,7 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
   assert.match(obj, /# units: millimeters \(OBJ is unitless; choose Millimeter in Fusion Insert Mesh\)/);
   assert.match(obj, /# coordinate system: CNC work coordinates, right-handed Z-up/);
   assert.match(obj, /# axis mapping: OBJ X=CNC X, OBJ Y=CNC Y, OBJ Z=CNC Z/);
+  assert.match(obj, /# triangulation: constrained Delaunay with locked outline edges/);
   assert.match(obj, /# cnc_work_origin_machine_mm: -100 -50 -20/);
   assert.ok(vertices.includes("v 0 0 0"), "captured work origin remains OBJ 0,0,0");
   assert.ok(vertices.includes("v 10 20 1.5"), "CNC X10 Y20 Z1.5 remains OBJ X10 Y20 Z1.5");
@@ -406,6 +412,11 @@ test("OBJ triangulation locks a concave outline before covering every internal s
     "triangleCCW",
     "pointInTriangle2D",
     "pointOnSegment2D",
+    "improveConstrainedDelaunay",
+    "triangulationEdges",
+    "triangulationEdgeKey",
+    "quadrilateralAllowsFlip",
+    "pointInsideCircumcircle",
   ]);
   const faces = JSON.parse(vm.runInContext(
     `JSON.stringify(constrainedOutlineTriangles(${JSON.stringify(points)}, ${JSON.stringify(outline)}))`,
@@ -419,6 +430,43 @@ test("OBJ triangulation locks a concave outline before covering every internal s
   }
   assert.equal(edges.has("2:4"), false, "triangulation does not bridge across the concave cutout");
   assert.deepEqual([...new Set(faces.flat())].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test("constrained Delaunay replaces a poor interior diagonal but never a boundary edge", () => {
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 4, y: 0 },
+    { x: 3, y: 1 },
+    { x: 0, y: 3 },
+  ];
+  const points = outline.map((point) => ({ ...point, probe_kind: "outline" }));
+  const ctx = buildContext([
+    "constrainedOutlineTriangles",
+    "orderedOutlineBoundaryIndices",
+    "projectPointToClosedPath",
+    "polygonIndexArea",
+    "triangulateBoundaryRing",
+    "insertTriangulationPoint",
+    "triangleCross",
+    "triangleCCW",
+    "pointInTriangle2D",
+    "pointOnSegment2D",
+    "improveConstrainedDelaunay",
+    "triangulationEdges",
+    "triangulationEdgeKey",
+    "quadrilateralAllowsFlip",
+    "pointInsideCircumcircle",
+  ]);
+  const faces = JSON.parse(vm.runInContext(
+    `JSON.stringify(constrainedOutlineTriangles(${JSON.stringify(points)}, ${JSON.stringify(outline)}))`,
+    ctx,
+  ));
+  const edges = new Set(faces.flatMap(([a, b, c]) => [[a, b], [b, c], [c, a]])
+    .map(([a, b]) => Math.min(a, b) + ":" + Math.max(a, b)));
+
+  for (const edge of ["0:1", "1:2", "2:3", "0:3"]) assert.ok(edges.has(edge), `locked edge ${edge} remains`);
+  assert.ok(edges.has("0:2"), "Delaunay-quality diagonal is selected");
+  assert.equal(edges.has("1:3"), false, "inferior ear-clipping diagonal is removed");
 });
 
 test("Probe floor records the verified contact and rebases captured Z values", async () => {
