@@ -1542,6 +1542,33 @@ func TestProbeZFieldRetractsAboveFirstContactWithoutCrossingSafeCeiling(t *testi
 	}
 }
 
+func TestProbeFloorUsesConfiguredSafeZ(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	ui := svc.UISettings()
+	ui.Machine.SafeZMM = -6
+	if _, err := svc.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+	status := "<Idle|MPos:20,30,-10|WPos:12.5,-3.25,1|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	m.SetGcodeReply("G38.2 Z-20.0000 F50.0000", "[PRB:20.0000,30.0000,-14.0000:1]")
+
+	res, err := svc.ProbeFloor()
+	if err != nil {
+		t.Fatalf("ProbeFloor: %v", err)
+	}
+	if !res.Verified || res.Machine["z"] != -14 {
+		t.Fatalf("floor probe result = %+v", res)
+	}
+	want := []string{"G53 G0 Z-10.0000", "G38.2 Z-20.0000 F50.0000", "G10 L20 P0 Z0", "G53 G0 Z-6.0000"}
+	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
+		t.Fatalf("floor probe gcodes = %v, want %v", got, want)
+	}
+}
+
 func TestSafeZTargetUsesFirmwareClearanceAsTheSharedCeiling(t *testing.T) {
 	svc, _, _ := serviceWithMachine(t)
 	ui := svc.UISettings()

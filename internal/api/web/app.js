@@ -421,8 +421,6 @@ function defaultOutlineState() {
     origin: null,
     undo: [],
     redo: [],
-    probeEachPoint: false,
-    pointProbePending: false,
     fieldSpotGapMM: DEFAULT_FIELD_SPOT_GAP_MM,
     floorMachineZ: null,
     floorProbePending: false,
@@ -1122,7 +1120,7 @@ function renderJog() {
   else clearNotice("jog-availability");
   const arm = document.getElementById("jog-arm");
   setTextIfChanged(arm, j.armPending ? (j.armPendingAction === "arm" ? "Arming..." : "Disarming...") :
-    (j.armQueuedAction ? "Connecting..." : (j.armed ? "Disarm Tap Move" : "Arm Tap Move")));
+    (j.armQueuedAction ? "Connecting..." : (j.armed ? "Disarm Movement" : "Arm Movement")));
   arm.classList.toggle("armed", j.armed);
   const armBusy = !!j.armPending || !!j.armQueuedAction;
   const originBusy = hasPendingOriginOperation();
@@ -2080,8 +2078,8 @@ async function addOutlinePoint() {
     setOutlineFeedback("Undo close before adding another point.", "error");
     return;
   }
-  if (o.pointProbePending || o.fieldProbePending) return;
-  let capture = {
+  if (o.fieldProbePending) return;
+  const capture = {
     id: newID("outline-point"),
     x: pos.work.x,
     y: pos.work.y,
@@ -2091,42 +2089,6 @@ async function addOutlinePoint() {
     machine_z: pos.machine.z,
     captured_at: new Date().toISOString(),
   };
-  if (o.probeEachPoint) {
-    if (!isProbeToolActive()) {
-      setOutlineFeedback("Probe Z requires the probe tool to be active.", "error");
-      return;
-    }
-    if (state.jog.armed) {
-      setOutlineFeedback("Disarm tap move before probing Z for an outline point.", "error");
-      return;
-    }
-    o.pointProbePending = true;
-    o.feedback = "Probing Z for point...";
-    o.feedbackKind = "";
-    renderOutlineCapture();
-    try {
-      const probed = await probeZAtWorkPoint(pos.work, { moveXY: false, origin: pos.origin });
-      capture = {
-        ...capture,
-        x: probed.x,
-        y: probed.y,
-        z: probed.z,
-        machine_x: probed.machine_x,
-        machine_y: probed.machine_y,
-        machine_z: probed.machine_z,
-        probed: true,
-        probe_output: probed.output,
-      };
-    } catch (e) {
-      o.feedback = "Point probe failed: " + e.message;
-      o.feedbackKind = "error";
-      return;
-    } finally {
-      o.pointProbePending = false;
-      renderOutlineCapture();
-      pollMachine();
-    }
-  }
   pushOutlineUndo();
   o.active = true;
   if (!o.origin) o.origin = cloneOutlineOrigin(pos.origin);
@@ -2214,6 +2176,7 @@ function outlineSummaryText() {
 
 function renderOutlineCapture() {
   const o = state.outline;
+  const panel = document.getElementById("outline-capture");
   const start = document.getElementById("outline-start");
   const activeControls = document.getElementById("outline-active-controls");
   const end = document.getElementById("outline-end");
@@ -2225,12 +2188,8 @@ function renderOutlineCapture() {
   const load = document.getElementById("outline-load");
   const save = document.getElementById("outline-save");
   const curve = document.getElementById("outline-curve-fit");
-  const probeControls = document.getElementById("outline-probe-controls");
-  const probeWrap = document.getElementById("outline-probe-point-wrap");
-  const probePoint = document.getElementById("outline-probe-point");
   const probeFloor = document.getElementById("outline-probe-floor");
   const exp = document.getElementById("outline-export");
-  const fieldControls = document.getElementById("outline-field-controls");
   const spacing = document.getElementById("outline-field-spacing");
   const fieldProbe = document.getElementById("outline-field-probe");
   const exportControls = document.getElementById("outline-export-controls");
@@ -2238,9 +2197,10 @@ function renderOutlineCapture() {
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
   const actionStatus = document.getElementById("outline-action-status");
-  const busy = !!o.pointProbePending || !!o.floorProbePending || !!o.fieldProbePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
+  const busy = !!o.floorProbePending || !!o.fieldProbePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
+  if (panel) panel.hidden = !o.active;
   if (start) {
     start.hidden = !!o.active;
     start.disabled = busy;
@@ -2259,7 +2219,7 @@ function renderOutlineCapture() {
   if (add) {
     add.disabled = busy;
     setSoftDisabled(add, !busy && !!o.closed);
-    setTextIfChanged(add, o.pointProbePending ? "Probing..." : "Add point");
+    setTextIfChanged(add, "Add point");
   }
   if (undo) undo.disabled = busy || !o.undo.length;
   if (redo) redo.disabled = busy || !o.redo.length;
@@ -2277,17 +2237,10 @@ function renderOutlineCapture() {
     curve.checked = !!o.curveFit;
     curve.disabled = busy || o.points.length < 2;
   }
-  if (probeControls) probeControls.hidden = !probeActive;
-  if (probeWrap) probeWrap.hidden = !o.active || !probeActive;
-  if (probePoint) {
-    if (!probeActive) o.probeEachPoint = false;
-    probePoint.checked = !!o.probeEachPoint;
-    probePoint.disabled = busy;
-  }
   if (probeFloor) {
     probeFloor.disabled = busy;
     setSoftDisabled(probeFloor, !busy && (!probeActive || state.jog.armed || !machineReadyForOriginSet()));
-    setTextIfChanged(probeFloor, o.floorProbePending ? "Probing floor..." : "Probe floor");
+    setTextIfChanged(probeFloor, o.floorProbePending ? "Probing Floor..." : "Probe Floor");
   }
   if (exp) {
     exp.disabled = busy;
@@ -2297,15 +2250,14 @@ function renderOutlineCapture() {
     save.disabled = busy;
     setSoftDisabled(save, !busy && o.points.length < 2);
   }
-  if (fieldControls) fieldControls.hidden = !fieldReady;
   if (spacing) {
     if (!controlLocallyOwned(spacing)) spacing.value = pathNum(fieldProbeSpotGap());
     spacing.disabled = busy;
   }
   if (fieldProbe) {
-    setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe field Z");
+    setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe Field Z");
     fieldProbe.disabled = busy;
-    setSoftDisabled(fieldProbe, !busy && (!probeActive || state.jog.armed || !Number.isFinite(o.floorMachineZ) || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
+    setSoftDisabled(fieldProbe, !busy && (!fieldReady || !probeActive || state.jog.armed || !Number.isFinite(o.floorMachineZ) || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
   }
   if (exportControls) exportControls.hidden = !o.fieldProbeResults.length;
   if (exportObj) {
@@ -2335,11 +2287,6 @@ function toggleOutlineCurveFit() {
   updateFieldProbePreview();
   renderOutlineCapture();
   renderWorkArea();
-}
-
-function toggleOutlineProbePoint() {
-  state.outline.probeEachPoint = !!document.getElementById("outline-probe-point")?.checked;
-  renderOutlineCapture();
 }
 
 function updateOutlineFieldSpacing() {
@@ -2871,9 +2818,9 @@ function rebaseOutlineToFloor(machineZ) {
 
 async function probeFloor() {
   const o = state.outline;
-  if (state.jog.zProbePending || o.floorProbePending || o.pointProbePending || o.fieldProbePending || o.tracePending) return;
+  if (state.jog.zProbePending || o.floorProbePending || o.fieldProbePending || o.tracePending) return;
   if (state.jog.armed) {
-    setOutlineFeedback("Disarm tap move before probing the floor.", "error");
+    setOutlineFeedback("Disarm Movement before probing the floor.", "error");
     return;
   }
   if (!machineReadyForOriginSet()) {
@@ -2892,7 +2839,7 @@ async function probeFloor() {
   renderOutlineCapture();
   renderJog();
   try {
-    const resp = await request("/api/probe/auto-z", {
+    const resp = await request("/api/probe/floor", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
@@ -2903,7 +2850,8 @@ async function probeFloor() {
       throw new Error(result.message || "work Z zero could not be verified");
     }
     rebaseOutlineToFloor(floorZ);
-    o.feedback = "Floor verified. Work Z zero is M Z " + fmtCoord(floorZ) + " mm.";
+    o.feedback = (result.message || "Floor zero verified and spindle retracted to safe Z.") +
+      " Work Z zero is M Z " + fmtCoord(floorZ) + " mm.";
     o.feedbackKind = "ok";
   } catch (e) {
     o.feedback = "Floor probe failed: " + e.message;
@@ -2919,13 +2867,17 @@ async function probeFloor() {
 
 async function runFieldProbe() {
   const o = state.outline;
-  if (!o.active || !o.closed || o.points.length < 3) return;
+  if (!o.active) return;
+  if (!o.closed || o.points.length < 3) {
+    setOutlineFeedback("Close an outline with at least three points before probing the field.", "error");
+    return;
+  }
   if (!isProbeToolActive()) {
     setOutlineFeedback("Field Z probe requires the probe tool to be active.", "error");
     return;
   }
   if (state.jog.armed) {
-    setOutlineFeedback("Disarm tap move before running field Z probe.", "error");
+    setOutlineFeedback("Disarm Movement before running field Z probe.", "error");
     return;
   }
   if (!Number.isFinite(o.floorMachineZ)) {
@@ -3020,14 +2972,14 @@ async function traceOutline() {
     return;
   }
   if (state.jog.armed) {
-    setOutlineFeedback("Disarm tap move before tracing an outline.", "error");
+    setOutlineFeedback("Disarm Movement before tracing an outline.", "error");
     return;
   }
   if (tapMoveTargetBusy()) {
-    setOutlineFeedback("Wait for tap move to finish before tracing an outline.", "error");
+    setOutlineFeedback("Wait for Movement to finish before tracing an outline.", "error");
     return;
   }
-  if (o.pointProbePending || o.fieldProbePending || o.tracePending) return;
+  if (o.fieldProbePending || o.tracePending) return;
   const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin());
   const ox = axisValue(origin, "x");
   const oy = axisValue(origin, "y");
@@ -3193,7 +3145,6 @@ function outlineJSONDocument() {
       closed: !!o.closed,
       curve_fit: !!o.curveFit,
       origin: cloneOutlineOrigin(o.origin),
-      probe_each_point: !!o.probeEachPoint,
       field_spot_gap_mm: fieldProbeSpotGap(),
       floor_machine_z: Number.isFinite(o.floorMachineZ) ? o.floorMachineZ : null,
       field_probe_results: o.fieldProbeResults.map(cloneOutlinePoint),
@@ -3252,7 +3203,6 @@ function outlineStateFromJSON(doc) {
   next.closed = !!raw.closed;
   next.curveFit = !!raw.curve_fit;
   next.origin = outlineOriginFromJSON(raw.origin);
-  next.probeEachPoint = !!raw.probe_each_point;
   next.fieldSpotGapMM = boundedOutlineNumber(raw.field_spot_gap_mm, 0, 250, DEFAULT_FIELD_SPOT_GAP_MM);
   const floorMachineZ = Number(raw.floor_machine_z);
   next.floorMachineZ = raw.floor_machine_z !== null && raw.floor_machine_z !== "" && Number.isFinite(floorMachineZ)
@@ -5629,7 +5579,7 @@ function completeCommandDisarm(seq, message = "") {
 function disarmTapMoveForCommand() {
   if (!state.jog.armed) return Promise.resolve();
   if (state.jog.commandDisarm) return state.jog.commandDisarm.promise;
-  if (state.jog.link !== "online") return Promise.reject(new Error("Tap Move is not connected."));
+  if (state.jog.link !== "online") return Promise.reject(new Error("Movement is not connected."));
 
   const seq = state.jog.seq++;
   let resolve;
@@ -5648,12 +5598,12 @@ function disarmTapMoveForCommand() {
     }
   }, 2000);
   if (!sendJog({ type: "disarm", seq })) {
-    completeCommandDisarm(seq, "Tap Move is not connected.");
+    completeCommandDisarm(seq, "Movement is not connected.");
     return promise;
   }
   state.jog.armPending = seq;
   state.jog.armPendingAction = "disarm";
-  state.jog.tapFeedback = "Disarming Tap Move before command.";
+  state.jog.tapFeedback = "Disarming Movement before command.";
   state.jog.tapFeedbackKind = "";
   renderJog();
   return promise;
@@ -6217,7 +6167,7 @@ function sendWorkCoordinateMove() {
     return;
   }
   if (!state.jog.armed) {
-    setTapFeedback("Arm tap move before moving to work coordinates.", "error");
+    setTapFeedback("Arm Movement before moving to work coordinates.", "error");
     return;
   }
   if (tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
@@ -6264,7 +6214,7 @@ function sendTapMove(target) {
     return;
   }
   if (!state.jog.armed) {
-    setTapFeedback("Arm tap move before selecting a target.", "error");
+    setTapFeedback("Arm Movement before selecting a target.", "error");
     return;
   }
   if (tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
@@ -6316,7 +6266,7 @@ function stepZ(dir) {
     return;
   }
   if (!state.jog.armed) {
-    setTapFeedback("Arm tap move before moving Z.", "error");
+    setTapFeedback("Arm Movement before moving Z.", "error");
     return;
   }
   if (tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
@@ -6633,7 +6583,7 @@ function applyOriginSource() {
 async function runAutoZProbe() {
   if (state.jog.zProbePending || tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
   if (state.jog.armed) {
-    setOriginFeedback("Disarm tap move before running Z probe.", "error");
+    setOriginFeedback("Disarm Movement before running Z probe.", "error");
     renderJog();
     return;
   }
@@ -7463,7 +7413,6 @@ function init() {
   bindButtonAction(document.getElementById("outline-load"), () => document.getElementById("outline-file").click());
   bindButtonAction(document.getElementById("outline-save"), saveOutlineJSON);
   document.getElementById("outline-curve-fit").onchange = toggleOutlineCurveFit;
-  document.getElementById("outline-probe-point").onchange = toggleOutlineProbePoint;
   bindButtonAction(document.getElementById("outline-export"), exportOutline);
   document.getElementById("outline-file").onchange = (e) => {
     loadOutlineFile(e.target.files[0]);

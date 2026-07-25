@@ -68,8 +68,8 @@ test("outline JSON save and load preserves the captured outline and samples", ()
       closed: true,
       curveFit: true,
       origin: { x: -210, y: -120, z: -43 },
-      probeEachPoint: true,
       fieldSpotGapMM: 4.5,
+      floorMachineZ: -43,
       fieldProbeResults: [point("sample", 20, 30, 2.5)],
     },
   };
@@ -83,8 +83,8 @@ test("outline JSON save and load preserves the captured outline and samples", ()
   assert.equal(restored.closed, true);
   assert.equal(restored.curveFit, true);
   assert.deepEqual(restored.origin, { x: -210, y: -120, z: -43 });
-  assert.equal(restored.probeEachPoint, true);
   assert.equal(restored.fieldSpotGapMM, 4.5);
+  assert.equal(restored.floorMachineZ, -43);
   assert.equal(restored.points.length, 3);
   assert.equal(restored.points[2].machine_y, -40);
   assert.equal(restored.fieldProbeResults.length, 1);
@@ -113,6 +113,7 @@ test("field probing keeps every travel and retract at the starting machine Z", a
       closed: true,
       points: [{}, {}, {}],
       origin: { x: -200, y: -100, z: -40 },
+      floorMachineZ: -40,
       fieldProbePreview: [{ id: "first", x: 1, y: 2 }, { id: "second", x: 3, y: 4 }],
       fieldProbeResults: [],
       fieldProbeTooDense: false,

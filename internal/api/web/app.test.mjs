@@ -275,7 +275,6 @@ test("Probe floor records the verified contact and rebases captured Z values", a
   const state = {
     outline: {
       floorProbePending: false,
-      pointProbePending: false,
       fieldProbePending: false,
       tracePending: false,
       origin: { x: 10, y: 20, z: 30 },
@@ -297,7 +296,13 @@ test("Probe floor records the verified contact and rebases captured Z values", a
       isProbeToolActive: () => true,
       request: async (path, options) => {
         requests.push({ path, options });
-        return { json: async () => ({ verified: true, machine: { x: 1, y: 2, z: -12.5 } }) };
+        return {
+          json: async () => ({
+            verified: true,
+            message: "Floor zero verified and spindle retracted to safe Z.",
+            machine: { x: 1, y: 2, z: -12.5 },
+          }),
+        };
       },
       currentWorkOrigin: () => ({ x: 10, y: 20, z: 30 }),
       renderOutlineCapture: () => {},
@@ -309,7 +314,7 @@ test("Probe floor records the verified contact and rebases captured Z values", a
   );
   await vm.runInContext("probeFloor()", ctx);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].path, "/api/probe/auto-z");
+  assert.equal(requests[0].path, "/api/probe/floor");
   assert.equal(state.outline.floorMachineZ, -12.5);
   assert.deepEqual(JSON.parse(JSON.stringify(state.outline.origin)), { x: 10, y: 20, z: -12.5 });
   assert.equal(state.outline.points[0].z, 2.5);
@@ -649,7 +654,6 @@ test("Trace outline waits for a pending Tap Move target", async () => {
       outline: {
         active: true,
         points: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-        pointProbePending: false,
         fieldProbePending: false,
         tracePending: false,
       },
@@ -661,7 +665,7 @@ test("Trace outline waits for a pending Tap Move target", async () => {
   });
   await vm.runInContext("traceOutline()", ctx);
   assert.deepEqual(feedback, {
-    message: "Wait for tap move to finish before tracing an outline.",
+    message: "Wait for Movement to finish before tracing an outline.",
     kind: "error",
   });
   assert.equal(requests, 0);

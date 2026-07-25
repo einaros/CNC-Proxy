@@ -492,7 +492,22 @@ func (s *Service) CalibrateCurrentTool() (MachineActionResult, error) {
 // automation, this must not first lift to the firmware clearance Z: that
 // clearance can lie outside a configured Z soft limit.
 func (s *Service) AutoZProbe() (MachineActionResult, error) {
-	res := MachineActionResult{Action: "auto_z_probe"}
+	return s.zProbeSetWorkZero(false)
+}
+
+// ProbeFloor probes the current XY, sets work Z zero at the verified contact,
+// then retracts to the configured safe Z (or remains higher if it started
+// above that target).
+func (s *Service) ProbeFloor() (MachineActionResult, error) {
+	return s.zProbeSetWorkZero(true)
+}
+
+func (s *Service) zProbeSetWorkZero(retractSafe bool) (MachineActionResult, error) {
+	action := "auto_z_probe"
+	if retractSafe {
+		action = "probe_floor"
+	}
+	res := MachineActionResult{Action: action}
 	var out string
 	var display string
 	var verified bool
@@ -544,8 +559,26 @@ func (s *Service) AutoZProbe() (MachineActionResult, error) {
 			return fmt.Errorf("%w: work Z did not reach zero after probing", ErrProbeUnavailable)
 		}
 		verified = true
-		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", startZ), false); err != nil {
+		retractZ := startZ
+		if retractSafe {
+			configuredSafeZ := s.store.UISettings().Machine.SafeZMM
+			retractZ = math.Max(startZ, s.SafeZTargetMM(configuredSafeZ))
+		}
+		if _, err := s.sendProbeLine(c, fmt.Sprintf("G53 G0 Z%.4f", retractZ), false); err != nil {
 			return err
+		}
+		if retractSafe {
+			retractStatus, err := s.waitMachineIdle(c, probeIdleTimeout)
+			if err != nil {
+				return fmt.Errorf("%w: could not verify floor-probe retract: %v", ErrMachineStatusStale, err)
+			}
+			if retractStatus.State != machine.Idle {
+				return fmt.Errorf("%w: floor-probe retract did not finish (%s)", ErrMachineStatusStale, statusSummary(retractStatus))
+			}
+			retractedZ, ok := finiteAxisValue(retractStatus.MPos, "z")
+			if !ok || math.Abs(retractedZ-retractZ) > 0.01 {
+				return fmt.Errorf("%w: floor probe did not reach safe Z %.4f", ErrProbeUnavailable, retractZ)
+			}
 		}
 		s.refreshStatusBestEffort(c)
 		return nil
@@ -555,6 +588,9 @@ func (s *Service) AutoZProbe() (MachineActionResult, error) {
 	res.Verified = verified
 	res.Machine = contact
 	res.Message = "Work Z zero verified at probe contact."
+	if retractSafe {
+		res.Message = "Floor zero verified and spindle retracted to safe Z."
+	}
 	if err != nil {
 		res.Message = err.Error()
 		return res, err

@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tool/calibrate", s.calibrateCurrentTool) // starts M491
 	mux.HandleFunc("POST /api/probe/z", s.probeZ)                      // one serialized Z probe
 	mux.HandleFunc("POST /api/probe/auto-z", s.autoZProbe)             // controller-style M495 auto Z probe
+	mux.HandleFunc("POST /api/probe/floor", s.floorZProbe)             // verified floor Z zero + safe retract
 	mux.HandleFunc("POST /api/outline/trace", s.traceOutline)          // serialized probe-laser outline trace
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
@@ -364,6 +365,16 @@ func (s *Server) probeZ(w http.ResponseWriter, r *http.Request) {
 func (s *Server) autoZProbe(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	res, err := s.svc.AutoZProbe()
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) floorZProbe(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	res, err := s.svc.ProbeFloor()
 	if err != nil {
 		s.mapError(w, err)
 		return

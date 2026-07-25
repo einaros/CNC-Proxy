@@ -259,10 +259,10 @@
   .control-drawer-section > summary { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; color: var(--muted); }
   .control-drawer-section > .detail-body { padding: 0 0 10px; border-top: 0; }
   .control-workspace { min-width: 0; display: grid; gap: 10px; align-items: start; }
-  .tap-arm-panel, .tap-control-group, .tap-coordinate-panel { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) auto; gap: 6px; align-content: start; }
+  .tap-control-group, .tap-coordinate-panel { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) auto; gap: 6px; align-content: start; }
   .origin-group { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) auto; gap: 6px; align-content: start; }
   .tap-control-group, .tap-coordinate-panel, .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
-  .tap-control-title, .origin-group-title { min-height: var(--tap-label-h); color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; line-height: 1.1; }
+  .origin-group-title { min-height: var(--tap-label-h); color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; line-height: 1.1; }
   .tap-primary-controls { display: grid; grid-template-columns: minmax(150px, 174px) 96px; gap: 8px; align-items: end; }
   .tap-move-toolbar label, .tap-field, .machine-settings-grid label { display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
   .tap-move-toolbar label > span:first-child, .tap-field-label, .machine-settings-grid label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
@@ -270,6 +270,7 @@
   #jog-arm { width: 100%; min-width: 0; justify-content: center; padding: 0 10px; border-color: rgba(87,166,214,.62); background: rgba(87,166,214,.12); color: var(--text); font-size: 13px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #jog-arm:hover:not(:disabled) { border-color: rgba(87,166,214,.9); background: rgba(87,166,214,.18); }
   #jog-arm.armed { border-color: rgba(68,194,123,.72); background: rgba(68,194,123,.13); color: var(--ok); }
+  .command-movement-arm { grid-column: 1 / -1; height: var(--tap-control-h); min-height: var(--tap-control-h); }
   .tap-feed-field { width: 150px; }
   .tap-feed-stepper { display: grid; grid-template-columns: 34px 82px 34px; height: var(--tap-control-h); min-height: var(--tap-control-h); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
   .tap-feed-stepper button { min-width: 0; min-height: 0; padding: 0; justify-content: center; border: 0; border-radius: 0; background: rgba(18,23,28,.82); font-weight: 750; }
@@ -348,10 +349,14 @@
   .outline-active-controls { display: grid; gap: 5px; align-items: stretch; }
   .outline-active-controls label { min-height: 30px; display: flex; gap: 6px; align-items: center; justify-content: center; padding: 4px 8px; color: var(--muted); background: rgba(18,23,28,.88); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
   .outline-capture { display: grid; gap: 8px; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
-  .outline-probe-controls, .outline-field-controls, .outline-export-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 6px; align-items: end; min-width: 0; }
-  .outline-field-controls { padding-top: 4px; border-top: 1px solid var(--border); }
-  .outline-probe-controls label, .outline-field-controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); min-height: 32px; }
-  .outline-field-controls input[type="number"] { width: 88px; }
+  .outline-capture[hidden] { display: none; }
+  .outline-probe-title { color: var(--text); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; }
+  .outline-probe-actions, .outline-export-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; min-width: 0; }
+  .outline-probe-actions button { width: 100%; min-width: 0; min-height: 36px; justify-content: center; }
+  .outline-probe-settings { display: grid; grid-template-columns: minmax(0, 180px); gap: 6px; align-items: end; padding-top: 4px; border-top: 1px solid var(--border); }
+  .outline-probe-settings label { display: grid; grid-template-columns: 1fr 88px; gap: 8px; align-items: center; color: var(--muted); min-height: 32px; }
+  .outline-probe-settings input[type="number"] { width: 88px; }
+  .outline-export-controls { padding-top: 4px; border-top: 1px solid var(--border); }
   .outline-summary { color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .outline-action-status { min-height: 17px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .outline-action-status[data-kind="ok"] { color: var(--ok); }
@@ -475,7 +480,7 @@
     .file-col-status { width: 16%; }
   }
   @media (max-width: 760px) {
-    header, .toolbar, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-arm-panel, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    header, .toolbar, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row, .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row label:last-child { grid-column: auto; }
     .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
@@ -795,6 +800,7 @@
           <details id="control-command-drawer" class="control-command-drawer" open>
             <summary>Commands</summary>
             <div class="tap-move-toolbar">
+              <button type="button" id="jog-arm" class="command-movement-arm">Arm Movement</button>
               <details class="control-drawer-section" open>
                 <summary>Jog Settings</summary>
                 <div class="detail-body">
@@ -915,10 +921,6 @@
                   <button type="button" id="workarea-zoom-in" title="Zoom in">+</button>
                 </div>
                 <div id="outline-preview-controls" class="outline-preview-controls">
-                  <div class="tap-arm-panel">
-                    <div class="tap-control-title">Tap Move</div>
-                    <button type="button" id="jog-arm">Arm Tap Move</button>
-                  </div>
                   <button type="button" id="outline-start" class="primary">Capture outline</button>
                   <button type="button" id="outline-load">Load outline</button>
                   <div id="outline-active-controls" class="outline-active-controls" hidden>
@@ -978,18 +980,18 @@
                 <button type="button" data-z-step-dir="-1">Z-</button>
               </div>
             </div>
-            <div id="outline-capture" class="outline-capture">
-              <div id="outline-probe-controls" class="outline-probe-controls" hidden>
-                <button type="button" id="outline-probe-floor" class="primary">Probe floor</button>
-                <label id="outline-probe-point-wrap" hidden><input type="checkbox" id="outline-probe-point"> Probe Z</label>
+            <div id="outline-capture" class="outline-capture" hidden>
+              <div class="outline-probe-title">Outline Probe</div>
+              <div class="outline-probe-actions">
+                <button type="button" id="outline-probe-floor" class="primary">Probe Floor</button>
+                <button type="button" id="outline-field-probe" class="primary">Probe Field Z</button>
               </div>
-              <div id="outline-field-controls" class="outline-field-controls" hidden>
+              <div class="outline-probe-settings">
                 <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
-                <button type="button" id="outline-field-probe">Probe field Z</button>
-                <div id="outline-export-controls" class="outline-export-controls" hidden>
-                  <button type="button" id="outline-export-obj">Export OBJ</button>
-                  <button type="button" id="outline-export-height">Export Height PGM</button>
-                </div>
+              </div>
+              <div id="outline-export-controls" class="outline-export-controls" hidden>
+                <button type="button" id="outline-export-obj">Export OBJ</button>
+                <button type="button" id="outline-export-height">Export Height PGM</button>
               </div>
               <div id="outline-summary" class="outline-summary"></div>
               <div id="outline-action-status" class="outline-action-status" role="status" aria-live="polite"></div>
