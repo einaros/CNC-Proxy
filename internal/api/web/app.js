@@ -6830,6 +6830,15 @@ function applyJogEvent(ev) {
       state.jog.armed = action === "arm";
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
+      if (action === "disarm") {
+        // The server releases the jog lease and cancels any pending target as
+        // part of disarm. Mirror that lifecycle locally so a target whose
+        // completion was never observed cannot keep tap movement busy after
+        // the operator disarms and arms again.
+        state.jog.targetPending = 0;
+        state.jog.targetMotionPending = 0;
+        cancelWorkCoordinateMove();
+      }
       state.jog.tapFeedback = tapMoveArmSuccessText(action);
       state.jog.tapFeedbackKind = "ok";
     }

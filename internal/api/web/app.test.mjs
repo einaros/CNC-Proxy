@@ -646,6 +646,71 @@ test("Tap Move ignores a second tap until the first target is observed", () => {
   assert.equal(sent, 0);
 });
 
+test("disarming Movement clears a pending tap target so re-arm can recover", () => {
+  const sent = [];
+  const state = {
+    ui: { machine: {} },
+    machine: { mpos: { x: 1, y: 2, z: 0 } },
+    jog: {
+      link: "online",
+      armed: true,
+      sent: new Map(),
+      armPending: 7,
+      armPendingAction: "disarm",
+      commandDisarm: null,
+      targetPending: 3,
+      targetMotionPending: 3,
+      workMovePending: 3,
+      target: { x: 12, y: -4, z: 0 },
+      targetLabel: "X 12.0 Y -4.0",
+      tapFeedback: "Moving...",
+      tapFeedbackKind: "",
+      error: "",
+      errorCode: "",
+    },
+  };
+  const ctx = buildContext(
+    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "completeCommandDisarm", "tapMoveArmSuccessText", "tapTargetLabel", "sendTapMove", "applyJogEvent"],
+    [],
+    {
+      state,
+      document: { getElementById: () => ({ textContent: "" }) },
+      performance: { now: () => 100 },
+      currentTapFeed: () => 600,
+      normalizeMachineSettings: (machine) => ({ ...machine, safe_z_disabled: true }),
+      safeZForTapMove: () => 0,
+      hasPendingOriginOperation: () => false,
+      sendJog: (message) => {
+        sent.push(message);
+        return 9;
+      },
+      setTapFeedback: (message, kind) => {
+        state.jog.tapFeedback = message;
+        state.jog.tapFeedbackKind = kind;
+      },
+      renderJog: () => {},
+      renderMachine: () => {},
+      clearTimeout: () => {},
+    },
+  );
+
+  vm.runInContext("applyJogEvent({ type: 'ack', seq: 7 })", ctx);
+  assert.equal(state.jog.armed, false);
+  assert.equal(state.jog.targetPending, 0);
+  assert.equal(state.jog.targetMotionPending, 0);
+  assert.equal(state.jog.workMovePending, 0);
+
+  state.jog.armPending = 8;
+  state.jog.armPendingAction = "arm";
+  vm.runInContext("applyJogEvent({ type: 'ack', seq: 8 })", ctx);
+  assert.equal(state.jog.armed, true);
+  assert.equal(vm.runInContext("tapMoveTargetBusy()", ctx), false);
+  vm.runInContext("sendTapMove({ x: 20, y: 5 })", ctx);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "target");
+  assert.equal(state.jog.targetMotionPending, 9);
+});
+
 test("Trace outline waits for a pending Tap Move target", async () => {
   let feedback = null;
   let requests = 0;
