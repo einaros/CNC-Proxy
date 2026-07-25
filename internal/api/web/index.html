@@ -207,6 +207,12 @@
   #gcode-preview:active { cursor: grabbing; }
   #gcode-preview.pan-mode { cursor: move; }
   #gcode-preview-empty { grid-area: 1 / 1; z-index: 1; display: grid; place-items: center; color: var(--muted); background: var(--panel-2); pointer-events: none; }
+  #gcode-view-tools { position: absolute; top: 8px; right: 8px; z-index: 2; width: 88px; display: grid; gap: 6px; }
+  #gcode-viewcube { display: block; width: 88px; height: 88px; cursor: pointer; touch-action: none; }
+  #gcode-projection-toggle { display: grid; grid-template-columns: 1fr 1fr; background: rgba(18,23,28,.82); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; backdrop-filter: blur(6px); }
+  #gcode-projection-toggle button { min-height: 24px; padding: 2px 4px; font-size: 11px; border: 0; border-radius: 0; background: transparent; color: var(--muted); }
+  #gcode-projection-toggle button + button { border-left: 1px solid var(--border); }
+  #gcode-projection-toggle button[aria-pressed="true"] { background: rgba(87,166,214,.18); color: var(--text); }
   #gcode-timeline-row { grid-area: 2 / 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: rgba(25,31,37,.92); }
   #gcode-timeline-label { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
   #gcode-console-view { height: 100%; }
@@ -719,6 +725,13 @@
           </div>
           <div id="gcode-preview-wrap">
             <canvas id="gcode-preview" role="img" aria-label="Active gcode preview" tabindex="0" title="Drag to rotate; hold Shift or Space and drag to pan"></canvas>
+            <div id="gcode-view-tools" hidden>
+              <canvas id="gcode-viewcube" role="img" aria-label="View orientation cube; click a face, edge, or corner to align the view" title="Click a face, edge, or corner to align the view"></canvas>
+              <div id="gcode-projection-toggle" role="group" aria-label="Projection">
+                <button type="button" id="gcode-projection-persp" aria-pressed="true" title="Perspective projection">Persp</button>
+                <button type="button" id="gcode-projection-ortho" aria-pressed="false" title="Orthographic projection">Ortho</button>
+              </div>
+            </div>
             <div id="gcode-preview-empty">No plotted moves</div>
             <div id="gcode-timeline-row">
               <input id="gcode-timeline" type="range" min="0" max="0" step="1" value="0" disabled>

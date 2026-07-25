@@ -669,6 +669,7 @@ type previewParser struct {
 	motion                int
 	plane                 int
 	pos                   [4]float64
+	axisKnown             [3]bool
 	currentTool           int
 	tools                 map[int]bool
 	preview               GcodePreview
@@ -846,6 +847,26 @@ func (p *previewParser) parseLine(line string, lineNo int) {
 		p.addLinearMove("probe", lineNo, target)
 	}
 	p.pos = target
+	p.markAxesKnown(hasValue)
+}
+
+// markAxesKnown records which linear axes the file has explicitly commanded.
+// Until all of X, Y, and Z are anchored, the parser's current position is an
+// assumption (the machine could be anywhere when the program starts).
+func (p *previewParser) markAxesKnown(hasValue map[byte]bool) {
+	if hasValue['X'] {
+		p.axisKnown[0] = true
+	}
+	if hasValue['Y'] {
+		p.axisKnown[1] = true
+	}
+	if hasValue['Z'] {
+		p.axisKnown[2] = true
+	}
+}
+
+func (p *previewParser) positionAnchored() bool {
+	return p.axisKnown[0] && p.axisKnown[1] && p.axisKnown[2]
 }
 
 func splitGCode(v float64) (int, int) {
@@ -881,8 +902,10 @@ func (p *previewParser) targetFromValues(values map[byte]float64, hasValue map[b
 func (p *previewParser) setPosition(values map[byte]float64, hasValue map[byte]bool) {
 	if len(hasValue) == 0 {
 		p.pos = [4]float64{}
+		p.axisKnown = [3]bool{true, true, true}
 		return
 	}
+	p.markAxesKnown(hasValue)
 	for _, axis := range []struct {
 		letter byte
 		index  int
@@ -929,6 +952,10 @@ func (p *previewParser) runCycle(code int, values map[byte]float64, hasValue map
 	}
 	p.addLinearMove("rapid", lineNo, xy)
 	p.pos = xy
+	// Canned cycles command absolute coordinates: the given X/Y words and the
+	// absolute R/Z planes anchor those axes from here on.
+	p.markAxesKnown(hasValue)
+	p.axisKnown[2] = true
 
 	retract := p.pos
 	retract[2] = p.cycleSticky.r
@@ -997,6 +1024,12 @@ func (p *previewParser) addLinearMove(kind string, lineNo int, target [4]float64
 		return
 	}
 	p.preview.MoveCount++
+	if kind == "rapid" && !p.positionAnchored() {
+		// A lead-in rapid from a position the file never established would
+		// plot a fabricated streak from the assumed origin; skip the segment
+		// so the plotted path starts at the first anchored position.
+		return
+	}
 	p.addSegment(GcodeSegment{Kind: kind, Line: lineNo, Tool: p.currentTool, From: p.pos, To: target})
 }
 

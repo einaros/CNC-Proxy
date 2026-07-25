@@ -1150,7 +1150,7 @@ func TestSelectActiveGcodeParsesPreview(t *testing.T) {
 	if active.Path != "/sd/gcodes/part.nc" || !active.Runnable {
 		t.Fatalf("active = %+v, want runnable part.nc", active)
 	}
-	if active.Preview == nil || active.Preview.LineCount != 5 || active.Preview.MoveCount != 3 || active.Preview.PlottedSegments != 3 {
+	if active.Preview == nil || active.Preview.LineCount != 5 || active.Preview.MoveCount != 3 || active.Preview.PlottedSegments != 2 {
 		t.Fatalf("preview = %+v", active.Preview)
 	}
 	if len(active.Preview.Tools) != 1 || active.Preview.Tools[0] != 2 {
@@ -1158,6 +1158,42 @@ func TestSelectActiveGcodeParsesPreview(t *testing.T) {
 	}
 	if active.Preview.Bounds == nil || active.Preview.Bounds.Max[0] != 10 || active.Preview.Bounds.Max[1] != 5 || active.Preview.Bounds.Min[2] != -1 {
 		t.Fatalf("bounds = %+v", active.Preview.Bounds)
+	}
+}
+
+func TestParseGcodePreviewSkipsLeadInRapidsFromUnknownStart(t *testing.T) {
+	gcode := strings.Join([]string{
+		"G21 G90",
+		"G0 Z15",      // Z anchored; X/Y still unknown -> not plotted
+		"G0 X40 Y-20", // X/Y anchored; start X/Y unknown -> not plotted
+		"G0 Z1",       // fully anchored rapid -> plotted
+		"G1 Z-1 F200", // cut -> plotted
+		"G1 X50 Y-20", // cut -> plotted
+	}, "\n")
+	preview, err := ParseGcodePreview(strings.NewReader(gcode))
+	if err != nil {
+		t.Fatalf("ParseGcodePreview: %v", err)
+	}
+	if preview.MoveCount != 5 || preview.PlottedSegments != 3 {
+		t.Fatalf("moves=%d plotted=%d, want 5 moves with 3 plotted", preview.MoveCount, preview.PlottedSegments)
+	}
+	first := preview.Segments[0]
+	if first.Kind != "rapid" || first.From != [4]float64{40, -20, 15, 0} || first.To != [4]float64{40, -20, 1, 0} {
+		t.Fatalf("first plotted segment = %+v, want anchored Z rapid", first)
+	}
+	b := preview.Bounds
+	if b == nil || b.Min[0] != 40 || b.Max[0] != 50 || b.Min[1] != -20 || b.Max[1] != -20 || b.Min[2] != -1 || b.Max[2] != 15 {
+		t.Fatalf("bounds = %+v, want bounds excluding the assumed origin", b)
+	}
+
+	// Cut moves from an unanchored start keep the historical assumed-origin
+	// behavior so files that never position all axes still render.
+	preview, err = ParseGcodePreview(strings.NewReader("G21 G90\nG1 X10 F100\nG1 Y10\n"))
+	if err != nil {
+		t.Fatalf("ParseGcodePreview: %v", err)
+	}
+	if preview.PlottedSegments != 2 || preview.Segments[0].From != [4]float64{} {
+		t.Fatalf("cut-only preview = %+v, want cuts plotted from assumed origin", preview)
 	}
 }
 

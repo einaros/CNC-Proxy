@@ -125,6 +125,10 @@ const gcodeView = {
   renderer: null,
   scene: null,
   camera: null,
+  perspCamera: null,
+  orthoCamera: null,
+  projection: "perspective",
+  cube: null,
   pathGroup: null,
   progressLine: null,
   marker: null,
@@ -153,6 +157,10 @@ const GCODE_KIND_COLORS = {
   arc: 0x44c27b,
   probe: 0xd99a3a,
 };
+
+const GCODE_FOV = 45;
+// Same axis palette as the Control tab work-area origin marker.
+const GCODE_AXIS_COLORS = { x: "#f05b5b", y: "#6fa3ff", z: "#44c27b" };
 
 const SYNC_LABEL = {
   synced: "Synced",
@@ -4326,7 +4334,9 @@ function ensureGcodeViewer() {
   gcodeView.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
   gcodeView.renderer.setClearColor(0x202832, 1);
   gcodeView.scene = new THREE.Scene();
-  gcodeView.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
+  gcodeView.perspCamera = new THREE.PerspectiveCamera(GCODE_FOV, 1, 0.1, 100000);
+  gcodeView.orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100000);
+  gcodeView.camera = gcodeView.projection === "orthographic" ? gcodeView.orthoCamera : gcodeView.perspCamera;
   gcodeView.pathGroup = new THREE.Group();
   gcodeView.scene.add(gcodeView.pathGroup);
   const markerGeometry = new THREE.SphereGeometry(1, 16, 12);
@@ -4335,6 +4345,8 @@ function ensureGcodeViewer() {
   gcodeView.marker.visible = false;
   gcodeView.scene.add(gcodeView.marker);
   bindGcodeOrbitControls(canvas);
+  initGcodeViewCube();
+  bindGcodeProjectionToggle();
   if (globalThis.ResizeObserver) {
     gcodeView.resizeObserver = new ResizeObserver(() => scheduleGcodeRender());
     gcodeView.resizeObserver.observe(canvas);
@@ -4371,7 +4383,7 @@ function bindGcodeOrbitControls(canvas) {
       panGcodeCamera(dx, dy);
     } else {
       gcodeView.orbit.theta -= dx * 0.008;
-      gcodeView.orbit.phi = Math.max(0.08, Math.min(Math.PI - 0.08, gcodeView.orbit.phi + dy * 0.008));
+      gcodeView.orbit.phi = Math.max(0.08, Math.min(Math.PI - 0.08, gcodeView.orbit.phi - dy * 0.008));
       updateGcodeCamera();
     }
   });
@@ -4473,9 +4485,63 @@ function addGcodeGrid(bounds) {
   grid.position.y = Number(min[2]) || 0;
   grid.position.z = -(Number(min[1]) + Number(max[1])) / 2;
   gcodeView.pathGroup.add(grid);
-  const axes = new THREE.AxesHelper(Math.max(5, size * 0.12));
-  axes.position.copy(grid.position);
-  gcodeView.pathGroup.add(axes);
+  // Origin marker with axis legends sits at the work origin (machine 0,0,0).
+  gcodeView.pathGroup.add(buildGcodeOriginAxes(Math.max(5, size * 0.12)));
+}
+
+function buildGcodeOriginAxes(len) {
+  const group = new THREE.Group();
+  const axes = [
+    // Machine X+ is world +x, machine Y+ is world -z, machine Z+ is world +y.
+    { color: GCODE_AXIS_COLORS.x, dir: new THREE.Vector3(1, 0, 0), plus: "X+", minus: "X-" },
+    { color: GCODE_AXIS_COLORS.y, dir: new THREE.Vector3(0, 0, -1), plus: "Y+", minus: "Y-" },
+    { color: GCODE_AXIS_COLORS.z, dir: new THREE.Vector3(0, 1, 0), plus: "Z+", minus: "" },
+  ];
+  const headLen = len * 0.16;
+  const headRadius = len * 0.05;
+  for (const axis of axes) {
+    const color = new THREE.Color(axis.color);
+    const from = axis.minus ? axis.dir.clone().multiplyScalar(-len) : new THREE.Vector3();
+    const to = axis.dir.clone().multiplyScalar(len);
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints([from, to]);
+    group.add(new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color })));
+    for (const sign of axis.minus ? [1, -1] : [1]) {
+      const head = new THREE.Mesh(
+        new THREE.ConeGeometry(headRadius, headLen, 12),
+        new THREE.MeshBasicMaterial({ color }),
+      );
+      const tipDir = axis.dir.clone().multiplyScalar(sign);
+      head.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tipDir);
+      head.position.copy(tipDir.multiplyScalar(len - headLen / 2));
+      group.add(head);
+      const label = makeGcodeAxisLabel(sign > 0 ? axis.plus : axis.minus, axis.color);
+      label.position.copy(axis.dir.clone().multiplyScalar(sign * (len + len * 0.22)));
+      label.scale.setScalar(len * 0.34);
+      group.add(label);
+    }
+  }
+  return group;
+}
+
+function makeGcodeAxisLabel(text, color) {
+  const c = document.createElement("canvas");
+  c.width = 128;
+  c.height = 128;
+  const ctx = c.getContext("2d");
+  ctx.font = "700 58px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 12;
+  ctx.strokeStyle = "#12171c";
+  ctx.strokeText(text, 64, 64);
+  ctx.fillStyle = color;
+  ctx.fillText(text, 64, 64);
+  const texture = new THREE.CanvasTexture(c);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+  sprite.renderOrder = 10;
+  return sprite;
 }
 
 function clearGcodeScene() {
@@ -4501,12 +4567,14 @@ function clearThreeGroup(group) {
 function disposeObject(obj) {
   if (!obj) return;
   if (obj.parent) obj.parent.remove(obj);
-  if (obj.geometry) obj.geometry.dispose();
-  if (Array.isArray(obj.material)) {
-    for (const material of obj.material) material.dispose();
-  } else if (obj.material) {
-    obj.material.dispose();
-  }
+  obj.traverse((node) => {
+    if (node.geometry) node.geometry.dispose();
+    const materials = Array.isArray(node.material) ? node.material : node.material ? [node.material] : [];
+    for (const material of materials) {
+      if (material.map) material.map.dispose();
+      material.dispose();
+    }
+  });
 }
 
 function fitGcodeCamera(bounds) {
@@ -4521,9 +4589,6 @@ function fitGcodeCamera(bounds) {
   const spanZ = Math.abs(Number(max[2]) - Number(min[2]));
   const radius = Math.max(spanX, spanY, spanZ, 1);
   gcodeView.orbit.radius = radius * 2.4 + 20;
-  gcodeView.camera.near = Math.max(0.01, gcodeView.orbit.radius / 1000);
-  gcodeView.camera.far = Math.max(1000, gcodeView.orbit.radius * 100);
-  gcodeView.camera.updateProjectionMatrix();
   updateGcodeCamera();
 }
 
@@ -4535,8 +4600,10 @@ function panGcodeCamera(dx, dy) {
   const width = Math.max(1, rect.width);
   const height = Math.max(1, rect.height);
   const distance = Math.max(0.001, camera.position.distanceTo(gcodeView.target));
-  const viewHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
-  const viewWidth = viewHeight * camera.aspect;
+  const viewHeight = camera.isOrthographicCamera
+    ? camera.top - camera.bottom
+    : 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
+  const viewWidth = camera.isOrthographicCamera ? camera.right - camera.left : viewHeight * camera.aspect;
   camera.updateMatrixWorld();
   const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
   const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
@@ -4552,9 +4619,165 @@ function updateGcodeCamera() {
   const x = gcodeView.target.x + o.radius * sinPhi * Math.sin(o.theta);
   const y = gcodeView.target.y + o.radius * Math.cos(o.phi);
   const z = gcodeView.target.z + o.radius * sinPhi * Math.cos(o.theta);
+  if (Math.abs(sinPhi) < 0.02) {
+    // Looking straight down/up the world-up axis: pick an up vector that keeps
+    // machine Y+ toward the top of the screen so top/bottom views stay stable.
+    gcodeView.camera.up.set(-Math.sin(o.theta), 0, -Math.cos(o.theta));
+  } else {
+    gcodeView.camera.up.set(0, 1, 0);
+  }
   gcodeView.camera.position.set(x, y, z);
   gcodeView.camera.lookAt(gcodeView.target);
+  syncGcodeProjection();
   scheduleGcodeRender();
+}
+
+function syncGcodeProjection() {
+  const camera = gcodeView.camera;
+  if (!camera) return;
+  const aspect = gcodeView.height > 0 ? gcodeView.width / gcodeView.height : 1;
+  const radius = gcodeView.orbit.radius;
+  camera.near = Math.max(0.01, radius / 1000);
+  camera.far = Math.max(1000, radius * 100);
+  if (camera.isOrthographicCamera) {
+    const halfH = Math.tan(THREE.MathUtils.degToRad(GCODE_FOV) / 2) * radius;
+    camera.top = halfH;
+    camera.bottom = -halfH;
+    camera.left = -halfH * aspect;
+    camera.right = halfH * aspect;
+  } else {
+    camera.aspect = aspect;
+  }
+  camera.updateProjectionMatrix();
+}
+
+function setGcodeProjection(mode) {
+  const projection = mode === "orthographic" ? "orthographic" : "perspective";
+  gcodeView.projection = projection;
+  if (gcodeView.perspCamera) {
+    gcodeView.camera = projection === "orthographic" ? gcodeView.orthoCamera : gcodeView.perspCamera;
+    updateGcodeCamera();
+  }
+  for (const [id, value] of [["gcode-projection-persp", "perspective"], ["gcode-projection-ortho", "orthographic"]]) {
+    const btn = document.getElementById(id);
+    if (btn) btn.setAttribute("aria-pressed", projection === value ? "true" : "false");
+  }
+}
+
+function bindGcodeProjectionToggle() {
+  const persp = document.getElementById("gcode-projection-persp");
+  const ortho = document.getElementById("gcode-projection-ortho");
+  if (persp && !persp.dataset.bound) {
+    persp.dataset.bound = "1";
+    persp.onclick = () => setGcodeProjection("perspective");
+  }
+  if (ortho && !ortho.dataset.bound) {
+    ortho.dataset.bound = "1";
+    ortho.onclick = () => setGcodeProjection("orthographic");
+  }
+}
+
+// View cube axes are main-scene world axes: +x right, +y top, +z front
+// (machine X+ right, Z+ up, Y+ toward the back).
+const VIEWCUBE_FACES = [
+  { label: "RIGHT", rotation: 0 },
+  { label: "LEFT", rotation: 0 },
+  { label: "TOP", rotation: 0 },
+  { label: "BOTTOM", rotation: 0 },
+  { label: "FRONT", rotation: 0 },
+  { label: "BACK", rotation: 0 },
+];
+
+function initGcodeViewCube() {
+  if (gcodeView.cube) return;
+  const canvas = document.getElementById("gcode-viewcube");
+  if (!canvas) return;
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  } catch (e) {
+    return;
+  }
+  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
+  renderer.setSize(88, 88, false); // matches the fixed CSS size; the widget may be hidden (0x0) at init
+  renderer.setClearColor(0x000000, 0);
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1.75, 1.75, 1.75, -1.75, 0.1, 10);
+  camera.position.set(0, 0, 5);
+  camera.lookAt(0, 0, 0);
+  const materials = VIEWCUBE_FACES.map((face) => new THREE.MeshBasicMaterial({
+    map: makeViewCubeFaceTexture(face.label, face.rotation),
+  }));
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), materials);
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(mesh.geometry),
+    new THREE.LineBasicMaterial({ color: 0x5f6c78 }),
+  );
+  edges.scale.setScalar(1.001);
+  mesh.add(edges);
+  scene.add(mesh);
+  gcodeView.cube = { renderer, scene, camera, mesh, canvas, raycaster: new THREE.Raycaster() };
+  canvas.addEventListener("click", onGcodeViewCubeClick);
+}
+
+function makeViewCubeFaceTexture(label, rotation) {
+  const size = 128;
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#232b31";
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = "#3a444d";
+  ctx.lineWidth = 5;
+  ctx.strokeRect(3, 3, size - 6, size - 6);
+  ctx.translate(size / 2, size / 2);
+  ctx.rotate(rotation || 0);
+  ctx.font = "700 22px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#b7c0ca";
+  ctx.fillText(label, 0, 0);
+  const texture = new THREE.CanvasTexture(c);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+function renderGcodeViewCube() {
+  const cube = gcodeView.cube;
+  if (!cube || !gcodeView.camera) return;
+  cube.mesh.quaternion.copy(gcodeView.camera.quaternion).invert();
+  cube.renderer.render(cube.scene, cube.camera);
+}
+
+function onGcodeViewCubeClick(e) {
+  const cube = gcodeView.cube;
+  if (!cube || !gcodeView.camera) return;
+  const rect = cube.canvas.getBoundingClientRect();
+  const ndc = {
+    x: ((e.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1,
+    y: -((e.clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1,
+  };
+  cube.raycaster.setFromCamera(ndc, cube.camera);
+  const hits = cube.raycaster.intersectObject(cube.mesh, false);
+  if (!hits.length) return;
+  const p = cube.mesh.worldToLocal(hits[0].point.clone());
+  // Quantize the hit into face/edge/corner zones (cube half-size is 1).
+  const band = 0.55;
+  const dir = new THREE.Vector3(
+    Math.abs(p.x) > band ? Math.sign(p.x) : 0,
+    Math.abs(p.y) > band ? Math.sign(p.y) : 0,
+    Math.abs(p.z) > band ? Math.sign(p.z) : 0,
+  );
+  if (dir.lengthSq() === 0 && hits[0].face) dir.copy(hits[0].face.normal);
+  if (dir.lengthSq() === 0) return;
+  snapGcodeViewTo(dir.normalize());
+}
+
+function snapGcodeViewTo(dir) {
+  gcodeView.orbit.phi = Math.acos(Math.max(-1, Math.min(1, dir.y)));
+  gcodeView.orbit.theta = Math.atan2(dir.x, dir.z);
+  updateGcodeCamera();
 }
 
 function updateGcodeTimeline(total) {
@@ -4615,6 +4838,8 @@ function setGcodePreviewEmpty(text) {
   if (!empty) return;
   empty.textContent = text || "";
   empty.hidden = !text;
+  const tools = document.getElementById("gcode-view-tools");
+  if (tools) tools.hidden = !!text;
 }
 
 function scheduleGcodeRender() {
@@ -4635,10 +4860,10 @@ function renderGcodeScene() {
     gcodeView.width = width;
     gcodeView.height = height;
     gcodeView.renderer.setSize(width, height, false);
-    gcodeView.camera.aspect = width / height;
-    gcodeView.camera.updateProjectionMatrix();
+    syncGcodeProjection();
   }
   gcodeView.renderer.render(gcodeView.scene, gcodeView.camera);
+  renderGcodeViewCube();
 }
 
 async function loadActiveGcode() {
