@@ -207,7 +207,9 @@ type MachineFeedProfile struct {
 type MachineSoftEndstopProfile struct {
 	Enabled bool    `json:"enabled,omitempty"`
 	XMin    float64 `json:"x_min,omitempty"`
+	XMax    float64 `json:"x_max,omitempty"`
 	YMin    float64 `json:"y_min,omitempty"`
+	YMax    float64 `json:"y_max,omitempty"`
 	ZMin    float64 `json:"z_min,omitempty"`
 }
 
@@ -244,7 +246,8 @@ type SavedOrigin struct {
 	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
-// WorkArea is the top-down machine-coordinate XY rectangle shown in Control.
+// WorkArea is the top-down machine-coordinate XY travel envelope shown in
+// Control and used to translate pointer taps into machine targets.
 type WorkArea struct {
 	XMin float64 `json:"x_min"`
 	XMax float64 `json:"x_max"`

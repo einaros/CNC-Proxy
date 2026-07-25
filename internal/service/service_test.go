@@ -1000,7 +1000,7 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	if res.Learned.Identity.Model != "CarveraAir,FACTORY,PROBE" || res.Learned.Identity.Version != "1.2.3" || res.Learned.Identity.FileType != "lz" {
 		t.Fatalf("identity = %+v", res.Learned.Identity)
 	}
-	if res.UI.Machine.WorkArea != (store.WorkArea{XMin: -302, XMax: 0, YMin: -212, YMax: 0}) {
+	if res.UI.Machine.WorkArea != (store.WorkArea{XMin: -302, XMax: -1, YMin: -212, YMax: -1}) {
 		t.Fatalf("learned work area = %+v", res.UI.Machine.WorkArea)
 	}
 	if res.UI.Machine.FeedMaxMMMin != 2800 || res.Learned.Feed.MaxXYMMMin != 2800 {
@@ -1011,6 +1011,9 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	}
 	if res.Learned.SoftEndstop.Enabled || res.Learned.Clearance.X != -5 || res.Learned.Probe.RetractMM != 2 {
 		t.Fatalf("known config profile = %+v", res.Learned)
+	}
+	if res.Learned.SoftEndstop.XMax != -1 || res.Learned.SoftEndstop.YMax != -1 {
+		t.Fatalf("firmware travel maxima = %+v", res.Learned.SoftEndstop)
 	}
 	if !res.Learned.Anchors.Available || res.Learned.Anchors.Anchor1 != (store.XYPoint{X: -287.51, Y: -202.11}) || res.Learned.Anchors.Anchor2 != (store.XYPoint{X: -199.01, Y: -157.11}) {
 		t.Fatalf("learned anchors = %+v", res.Learned.Anchors)

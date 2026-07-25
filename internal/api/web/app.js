@@ -399,7 +399,7 @@ function defaultGamepadSettings() {
 
 function defaultMachineSettings() {
   return {
-    work_area: { x_min: -300, x_max: 0, y_min: -200, y_max: 0 },
+    work_area: { x_min: -302, x_max: -1, y_min: -212, y_max: -1 },
     origin: { x: 0, y: 0 },
     saved_origins: [],
     feed_min_mm_min: DEFAULT_MACHINE_FEED_MIN_MM_MIN,
@@ -472,13 +472,17 @@ function normalizeMachineSettings(machine) {
   machine = machine || {};
   const learned = normalizeMachineLearned(machine.learned);
   const work = machine.work_area || {};
-  const oldGeneratedDefault = Number(work.x_min) === -302 && Number(work.x_max) === 0 &&
-    Number(work.y_min) === -212 && Number(work.y_max) === 0 &&
-    Number(machine.origin?.x || 0) === 0 && Number(machine.origin?.y || 0) === 0;
   const hasLearnedWorkArea = Number.isFinite(learned.work_area?.x_min) && Number.isFinite(learned.work_area?.x_max) &&
     Number.isFinite(learned.work_area?.y_min) && Number.isFinite(learned.work_area?.y_max);
-  if (oldGeneratedDefault && !hasLearnedWorkArea) {
-    machine = { ...machine, work_area: d.work_area };
+  const oldNominalDefault = Number(work.x_min) === -300 && Number(work.x_max) === 0 &&
+    Number(work.y_min) === -200 && Number(work.y_max) === 0;
+  const oldTravelDefault = Number(work.x_min) === -302 && Number(work.x_max) === 0 &&
+    Number(work.y_min) === -212 && Number(work.y_max) === 0;
+  if (oldNominalDefault || oldTravelDefault) {
+    machine = {
+      ...machine,
+      work_area: hasLearnedWorkArea ? learned.work_area : d.work_area,
+    };
   }
   const normalizedWork = machine.work_area || {};
   const out = {
@@ -1534,7 +1538,7 @@ function machineLearnedSummaryLines(learned) {
   if (identity) lines.push(identity);
   const area = learned.work_area || {};
   if (Number.isFinite(area.x_min) && Number.isFinite(area.x_max) && Number.isFinite(area.y_min) && Number.isFinite(area.y_max)) {
-    lines.push(`bounds X ${fmtCoord(area.x_min)}..${fmtCoord(area.x_max)}  Y ${fmtCoord(area.y_min)}..${fmtCoord(area.y_max)}`);
+    lines.push(`travel X ${fmtCoord(area.x_min)}..${fmtCoord(area.x_max)}  Y ${fmtCoord(area.y_min)}..${fmtCoord(area.y_max)}`);
   }
   const zMin = finiteOr(learned.z_min_mm, NaN);
   const zMax = finiteOr(learned.z_max_mm, NaN);
@@ -6869,6 +6873,7 @@ function applyJogEvent(ev) {
       state.jog.tapFeedbackKind = "ok";
     }
   } else if (ev.type === "error") {
+    const terminalSessionError = ev.code !== "status_waiting";
     completeCommandDisarm(ev.seq, ev.message || jogErrorText(ev.code));
     if (ev.seq && ev.seq === state.jog.armPending) {
       const action = state.jog.armPendingAction;
@@ -6877,7 +6882,7 @@ function applyJogEvent(ev) {
       state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
-    if (!ev.seq && state.jog.armQueuedAction) {
+    if (!ev.seq && terminalSessionError && state.jog.armQueuedAction) {
       const action = state.jog.armQueuedAction;
       state.jog.armQueuedAction = "";
       state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
@@ -6900,24 +6905,24 @@ function applyJogEvent(ev) {
       clearOriginVerification();
       setOriginFeedback("Set " + label + " failed: " + (ev.message || jogErrorText(ev.code)), "error");
     }
-    if (!ev.seq && (state.jog.targetPending || state.jog.targetMotionPending)) {
+    if (!ev.seq && terminalSessionError && (state.jog.targetPending || state.jog.targetMotionPending)) {
       state.jog.targetPending = 0;
       state.jog.targetMotionPending = 0;
       cancelWorkCoordinateMove();
       state.jog.tapFeedback = "Move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
-    if (!ev.seq && state.jog.zStepPending) {
+    if (!ev.seq && terminalSessionError && state.jog.zStepPending) {
       state.jog.zStepPending = 0;
       state.jog.tapFeedback = "Z move failed: " + (ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
-    if (!ev.seq && state.jog.originPendingMode === "jog" && hasPendingOriginOperation()) {
+    if (!ev.seq && terminalSessionError && state.jog.originPendingMode === "jog" && hasPendingOriginOperation()) {
       const label = originTargetLabel(state.jog.originPendingLabel, state.jog.originPendingTargets);
       clearOriginVerification();
       setOriginFeedback("Set " + label + " failed: " + (ev.message || jogErrorText(ev.code)), "error");
     }
-    if (!ev.seq && state.jog.armPending) {
+    if (!ev.seq && terminalSessionError && state.jog.armPending) {
       const action = state.jog.armPendingAction;
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";

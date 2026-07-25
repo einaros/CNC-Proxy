@@ -396,6 +396,99 @@ func TestJogTargetRemainsExclusiveUntilObservedAtTarget(t *testing.T) {
 	}
 }
 
+func TestJogTargetThatStopsShortTerminatesAndAllowsNextTarget(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Now()
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.StatusInterval = time.Hour
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Target(2, machine.AxisValues{"x": 10, "y": -5}, 600, false, 0)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	s.mu.Lock()
+	verifyAfter := s.targetPending.verifyAfter
+	s.mu.Unlock()
+
+	now = verifyAfter.Add(time.Millisecond)
+	status := "<Idle|MPos:9.5,-5,0|WPos:9.5,-5,0>"
+	if err := s.applyStatusPayload(status); err != nil {
+		t.Fatal(err)
+	}
+	failed := readEvent(t, s, "error")
+	if failed.Seq != 2 || failed.Code != CodeTargetNotReached {
+		t.Fatalf("short target result = %+v, want terminal target_not_reached for seq 2", failed)
+	}
+	s.mu.Lock()
+	pending := s.targetPending
+	s.mu.Unlock()
+	if pending != nil {
+		t.Fatalf("short target remained pending: %+v", pending)
+	}
+
+	s.Target(3, machine.AxisValues{"x": 8, "y": -4}, 600, false, 0)
+	ack = drainUntil(t, s, "ack")
+	if ack.Seq != 3 {
+		t.Fatalf("next target ack = %+v, want seq 3", ack)
+	}
+}
+
+func TestJogTargetWithoutFreshCompletionStatusDisarms(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Now()
+	now := base
+	mgr.now = func() time.Time { return now }
+	mgr.cfg.StatusInterval = time.Hour
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Target(2, machine.AxisValues{"x": 10, "y": -5}, 600, false, 0)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	s.mu.Lock()
+	verifyAfter := s.targetPending.verifyAfter
+	s.lastStatusAt = s.targetPending.motionDoneAt.Add(-time.Millisecond)
+	s.statusInFlight = false
+	s.mu.Unlock()
+
+	now = verifyAfter.Add(statusQueryTimeout(mgr.cfg) + time.Millisecond)
+	s.motionTick()
+	failed := readEvent(t, s, "error")
+	if failed.Seq != 2 || failed.Code != CodeStaleStatus {
+		t.Fatalf("unverified target result = %+v, want terminal stale_status for seq 2", failed)
+	}
+	s.mu.Lock()
+	pending := s.targetPending
+	armed := s.armed
+	lease := s.lease
+	s.mu.Unlock()
+	if pending != nil || armed || lease != nil {
+		t.Fatalf("unverified target state pending=%+v armed=%t lease=%v, want fully disarmed", pending, armed, lease)
+	}
+}
+
 func TestJogTargetWaitsForQueuedManualMotion(t *testing.T) {
 	mgr, _, cleanup := newJogManager(t)
 	defer cleanup()

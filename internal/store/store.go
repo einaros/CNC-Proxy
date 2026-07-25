@@ -1061,10 +1061,10 @@ func defaultUISettings() UISettings {
 func defaultMachineUI() MachineUI {
 	return MachineUI{
 		WorkArea: WorkArea{
-			XMin: -300,
-			XMax: 0,
-			YMin: -200,
-			YMax: 0,
+			XMin: -302,
+			XMax: -1,
+			YMin: -212,
+			YMax: -1,
 		},
 		Origin:       XYPoint{X: 0, Y: 0},
 		SavedOrigins: []SavedOrigin{},
@@ -1079,8 +1079,12 @@ func normalizeMachineUI(in MachineUI, now time.Time) MachineUI {
 	d := defaultMachineUI()
 	learned := normalizeMachineLearned(in.Learned)
 	hasLearnedWorkArea := learned.WorkArea.XMin < learned.WorkArea.XMax && learned.WorkArea.YMin < learned.WorkArea.YMax
-	if in.WorkArea.XMin == -302 && in.WorkArea.XMax == 0 && in.WorkArea.YMin == -212 && in.WorkArea.YMax == 0 && in.Origin.X == 0 && in.Origin.Y == 0 {
-		if !hasLearnedWorkArea {
+	oldNominalDefault := in.WorkArea == (WorkArea{XMin: -300, XMax: 0, YMin: -200, YMax: 0})
+	oldTravelDefault := in.WorkArea == (WorkArea{XMin: -302, XMax: 0, YMin: -212, YMax: 0})
+	if oldNominalDefault || oldTravelDefault {
+		if hasLearnedWorkArea {
+			in.WorkArea = learned.WorkArea
+		} else {
 			in.WorkArea = d.WorkArea
 		}
 	}
@@ -1240,7 +1244,9 @@ func normalizeMachineSoftEndstopProfile(in MachineSoftEndstopProfile) MachineSof
 	return MachineSoftEndstopProfile{
 		Enabled: in.Enabled,
 		XMin:    normalizeFinite(in.XMin, 0),
+		XMax:    normalizeFinite(in.XMax, 0),
 		YMin:    normalizeFinite(in.YMin, 0),
+		YMax:    normalizeFinite(in.YMax, 0),
 		ZMin:    normalizeFinite(in.ZMin, 0),
 	}
 }

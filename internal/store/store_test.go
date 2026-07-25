@@ -285,11 +285,25 @@ func TestUISettingsGamepadDefaults(t *testing.T) {
 func TestUISettingsMachineDefaults(t *testing.T) {
 	s, _ := Open("")
 	got := s.UISettings()
-	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.XMax != 0 || got.Machine.WorkArea.YMin != -200 || got.Machine.WorkArea.YMax != 0 {
+	if got.Machine.WorkArea.XMin != -302 || got.Machine.WorkArea.XMax != -1 || got.Machine.WorkArea.YMin != -212 || got.Machine.WorkArea.YMax != -1 {
 		t.Fatalf("default machine work area = %+v", got.Machine.WorkArea)
 	}
 	if got.Machine.Origin.X != 0 || got.Machine.Origin.Y != 0 || got.Machine.FeedMinMMMin != 1 || got.Machine.FeedMaxMMMin != 3000 || got.Machine.TapFeedMMMin != 600 || got.Machine.SavedOrigins == nil || len(got.Machine.SavedOrigins) != 0 {
 		t.Fatalf("default machine settings = %+v", got.Machine)
+	}
+}
+
+func TestUISettingsMigratesNominalPreviewToTravelEnvelope(t *testing.T) {
+	s, _ := Open("")
+	ui := s.UISettings()
+	ui.Machine.WorkArea = WorkArea{XMin: -300, XMax: 0, YMin: -200, YMax: 0}
+	if _, err := s.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+	got := s.UISettings()
+	want := WorkArea{XMin: -302, XMax: -1, YMin: -212, YMax: -1}
+	if got.Machine.WorkArea != want {
+		t.Fatalf("migrated machine travel envelope = %+v, want %+v", got.Machine.WorkArea, want)
 	}
 }
 

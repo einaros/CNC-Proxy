@@ -488,6 +488,10 @@ test("normalizeMachineSettings still defaults and clamps feed_max", () => {
   const ctx = buildContext(settingsFunctions, settingsConsts);
   const missing = vm.runInContext("normalizeMachineSettings({})", ctx);
   assert.equal(missing.feed_max_mm_min, 3000);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(missing.work_area)),
+    { x_min: -302, x_max: -1, y_min: -212, y_max: -1 },
+  );
   const high = vm.runInContext("normalizeMachineSettings({ feed_max_mm_min: 20000 })", ctx);
   assert.equal(high.feed_max_mm_min, 10000);
   const belowMin = vm.runInContext(
@@ -495,6 +499,48 @@ test("normalizeMachineSettings still defaults and clamps feed_max", () => {
     ctx,
   );
   assert.equal(belowMin.feed_max_mm_min, 500);
+});
+
+test("machine travel bounds replace the old nominal preview and drive tap mapping", () => {
+  const state = {
+    ui: {
+      machine: {
+        work_area: { x_min: -300, x_max: 0, y_min: -200, y_max: 0 },
+        learned: {
+          work_area: { x_min: -371, x_max: -1, y_min: -250, y_max: -1 },
+        },
+      },
+    },
+  };
+  const ctx = buildContext(
+    settingsFunctions.concat(["workAreaBounds", "workAreaRect", "machineToWorkAreaPoint", "workAreaToMachinePoint"]),
+    settingsConsts.concat(["WORKAREA_PAD", "WORKAREA_VIEW_SIZE"]),
+    { state },
+  );
+  const bounds = JSON.parse(vm.runInContext("JSON.stringify(workAreaBounds())", ctx));
+  assert.deepEqual(bounds, { x_min: -371, x_max: -1, y_min: -250, y_max: -1 });
+
+  const mapped = JSON.parse(vm.runInContext(
+    `JSON.stringify((() => {
+      const rect = workAreaRect();
+      return {
+        min: workAreaToMachinePoint({ x: rect.x, y: rect.y + rect.height }),
+        max: workAreaToMachinePoint({ x: rect.x + rect.width, y: rect.y }),
+        minPreview: machineToWorkAreaPoint({ x: -371, y: -250 }),
+        maxPreview: machineToWorkAreaPoint({ x: -1, y: -1 }),
+        rect,
+      };
+    })())`,
+    ctx,
+  ));
+  assert.ok(Math.abs(mapped.min.x - -371) < 1e-9);
+  assert.ok(Math.abs(mapped.min.y - -250) < 1e-9);
+  assert.ok(Math.abs(mapped.max.x - -1) < 1e-9);
+  assert.ok(Math.abs(mapped.max.y - -1) < 1e-9);
+  assert.equal(mapped.minPreview.x, mapped.rect.x);
+  assert.equal(mapped.minPreview.y, mapped.rect.y + mapped.rect.height);
+  assert.equal(mapped.maxPreview.x, mapped.rect.x + mapped.rect.width);
+  assert.equal(mapped.maxPreview.y, mapped.rect.y);
 });
 
 test("safeZForTapMove stays below a learned Z soft maximum", () => {
@@ -709,6 +755,73 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, "target");
   assert.equal(state.jog.targetMotionPending, 9);
+});
+
+test("a terminal target error releases Tap Move without disarming", () => {
+  const sent = [];
+  const state = {
+    ui: { machine: {} },
+    machine: { mpos: { x: 1, y: 2, z: 0 } },
+    jog: {
+      link: "online",
+      armed: true,
+      sent: new Map(),
+      armPending: 0,
+      armPendingAction: "",
+      armQueuedAction: "",
+      commandDisarm: null,
+      targetPending: 12,
+      targetMotionPending: 12,
+      workMovePending: 0,
+      target: { x: 12, y: -4, z: 0 },
+      targetLabel: "X 12.0 Y -4.0",
+      tapFeedback: "Moving...",
+      tapFeedbackKind: "",
+      zStepPending: 0,
+      originPendingMode: "",
+      error: "",
+      errorCode: "",
+    },
+  };
+  const ctx = buildContext(
+    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "completeCommandDisarm", "tapTargetLabel", "sendTapMove", "applyJogEvent"],
+    [],
+    {
+      state,
+      document: { getElementById: () => ({ textContent: "" }) },
+      performance: { now: () => 100 },
+      currentTapFeed: () => 600,
+      normalizeMachineSettings: (machine) => ({ ...machine, safe_z_disabled: true }),
+      safeZForTapMove: () => 0,
+      hasPendingOriginOperation: () => false,
+      sendJog: (message) => {
+        sent.push(message);
+        return 13;
+      },
+      setTapFeedback: (message, kind) => {
+        state.jog.tapFeedback = message;
+        state.jog.tapFeedbackKind = kind;
+      },
+      renderJog: () => {},
+      renderMachine: () => {},
+      clearTimeout: () => {},
+    },
+  );
+
+  vm.runInContext("applyJogEvent({ type: 'error', code: 'status_waiting', message: 'Waiting for fresh machine status before continuing jog.' })", ctx);
+  assert.equal(state.jog.targetPending, 12);
+  assert.equal(state.jog.targetMotionPending, 12);
+
+  vm.runInContext("applyJogEvent({ type: 'error', seq: 12, code: 'target_not_reached', message: 'machine stopped before reaching the requested tap target' })", ctx);
+  assert.equal(state.jog.armed, true);
+  assert.equal(state.jog.targetPending, 0);
+  assert.equal(state.jog.targetMotionPending, 0);
+  assert.equal(vm.runInContext("tapMoveTargetBusy()", ctx), false);
+
+  vm.runInContext("sendTapMove({ x: 20, y: 5 })", ctx);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "target");
+  assert.equal(state.jog.targetMotionPending, 13);
 });
 
 test("Trace outline waits for a pending Tap Move target", async () => {

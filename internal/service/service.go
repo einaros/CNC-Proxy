@@ -64,6 +64,7 @@ const (
 	maxFailedJobsPerPath = 20
 	defaultSafeZMM       = -3.0
 	safeZLimitMarginMM   = 3.0
+	firmwareTravelMaxMM  = -1.0
 )
 
 // Service wires the store, arbiter (for machine state), and local cache.
@@ -1132,16 +1133,24 @@ func applyKnownMachineConfig(learned *store.MachineLearned) {
 	}
 
 	xMin, xMinOK := num("soft_endstop.x_min")
-	xMax, xMaxOK := num("soft_endstop.x_max", "alpha_max")
+	xMax, xMaxOK := num("soft_endstop.x_max")
 	yMin, yMinOK := num("soft_endstop.y_min")
-	yMax, yMaxOK := num("soft_endstop.y_max", "beta_max")
+	yMax, yMaxOK := num("soft_endstop.y_max")
 	if !xMaxOK {
-		xMax = 0
+		xMax = firmwareTravelMaxMM
 		xMaxOK = xMinOK
 	}
 	if !yMaxOK {
-		yMax = 0
+		yMax = firmwareTravelMaxMM
 		yMaxOK = yMinOK
+	}
+	if xMinOK && xMaxOK {
+		learned.SoftEndstop.XMin = xMin
+		learned.SoftEndstop.XMax = xMax
+	}
+	if yMinOK && yMaxOK {
+		learned.SoftEndstop.YMin = yMin
+		learned.SoftEndstop.YMax = yMax
 	}
 	if xMinOK && xMaxOK && yMinOK && yMaxOK {
 		area := store.WorkArea{XMin: xMin, XMax: xMax, YMin: yMin, YMax: yMax}

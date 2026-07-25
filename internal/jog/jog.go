@@ -23,6 +23,7 @@ const (
 	CodeBusy              = "busy"
 	CodeStaleStatus       = "stale_status"
 	CodeStatusWaiting     = "status_waiting"
+	CodeTargetNotReached  = "target_not_reached"
 	CodeBadInput          = "bad_input"
 	CodeControllerWaiting = "controller_waiting"
 	CodeMachineError      = "machine_error"
@@ -54,6 +55,7 @@ const (
 	maxManualStepMM           = 50.0
 	maxTargetFeedMMMin        = 10000.0
 	targetPositionToleranceMM = 0.02
+	minTargetVerifyGrace      = 2 * time.Second
 )
 
 // Config controls the jog engine.
@@ -237,8 +239,10 @@ type plannedSegment struct {
 }
 
 type pendingTarget struct {
-	seq    int64
-	target machine.AxisValues
+	seq          int64
+	target       machine.AxisValues
+	motionDoneAt time.Time
+	verifyAfter  time.Time
 }
 
 // Manager owns the single active jog session.
@@ -818,7 +822,12 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	}
 	s.emitMotionEstimate(now, st, target, delta, lastCmd, queuedLead)
 	s.mu.Lock()
-	s.targetPending = &pendingTarget{seq: seq, target: copyAxes(target)}
+	s.targetPending = &pendingTarget{
+		seq:          seq,
+		target:       copyAxes(target),
+		motionDoneAt: queuedUntil,
+		verifyAfter:  queuedUntil.Add(targetVerifyGrace(cfg)),
+	}
 	s.haveInput = false
 	s.mu.Unlock()
 	s.emit(Event{Type: "ack", Seq: seq, Target: target})
@@ -1013,12 +1022,21 @@ func (s *Session) applyStatusPayload(payload string) error {
 	now := s.mgr.now()
 	s.lastStatusAt = now
 	var completed *pendingTarget
-	if pending := s.targetPending; pending != nil && targetReached(st.MPos, pending.target) {
-		completed = &pendingTarget{seq: pending.seq, target: copyAxes(pending.target)}
-		s.targetPending = nil
-		s.planned = copyAxes(st.MPos)
-		s.queuedUntil = time.Time{}
-		s.segments = nil
+	var notReached *pendingTarget
+	if pending := s.targetPending; pending != nil {
+		switch {
+		case targetReached(st.MPos, pending.target):
+			completed = copyPendingTarget(pending)
+			s.targetPending = nil
+		case !now.Before(pending.verifyAfter) && st.State == machine.Idle:
+			notReached = copyPendingTarget(pending)
+			s.targetPending = nil
+		}
+		if completed != nil || notReached != nil {
+			s.planned = copyAxes(st.MPos)
+			s.queuedUntil = time.Time{}
+			s.segments = nil
+		}
 	}
 	if queueLead(now, s.queuedUntil) == 0 {
 		s.planned = copyAxes(st.MPos)
@@ -1031,6 +1049,14 @@ func (s *Session) applyStatusPayload(payload string) error {
 	s.emit(Event{Type: "status", Status: statusEvent(st, age)})
 	if completed != nil {
 		s.emit(Event{Type: "target_complete", Seq: completed.seq, Target: completed.target})
+	}
+	if notReached != nil {
+		s.emit(Event{
+			Type:    "error",
+			Seq:     notReached.seq,
+			Code:    CodeTargetNotReached,
+			Message: "machine stopped before reaching the requested tap target",
+		})
 	}
 	if !canContinueJog(st.State) {
 		s.release(nil)
@@ -1049,7 +1075,8 @@ func (s *Session) motionTick() {
 	planned := copyAxes(s.planned)
 	lastStatusAt := s.lastStatusAt
 	queuedUntil := s.queuedUntil
-	targetPending := s.targetPending != nil
+	statusInFlight := s.statusInFlight
+	targetPending := copyPendingTarget(s.targetPending)
 	s.mu.Unlock()
 
 	queuedLead := queueLead(now, queuedUntil)
@@ -1064,7 +1091,36 @@ func (s *Session) motionTick() {
 		s.emitState(0)
 		return
 	}
-	if targetPending {
+	if targetPending != nil {
+		if !now.Before(targetPending.verifyAfter) {
+			statusAfterMotion := !lastStatusAt.Before(targetPending.motionDoneAt)
+			statusFresh := !lastStatusAt.IsZero() && now.Sub(lastStatusAt) <= activeStatusMaxAge(s.mgr.cfg)
+			if statusAfterMotion && statusFresh && st.State != machine.Run {
+				if s.clearPendingTarget(targetPending.seq) {
+					s.emit(Event{
+						Type:    "error",
+						Seq:     targetPending.seq,
+						Code:    CodeTargetNotReached,
+						Message: "machine stopped before reaching the requested tap target",
+					})
+				}
+				return
+			}
+			verifyTimeout := targetPending.verifyAfter.Add(statusQueryTimeout(s.mgr.cfg))
+			if !statusFresh && !statusInFlight && !now.Before(verifyTimeout) {
+				if s.clearPendingTarget(targetPending.seq) {
+					s.release(nil)
+					s.emit(Event{
+						Type:    "error",
+						Seq:     targetPending.seq,
+						Code:    CodeStaleStatus,
+						Message: "tap move ended without a fresh position report; movement was disarmed",
+					})
+					s.emitState(targetPending.seq)
+				}
+				return
+			}
+		}
 		if queuedLead > 0 {
 			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
 		}
@@ -1249,6 +1305,40 @@ func targetReached(position, target machine.AxisValues) bool {
 			return false
 		}
 	}
+	return true
+}
+
+func targetVerifyGrace(cfg Config) time.Duration {
+	cfg = cfg.normalize()
+	grace := 4 * cfg.StatusInterval
+	if grace < minTargetVerifyGrace {
+		return minTargetVerifyGrace
+	}
+	return grace
+}
+
+func copyPendingTarget(in *pendingTarget) *pendingTarget {
+	if in == nil {
+		return nil
+	}
+	return &pendingTarget{
+		seq:          in.seq,
+		target:       copyAxes(in.target),
+		motionDoneAt: in.motionDoneAt,
+		verifyAfter:  in.verifyAfter,
+	}
+}
+
+func (s *Session) clearPendingTarget(seq int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.targetPending == nil || s.targetPending.seq != seq {
+		return false
+	}
+	s.targetPending = nil
+	s.planned = copyAxes(s.lastStatus.MPos)
+	s.queuedUntil = time.Time{}
+	s.segments = nil
 	return true
 }
 
