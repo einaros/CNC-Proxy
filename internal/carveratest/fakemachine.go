@@ -27,6 +27,7 @@ type FakeMachine struct {
 	statusReplyDelay    time.Duration     // optional test hook: delay "?" replies
 	probeReplyDelay     time.Duration     // optional test hook: delay G30/G38 replies
 	dropStatusReplies   bool              // optional test hook: ignore "?" replies
+	dropStatusN         int               // optional test hook: ignore the next N "?" replies
 	failCmd             map[string]bool   // command prefixes to fail (for error-path tests)
 	ftype               string            // advertised upload type ("lz" enables compression)
 	compressDownloads   bool              // if set, downloads send a .lz container
@@ -164,6 +165,15 @@ func (m *FakeMachine) SetDropStatusReplies(v bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dropStatusReplies = v
+}
+
+// DropNextStatusReplies makes the fake ignore the next n `?` status polls and
+// answer normally afterward, emulating STATUS_RES replies lost on the WiFi
+// bridge in the middle of an operation.
+func (m *FakeMachine) DropNextStatusReplies(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dropStatusN = n
 }
 
 // SetFtype sets the upload type advertised via "ftype" ("lz" enables QuickLZ
@@ -341,6 +351,10 @@ func (m *FakeMachine) handle(c net.Conn) {
 							m.mu.Lock()
 							delay := m.statusReplyDelay
 							drop := m.dropStatusReplies
+							if !drop && m.dropStatusN > 0 {
+								m.dropStatusN--
+								drop = true
+							}
 							s := ""
 							if !drop && delay <= 0 {
 								s = m.statusAtLocked(time.Now())

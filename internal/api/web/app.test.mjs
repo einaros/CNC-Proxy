@@ -145,6 +145,7 @@ const settingsConsts = [
 
 const outlineDXFFunctions = [
   "buildOutlineDXF",
+  "exportWorkOrigin",
   "outlineExportPoints",
   "outlineEffectiveExportPoints",
   "effectiveOutlineGeometry",
@@ -292,7 +293,7 @@ test("field height samples can use the captured Z origin without a floor probe",
   ]);
 });
 
-test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation, and captured origin", () => {
+test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and current work origin", () => {
   const results = [];
   for (const y of [0, 10, 20]) {
     for (const x of [0, 10, 20]) {
@@ -302,6 +303,8 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
   }
   const state = {
     outline: {
+      closed: true,
+      points: [results[0], results[2], results[8], results[6]],
       origin: { x: -100, y: -50, z: -20 },
       floorMachineZ: null,
       fieldReferenceMachineZ: -20,
@@ -312,6 +315,8 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
   const ctx = buildContext(
     [
       "buildHeightOBJ",
+      "exportWorkOrigin",
+      "requireHeightExportOutline",
       "triangleCCW",
       "constrainedOutlineTriangles",
       "orderedOutlineBoundaryIndices",
@@ -329,7 +334,6 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
       "pointInsideCircumcircle",
       "fieldProbeExportPoints",
       "fieldProbeHeightReference",
-      "fieldProbeExportOrigin",
       "cloneOutlineOrigin",
       "finiteOr",
       "axisValue",
@@ -338,17 +342,17 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
     [],
     {
       state,
-      currentWorkOrigin: () => ({ x: 500, y: 600, z: 700 }),
+      currentWorkOrigin: () => ({ x: -110, y: -70, z: -20 }),
       visualWorkOrigin: () => ({ x: 800, y: 900, z: 1000 }),
       outlineEffectiveExportPoints: () => [
-        { x: 0, y: 0 },
-        { x: 20, y: 0 },
-        { x: 20, y: 20 },
-        { x: 0, y: 20 },
+        { x: 10, y: 20 },
+        { x: 30, y: 20 },
+        { x: 30, y: 40 },
+        { x: 10, y: 40 },
       ],
     },
   );
-  const obj = vm.runInContext("buildHeightOBJ(fieldProbeExportOrigin())", ctx);
+  const obj = vm.runInContext("buildHeightOBJ()", ctx);
   const vertices = obj.split("\n").filter((line) => line.startsWith("v "));
   const faces = obj.split("\n").filter((line) => line.startsWith("f "));
   assert.equal(vertices.length, 9);
@@ -358,10 +362,11 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
   assert.match(obj, /# coordinate system: CNC work coordinates, right-handed Z-up/);
   assert.match(obj, /# axis mapping: OBJ X=CNC X, OBJ Y=CNC Y, OBJ Z=CNC Z/);
   assert.match(obj, /# triangulation: constrained Delaunay with locked outline edges/);
-  assert.match(obj, /# cnc_work_origin_machine_mm: -100 -50 -20/);
-  assert.ok(vertices.includes("v 0 0 0"), "captured work origin remains OBJ 0,0,0");
-  assert.ok(vertices.includes("v 10 20 1.5"), "CNC X10 Y20 Z1.5 remains OBJ X10 Y20 Z1.5");
-  assert.ok(vertices.includes("v 20 20 2"), "millimeter extents are preserved without scaling");
+  assert.match(obj, /# cnc_xy_origin_machine_mm: -110 -70/);
+  assert.ok(vertices.includes("v 10 20 0"), "OBJ XY is offset from the current work origin");
+  assert.ok(vertices.includes("v 20 40 1.5"), "OBJ preserves current CNC work coordinates");
+  assert.ok(vertices.includes("v 30 40 2"), "millimeter extents are preserved without scaling");
+  assert.equal(obj.includes("# cnc_xy_origin_machine_mm: -100 -50"), false, "captured XY origin is not reused after work zero changes");
   const faceIndices = faces.map((line) => line.slice(2).split(" ").map(Number));
   const faceEdges = new Set(faceIndices.flatMap(([a, b, c]) => [[a, b], [b, c], [c, a]])
     .map(([a, b]) => Math.min(a, b) + ":" + Math.max(a, b)));
@@ -382,9 +387,129 @@ test("OBJ export preserves Fusion millimeter work coordinates, Z-up orientation,
   }
 
   state.outline.fieldProbeResults[8] = { ...state.outline.fieldProbeResults[0], machine_z: -19 };
-  const duplicateOBJ = vm.runInContext("buildHeightOBJ(fieldProbeExportOrigin())", ctx);
+  const duplicateOBJ = vm.runInContext("buildHeightOBJ()", ctx);
   assert.equal(duplicateOBJ.split("\n").filter((line) => line.startsWith("v ")).length, 9);
   assert.match(duplicateOBJ, /^p 9$/m, "a coincident ninth sample remains an explicit OBJ point");
+});
+
+test("PGM export uses the same current work origin instead of the captured outline origin", () => {
+  const points = [
+    { x: 115, y: 77, machine_x: 15, machine_y: 27, machine_z: -9, probe_kind: "outline" },
+    { x: 138, y: 77, machine_x: 38, machine_y: 27, machine_z: -8, probe_kind: "outline" },
+    { x: 138, y: 108, machine_x: 38, machine_y: 58, machine_z: -7, probe_kind: "outline" },
+    { x: 115, y: 108, machine_x: 15, machine_y: 58, machine_z: -8, probe_kind: "outline" },
+  ];
+  const state = {
+    outline: {
+      closed: true,
+      curveFit: false,
+      points,
+      origin: { x: -100, y: -50, z: -10 },
+      floorMachineZ: null,
+      fieldReferenceMachineZ: -10,
+      fieldReferenceKind: "work_origin",
+      fieldSpotGapMM: 8,
+      fieldProbeResults: points,
+    },
+  };
+  const ctx = buildContext(
+    [
+      "buildHeightPGM",
+      "buildInterpolatedHeightGrid",
+      "exportWorkOrigin",
+      "requireHeightExportOutline",
+      "outlineExportPoints",
+      "outlineEffectiveExportPoints",
+      "effectiveOutlineGeometry",
+      "flattenCurveSegment",
+      "flattenCubic",
+      "cubicFlatEnough",
+      "midpoint",
+      "fieldProbeExportPoints",
+      "fieldProbeHeightReference",
+      "fieldProbeCenterSpacing",
+      "fieldProbeSpotGap",
+      "exportExtents",
+      "pointInPolygonOrBoundary",
+      "pointInPolygon",
+      "distancePointToSegment",
+      "interpolateZ",
+      "cloneOutlineOrigin",
+      "finiteOr",
+      "axisValue",
+      "pathNum",
+    ],
+    [
+      "PROBE_SPOT_DIAMETER_MM",
+      "DEFAULT_FIELD_SPOT_GAP_MM",
+      "MAX_EFFECTIVE_OUTLINE_POINTS",
+      "OUTLINE_CURVE_TOLERANCE_MM",
+    ],
+    {
+      state,
+      currentWorkOrigin: () => ({ x: 5, y: 7, z: -10 }),
+      visualWorkOrigin: () => ({ x: 800, y: 900, z: 1000 }),
+    },
+  );
+  const pgm = vm.runInContext("buildHeightPGM()", ctx);
+  assert.match(pgm, /^P2\n/);
+  assert.match(pgm, /# cnc_xy_origin_machine_mm: 5 7/);
+  assert.match(pgm, /# x_min_mm: 10/);
+  assert.match(pgm, /# x_max_mm: 33/);
+  assert.match(pgm, /# y_min_mm: 20/);
+  assert.match(pgm, /# y_max_mm: 51/);
+  assert.match(pgm, /# x_spacing_mm: 11\.5/);
+  assert.match(pgm, /# y_spacing_mm: 10\.3333/);
+  assert.match(pgm, /# raster_columns: X min to X max/);
+  assert.match(pgm, /# raster_rows: Y max to Y min/);
+  assert.equal(pgm.includes("# cnc_xy_origin_machine_mm: -100 -50"), false);
+});
+
+test("all coordinate exports use a live XY origin, fall back coherently, and never invent machine zero", () => {
+  const state = { outline: { origin: { x: -100, y: -50, z: -20 } } };
+  let live = { x: 5, y: 7, z: -10 };
+  const ctx = buildContext(
+    ["exportWorkOrigin", "cloneOutlineOrigin", "axisValue"],
+    [],
+    {
+      state,
+      currentWorkOrigin: () => live,
+    },
+  );
+  assert.deepEqual(
+    JSON.parse(vm.runInContext("JSON.stringify(exportWorkOrigin())", ctx)),
+    { x: 5, y: 7, z: -10 },
+  );
+  live = { z: -9 };
+  assert.deepEqual(
+    JSON.parse(vm.runInContext("JSON.stringify(exportWorkOrigin())", ctx)),
+    { x: -100, y: -50, z: -20 },
+    "a partial live origin falls back to one coherent captured frame",
+  );
+  live = null;
+  state.outline.origin = null;
+  assert.throws(
+    () => vm.runInContext("exportWorkOrigin()", ctx),
+    /current XY work origin is unavailable/,
+  );
+});
+
+test("height exports reject an open outline even when probe samples were loaded", () => {
+  const state = {
+    outline: {
+      closed: false,
+      points: [{}, {}, {}],
+      fieldProbeResults: [{}, {}, {}],
+    },
+  };
+  const ctx = buildContext(["buildHeightOBJ", "buildHeightPGM", "requireHeightExportOutline"], [], { state });
+  for (const exporter of ["buildHeightOBJ", "buildHeightPGM"]) {
+    assert.throws(
+      () => vm.runInContext(exporter + "()", ctx),
+      /closed outline needs at least three points/,
+      exporter + " must reject an open outline before generating output",
+    );
+  }
 });
 
 test("OBJ triangulation locks a concave outline before covering every internal sample", () => {

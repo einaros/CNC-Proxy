@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -2142,26 +2143,53 @@ func traceIdleTimeout(from, to TracePoint, feedMMMin float64) time.Duration {
 	return estimated
 }
 
+// waitTraceMotion polls `?` until the machine is Idle at target. Status polls
+// ride the same lossy WiFi path as everything else: the firmware/ESP8266 bridge
+// can delay or drop a single STATUS_RES, so one failed poll must not abort a
+// multi-minute trace mid-outline. Transient poll failures (reply timeout,
+// garbled payload) are retried until the segment deadline; hard connection
+// errors still fail immediately.
 func (s *Service) waitTraceMotion(c *client.Conn, target machine.AxisValues, timeout time.Duration) (machine.Status, error) {
 	deadline := time.Now().Add(timeout)
 	var last machine.Status
+	var lastErr error
 	for {
 		st, err := s.queryRecoveryStatus(c)
-		if err != nil {
+		switch {
+		case err == nil:
+			lastErr = nil
+			last = st
+			if st.State == machine.Idle && traceTargetReached(st.MPos, target) {
+				return st, nil
+			}
+			if st.State != machine.Idle && st.State != machine.Run {
+				return st, fmt.Errorf("machine entered %s before reaching %s", statusSummary(st), traceTargetLabel(target))
+			}
+		case transientStatusPollError(err):
+			lastErr = err
+		default:
 			return st, err
 		}
-		last = st
-		if st.State == machine.Idle && traceTargetReached(st.MPos, target) {
-			return st, nil
-		}
-		if st.State != machine.Idle && st.State != machine.Run {
-			return st, fmt.Errorf("machine entered %s before reaching %s", statusSummary(st), traceTargetLabel(target))
-		}
 		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return last, fmt.Errorf("timed out before reaching %s: %v", traceTargetLabel(target), lastErr)
+			}
 			return last, fmt.Errorf("timed out in %s before reaching %s", statusSummary(last), traceTargetLabel(target))
 		}
 		time.Sleep(traceStatusPollInterval)
 	}
+}
+
+// transientStatusPollError reports whether a status poll failure is a one-off
+// worth retrying (lost/late STATUS_RES, garbled payload) rather than a broken
+// connection. Reply timeouts are net.Error timeouts; malformed payloads carry
+// ErrMachineStatusStale. EOF/closed-connection errors are not transient.
+func transientStatusPollError(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
+	}
+	return errors.Is(err, ErrMachineStatusStale)
 }
 
 func traceTargetReached(actual, target machine.AxisValues) bool {
@@ -2187,16 +2215,27 @@ func traceTargetLabel(target machine.AxisValues) string {
 func (s *Service) waitMachineIdle(c *client.Conn, timeout time.Duration) (machine.Status, error) {
 	deadline := time.Now().Add(timeout)
 	var last machine.Status
+	var lastErr error
 	for {
 		st, err := s.queryRecoveryStatus(c)
-		if err != nil {
+		switch {
+		case err == nil:
+			lastErr = nil
+			last = st
+			if st.State == machine.Idle {
+				return st, nil
+			}
+		case transientStatusPollError(err):
+			// Same reasoning as waitTraceMotion: one lost STATUS_RES must not
+			// fail a probe-retract verification; keep polling until the deadline.
+			lastErr = err
+		default:
 			return st, err
 		}
-		last = st
-		if st.State == machine.Idle {
-			return st, nil
-		}
 		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return last, fmt.Errorf("status polling failed: %v", lastErr)
+			}
 			return last, nil
 		}
 		time.Sleep(traceStatusPollInterval)
@@ -2502,10 +2541,17 @@ func (s *Service) queryRecoveryStatus(c *client.Conn) (machine.Status, error) {
 	if err != nil {
 		return machine.Status{}, err
 	}
-	if !s.arb.Tracker().ObserveStatusPayload(payload) {
+	st, ok := machine.ParseStatusPayload(payload)
+	if !ok {
 		return machine.Status{}, fmt.Errorf("%w: machine returned malformed status", ErrMachineStatusStale)
 	}
-	st, _ := s.arb.Tracker().Current()
+	// Feed the shared tracker, but return the status parsed from THIS query's
+	// reply. Tracker().Current() can be swapped by a concurrent observer (the
+	// relay sniffs every machine STATUS_RES into the same tracker) between the
+	// observe and the read-back, and gating/verification decisions must be made
+	// on the reply that was actually solicited on this connection.
+	s.arb.Tracker().ObserveStatusPayload(payload)
+	st.ObservedAt = time.Now()
 	return st, nil
 }
 

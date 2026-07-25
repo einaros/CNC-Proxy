@@ -3395,8 +3395,22 @@ function downloadBlob(filename, content, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+function exportWorkOrigin() {
+  for (const candidate of [currentWorkOrigin(), state.outline.origin]) {
+    const origin = cloneOutlineOrigin(candidate);
+    if (axisValue(origin, "x") !== null && axisValue(origin, "y") !== null) return origin;
+  }
+  throw new Error("current XY work origin is unavailable");
+}
+
+function requireHeightExportOutline() {
+  if (!state.outline.closed || state.outline.points.length < 3) {
+    throw new Error("closed outline needs at least three points");
+  }
+}
+
 function buildOutlineDXF() {
-  const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
+  const origin = exportWorkOrigin();
   let points = state.outline.curveFit && state.outline.points.length >= 3
     ? outlineEffectiveExportPoints(origin)
     : outlineExportPoints(origin);
@@ -3528,12 +3542,6 @@ function fieldProbeHeightReference(origin) {
   throw new Error("field probe Z reference is unavailable");
 }
 
-function fieldProbeExportOrigin() {
-  const captured = cloneOutlineOrigin(state.outline.origin);
-  if (axisValue(captured, "x") !== null && axisValue(captured, "y") !== null) return captured;
-  return cloneOutlineOrigin(currentWorkOrigin() || visualWorkOrigin()) || { x: 0, y: 0 };
-}
-
 function exportExtents(table, points) {
   let minX = table.x_min;
   let maxX = table.x_max;
@@ -3564,8 +3572,7 @@ function exportExtents(table, points) {
 
 function exportHeightOBJ() {
   try {
-    const origin = fieldProbeExportOrigin();
-    const obj = buildHeightOBJ(origin);
+    const obj = buildHeightOBJ();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     downloadBlob("cnc-outline-height-" + stamp + ".obj", obj, "text/plain");
     setOutlineFeedback("OBJ export started.", "ok");
@@ -3574,9 +3581,10 @@ function exportHeightOBJ() {
   }
 }
 
-function buildHeightOBJ(origin) {
+function buildHeightOBJ() {
+  requireHeightExportOutline();
+  const origin = exportWorkOrigin();
   const outline = outlineEffectiveExportPoints(origin);
-  if (outline.length < 3) throw new Error("closed outline needs at least three points");
   const samples = fieldProbeExportPoints(origin).filter((point) => [point.x, point.y, point.z].every(Number.isFinite));
   if (samples.length < 3) throw new Error("field probe needs at least three samples");
   const triangulationPoints = [];
@@ -3600,8 +3608,8 @@ function buildHeightOBJ(origin) {
     "# coordinate system: CNC work coordinates, right-handed Z-up",
     "# axis mapping: OBJ X=CNC X, OBJ Y=CNC Y, OBJ Z=CNC Z",
     "# triangulation: constrained Delaunay with locked outline edges",
-    "# origin: captured CNC work origin",
-    "# cnc_work_origin_machine_mm: " + pathNum(originX) + " " + pathNum(originY) + " " + pathNum(reference.machineZ),
+    "# xy coordinates: CNC work coordinates",
+    "# cnc_xy_origin_machine_mm: " + pathNum(originX) + " " + pathNum(originY),
     "# CNC Z coordinates: " + reference.label,
     "# z_reference_machine_mm: " + pathNum(reference.machineZ),
     "# sample_count: " + samples.length,
@@ -3849,55 +3857,70 @@ function pointInPolygonOrBoundary(point, polygon) {
 
 function exportHeightImage() {
   try {
-    const origin = cloneOutlineOrigin(currentWorkOrigin() || state.outline.origin || visualWorkOrigin()) || { x: 0, y: 0 };
-    const mesh = buildInterpolatedHeightGrid(origin);
-    const values = [];
-    for (const row of mesh.points) {
-      for (const p of row) if (p) values.push(p.z);
-    }
-    if (!values.length) throw new Error("field probe has no samples inside the outline");
-    const minZ = Math.min(...values);
-    const maxZ = Math.max(...values);
-    const span = maxZ - minZ || 1;
-    const reference = fieldProbeHeightReference(origin);
-    const rows = [
-      "P2",
-      "# CNC Proxy outline height image",
-      "# units: mm",
-      "# xy coordinates: current work zero",
-      "# z coordinates: " + reference.label,
-      "# z_reference_machine_mm: " + pathNum(reference.machineZ),
-      "# x_min_mm: " + pathNum(mesh.xMin),
-      "# y_min_mm: " + pathNum(mesh.yMin),
-      "# probe_diameter_mm: " + pathNum(PROBE_SPOT_DIAMETER_MM),
-      "# spot_gap_mm: " + pathNum(fieldProbeSpotGap()),
-      "# center_spacing_mm: " + pathNum(mesh.spacing),
-      "# z_min_mm: " + pathNum(minZ),
-      "# z_max_mm: " + pathNum(maxZ),
-      mesh.cols + " " + mesh.rows,
-      "65535",
-    ];
-    for (let r = mesh.rows - 1; r >= 0; r--) {
-      const row = [];
-      for (let c = 0; c < mesh.cols; c++) {
-        const p = mesh.points[r][c];
-        row.push(p ? String(Math.round(((p.z - minZ) / span) * 65535)) : "0");
-      }
-      rows.push(row.join(" "));
-    }
+    const pgm = buildHeightPGM();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    downloadBlob("cnc-outline-height-" + stamp + ".pgm", rows.join("\n") + "\n", "image/x-portable-graymap");
+    downloadBlob("cnc-outline-height-" + stamp + ".pgm", pgm, "image/x-portable-graymap");
     setOutlineFeedback("Height image export started.", "ok");
   } catch (e) {
     setOutlineFeedback("Height image export failed: " + e.message, "error");
   }
 }
 
+function buildHeightPGM() {
+  requireHeightExportOutline();
+  const origin = exportWorkOrigin();
+  const mesh = buildInterpolatedHeightGrid(origin);
+  const values = [];
+  for (const row of mesh.points) {
+    for (const p of row) if (p) values.push(p.z);
+  }
+  if (!values.length) throw new Error("field probe has no samples inside the outline");
+  const minZ = Math.min(...values);
+  const maxZ = Math.max(...values);
+  const span = maxZ - minZ || 1;
+  const reference = fieldProbeHeightReference(origin);
+  const originX = axisValue(origin, "x") ?? 0;
+  const originY = axisValue(origin, "y") ?? 0;
+  const rows = [
+    "P2",
+    "# CNC Proxy outline height image",
+    "# units: mm",
+    "# xy coordinates: CNC work coordinates",
+    "# cnc_xy_origin_machine_mm: " + pathNum(originX) + " " + pathNum(originY),
+    "# z coordinates: " + reference.label,
+    "# z_reference_machine_mm: " + pathNum(reference.machineZ),
+    "# x_min_mm: " + pathNum(mesh.xMin),
+    "# x_max_mm: " + pathNum(mesh.xMax),
+    "# y_min_mm: " + pathNum(mesh.yMin),
+    "# y_max_mm: " + pathNum(mesh.yMax),
+    "# x_spacing_mm: " + pathNum(mesh.xSpacing),
+    "# y_spacing_mm: " + pathNum(mesh.ySpacing),
+    "# raster_columns: X min to X max",
+    "# raster_rows: Y max to Y min",
+    "# probe_diameter_mm: " + pathNum(PROBE_SPOT_DIAMETER_MM),
+    "# spot_gap_mm: " + pathNum(fieldProbeSpotGap()),
+    "# z_min_mm: " + pathNum(minZ),
+    "# z_max_mm: " + pathNum(maxZ),
+    mesh.cols + " " + mesh.rows,
+    "65535",
+  ];
+  for (let r = mesh.rows - 1; r >= 0; r--) {
+    const row = [];
+    for (let c = 0; c < mesh.cols; c++) {
+      const p = mesh.points[r][c];
+      row.push(p ? String(Math.round(((p.z - minZ) / span) * 65535)) : "0");
+    }
+    rows.push(row.join(" "));
+  }
+  return rows.join("\n") + "\n";
+}
+
 function buildInterpolatedHeightGrid(origin) {
+  requireHeightExportOutline();
   const rawOutline = outlineExportPoints(origin);
   const outline = outlineEffectiveExportPoints(origin);
   const samples = fieldProbeExportPoints(origin);
-  if (rawOutline.length < 3 || outline.length < 3) throw new Error("closed outline needs at least three points");
+  if (rawOutline.length < 3 || outline.length < 3) throw new Error("closed outline needs at least three valid points");
   if (samples.length < 3) throw new Error("field probe needs at least three samples");
   const ext = exportExtents({ x_min: Infinity, x_max: -Infinity, y_min: Infinity, y_max: -Infinity }, outline);
   const spacing = fieldProbeCenterSpacing();
@@ -3905,7 +3928,6 @@ function buildInterpolatedHeightGrid(origin) {
   const rows = Math.max(2, Math.min(512, Math.floor(ext.height / spacing) + 1));
   const actualX = ext.width / Math.max(1, cols - 1);
   const actualY = ext.height / Math.max(1, rows - 1);
-  const actualSpacing = Math.max(actualX, actualY);
   const grid = [];
   for (let r = 0; r < rows; r++) {
     const y = ext.y_min + r * actualY;
@@ -3920,7 +3942,17 @@ function buildInterpolatedHeightGrid(origin) {
     }
     grid.push(row);
   }
-  return { points: grid, rows, cols, xMin: ext.x_min, yMin: ext.y_min, spacing: actualSpacing };
+  return {
+    points: grid,
+    rows,
+    cols,
+    xMin: ext.x_min,
+    xMax: ext.x_max,
+    yMin: ext.y_min,
+    yMax: ext.y_max,
+    xSpacing: actualX,
+    ySpacing: actualY,
+  };
 }
 
 function interpolateZ(x, y, samples) {

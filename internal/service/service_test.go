@@ -1778,6 +1778,96 @@ finished:
 	}
 }
 
+func TestTraceOutlineSurvivesDroppedStatusReplyMidTrace(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:0,0,-3|WPos:0,0,-3|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	type traceResult struct {
+		result TraceOutlineResult
+		err    error
+	}
+	done := make(chan traceResult, 1)
+	go func() {
+		result, err := svc.TraceOutline(TraceOutlineRequest{
+			MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 12, Y: 0}},
+			SafeZMM:       -3,
+			FeedMM:        720,
+		})
+		done <- traceResult{result: result, err: err}
+	}()
+
+	// Let the trace pass its preflight status check (M494.0 is the first line it
+	// sends), then lose one STATUS_RES the way the WiFi bridge does mid-motion.
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for len(m.Gcodes()) == 0 {
+		if time.Now().After(waitDeadline) {
+			t.Fatal("trace never sent its first command")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.DropNextStatusReplies(1)
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("TraceOutline aborted on a single dropped status reply: %v", got.err)
+		}
+		if !got.result.Verified {
+			t.Fatalf("trace result = %+v", got.result)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("trace did not finish")
+	}
+}
+
+func TestWaitTraceMotionRetriesTransientPollFailuresUntilDeadline(t *testing.T) {
+	svc, m, _ := serviceWithMachine(t)
+	m.SetStatus("<Idle|MPos:10,5,-3|WPos:10,5,-3|T:0,0>")
+	conn, err := client.Dial(m.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	m.DropNextStatusReplies(1)
+	st, err := svc.waitTraceMotion(conn, machine.AxisValues{"x": 10, "y": 5}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("waitTraceMotion did not survive one dropped status reply: %v", err)
+	}
+	if st.State != machine.Idle {
+		t.Fatalf("waitTraceMotion state = %s, want Idle", st.State)
+	}
+
+	// With replies gone for good, the wait must still end at its deadline with a
+	// concrete error rather than looping forever.
+	m.SetDropStatusReplies(true)
+	if _, err := svc.waitTraceMotion(conn, machine.AxisValues{"x": 10, "y": 5}, time.Second); err == nil {
+		t.Fatal("waitTraceMotion returned nil with all status replies dropped")
+	}
+}
+
+func TestWaitTraceMotionFailsFastOnConnectionLoss(t *testing.T) {
+	svc, m, _ := serviceWithMachine(t)
+	m.SetStatus("<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>")
+	conn, err := client.Dial(m.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	start := time.Now()
+	if _, err := svc.waitTraceMotion(conn, machine.AxisValues{"x": 0, "y": 0}, 30*time.Second); err == nil {
+		t.Fatal("waitTraceMotion returned nil on a closed connection")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("waitTraceMotion retried a dead connection for %v; want immediate failure", elapsed)
+	}
+}
+
 func TestTraceOutlineRejectsInvalidStateAndInput(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:3,0>"
