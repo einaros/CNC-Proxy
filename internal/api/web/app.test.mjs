@@ -805,6 +805,65 @@ test("anchor origin targets use learned machine anchors plus the requested offse
   assert.ok(Math.abs(out.machineOrigin.y + 160.11) < 1e-9);
 });
 
+test("anchor origin request does not depend on a stale browser copy of learned settings", () => {
+  const values = {
+    "origin-set-source": { value: "anchor1" },
+    "origin-set-x": { value: "10" },
+    "origin-set-y": { value: "-3" },
+  };
+  const ctx = buildContext(
+    ["finiteOr", "originReferenceRequestFromInputs"],
+    [],
+    { document: { getElementById: (id) => values[id] || null } },
+  );
+  const out = vm.runInContext("originReferenceRequestFromInputs()", ctx);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(out)),
+    { reference: "anchor1", x: 10, y: -3, label: "Anchor 1 origin" },
+  );
+});
+
+test("reference origin API sends the server-resolved reference and verifies its returned target", async () => {
+  const state = {
+    jog: {
+      originPending: 0,
+      originPendingAxis: "",
+      originPendingMode: "",
+      originPendingAxes: [],
+      originPendingTargets: null,
+      originPendingLabel: "",
+    },
+  };
+  const requests = [];
+  const ctx = buildContext(["setReferenceOriginViaAPI"], [], {
+    state,
+    setOriginFeedback: () => {},
+    renderJog: () => {},
+    request: async (url, options) => {
+      requests.push({ url, options });
+      return { json: async () => ({ target: { x: 177.51, y: 125.11 } }) };
+    },
+    beginOriginVerification: () => { state.verified = true; },
+    clearOriginVerification: () => {},
+    appendGcodeLine: () => {},
+    Date,
+  });
+  await vm.runInContext(
+    "setReferenceOriginViaAPI({ reference: 'anchor1', x: 10, y: -3, label: 'Anchor 1 origin' })",
+    ctx,
+  );
+  assert.equal(requests[0].url, "/api/origin/reference");
+  assert.deepEqual(
+    JSON.parse(requests[0].options.body),
+    { reference: "anchor1", x: 10, y: -3 },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(state.jog.originPendingTargets)),
+    { x: 177.51, y: 125.11 },
+  );
+  assert.equal(state.verified, true);
+});
+
 test("Set Origin shows the machine-coordinate change from the current origin", () => {
   const values = {
     "origin-set-source": { value: "machine" },

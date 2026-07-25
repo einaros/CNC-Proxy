@@ -430,6 +430,12 @@ func (s *Session) SetOrigin(seq int64, axis string, value float64) {
 	s.enqueue(command{typ: "origin", seq: seq, axis: axis, value: value})
 }
 
+// SetMachineOrigin sets the XY work offset from an absolute machine-coordinate
+// origin, matching the vendor controller's single G10 L2 P0 transaction.
+func (s *Session) SetMachineOrigin(seq int64, origin machine.AxisValues) {
+	s.enqueue(command{typ: "machine_origin", seq: seq, target: copyAxes(origin)})
+}
+
 // Target requests one explicit XY move from an armed session.
 func (s *Session) Target(seq int64, target machine.AxisValues, feedMMMin float64, safeZEnabled bool, safeZMM float64) {
 	s.enqueue(command{typ: "target", seq: seq, target: copyAxes(target), feed: feedMMMin, safeZOn: safeZEnabled, safeZ: safeZMM})
@@ -527,6 +533,8 @@ func (s *Session) handleCommand(cmd command) {
 		s.handleStep(cmd.seq, cmd.axis, cmd.distance)
 	case "origin":
 		s.handleOrigin(cmd.seq, cmd.axis, cmd.value)
+	case "machine_origin":
+		s.handleMachineOrigin(cmd.seq, cmd.target)
 	case "target":
 		s.handleTarget(cmd.seq, cmd.target, cmd.feed, cmd.safeZOn, cmd.safeZ)
 	}
@@ -623,6 +631,19 @@ func (s *Session) handleOrigin(seq int64, axis string, value float64) {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: err.Error()})
 		return
 	}
+	s.handleOriginCommand(seq, cmd, nil)
+}
+
+func (s *Session) handleMachineOrigin(seq int64, origin machine.AxisValues) {
+	cmd, err := machineOriginCommand(origin)
+	if err != nil {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: err.Error()})
+		return
+	}
+	s.handleOriginCommand(seq, cmd, origin)
+}
+
+func (s *Session) handleOriginCommand(seq int64, cmd string, machineOrigin machine.AxisValues) {
 	now := s.mgr.now()
 	s.mu.Lock()
 	lease := s.lease
@@ -666,13 +687,28 @@ func (s *Session) handleOrigin(seq int64, axis string, value float64) {
 		s.requestStatus()
 		return
 	}
+	if len(machineOrigin) > 0 {
+		_, xOK := st.MPos["x"]
+		_, yOK := st.MPos["y"]
+		if !xOK || !yOK {
+			s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine XY position is unavailable"})
+			return
+		}
+	}
 	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
 		s.failLease(CodeMachineError, err)
 		return
 	}
 	s.log(gcodelog.DirSend, cmd)
 	s.log(gcodelog.DirRecv, "ok")
-	s.emit(Event{Type: "ack", Seq: seq})
+	ack := Event{Type: "ack", Seq: seq}
+	if len(machineOrigin) > 0 {
+		ack.Target = machine.AxisValues{
+			"x": st.MPos["x"] - machineOrigin["x"],
+			"y": st.MPos["y"] - machineOrigin["y"],
+		}
+	}
+	s.emit(ack)
 	s.requestStatus()
 }
 
@@ -1264,6 +1300,15 @@ func originCommand(axis string, value float64) (string, error) {
 	default:
 		return "", fmt.Errorf("axis must be one of: x, y, z")
 	}
+}
+
+func machineOriginCommand(origin machine.AxisValues) (string, error) {
+	x, xOK := origin["x"]
+	y, yOK := origin["y"]
+	if !xOK || !yOK || math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) {
+		return "", fmt.Errorf("machine origin requires finite x and y")
+	}
+	return fmt.Sprintf("G10L2P0X%.4fY%.4f", x, y), nil
 }
 
 func stepJogDuration(delta Axes, cfg Config) time.Duration {

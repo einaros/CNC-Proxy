@@ -227,6 +227,28 @@ type MachineLearnResult struct {
 	Message string               `json:"message"`
 }
 
+// MachineOriginRequest identifies the fixed machine-coordinate point that
+// should become the XY work-coordinate origin. For anchor references X and Y
+// are offsets from that anchor; for "machine" they are the absolute machine
+// coordinates of the requested origin.
+type MachineOriginRequest struct {
+	Reference string  `json:"reference"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+}
+
+// MachineOriginResult reports the command target needed for browser-side
+// verification through the normal status surface. Setting an origin does not
+// move the machine, so the expected work position is derived from the fresh
+// machine position observed inside the serialized transaction.
+type MachineOriginResult struct {
+	Action        string             `json:"action"`
+	Reference     string             `json:"reference"`
+	MachineOrigin store.XYPoint      `json:"machine_origin"`
+	Target        machine.AxisValues `json:"target"`
+	Command       string             `json:"command"`
+}
+
 // Status returns the current machine state and proxy mode.
 func (s *Service) Status() MachineStatus {
 	st, age := s.arb.Tracker().Current()
@@ -920,6 +942,9 @@ func buildMachineLearned(modelOut, versionOut, ftypeOut, diagnoseOut, configOut 
 	if len(config) == 0 && len(diagnostics) == 0 && learned.Identity == (store.MachineIdentity{}) {
 		return store.MachineLearned{}, errors.New("service: machine did not return learnable parameters")
 	}
+	if !learned.Anchors.Available {
+		return store.MachineLearned{}, fmt.Errorf("%w: firmware config is missing valid Anchor 1/Anchor 2 coordinates", ErrMachineParametersUnavailable)
+	}
 	return learned, nil
 }
 
@@ -958,8 +983,13 @@ func parseMachineConfig(out string) map[string]string {
 	out = stripFirmwareEOT(out)
 	config := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
+		// Match both vendor implementations: the controller removes # comments
+		// before feeding ConfigParser, while the firmware terminates a value at
+		// the first '#', space, or tab. Real /sd/config.txt values therefore
+		// cannot include their trailing human-readable comments.
+		line, _, _ = strings.Cut(line, "#")
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
@@ -968,11 +998,11 @@ func parseMachineConfig(out string) map[string]string {
 			if len(fields) < 2 {
 				continue
 			}
-			key, value = fields[0], strings.Join(fields[1:], " ")
+			key, value = fields[0], fields[1]
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" {
+		if key == "" || value == "" {
 			continue
 		}
 		config[key] = value
@@ -1744,6 +1774,75 @@ func (s *Service) SendGcode(line string) (string, error) {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
 	}
 	return out, err
+}
+
+// ResolveMachineOrigin resolves a UI reference against server-owned learned
+// settings. Browser state is deliberately not authoritative here: background
+// learning may complete after the page's initial settings fetch.
+func (s *Service) ResolveMachineOrigin(req MachineOriginRequest) (store.XYPoint, error) {
+	if !finite(req.X) || !finite(req.Y) {
+		return store.XYPoint{}, fmt.Errorf("%w: origin coordinates must be finite", ErrInvalidArgument)
+	}
+	req.Reference = strings.ToLower(strings.TrimSpace(req.Reference))
+	switch req.Reference {
+	case "machine":
+		return store.XYPoint{X: req.X, Y: req.Y}, nil
+	case "anchor1", "anchor2":
+		anchors := s.store.UISettings().Machine.Learned.Anchors
+		if !anchors.Available {
+			return store.XYPoint{}, fmt.Errorf("%w: machine anchor positions have not been loaded", ErrMachineParametersUnavailable)
+		}
+		anchor := anchors.Anchor1
+		if req.Reference == "anchor2" {
+			anchor = anchors.Anchor2
+		}
+		return store.XYPoint{X: anchor.X + req.X, Y: anchor.Y + req.Y}, nil
+	default:
+		return store.XYPoint{}, fmt.Errorf("%w: origin reference must be one of: anchor1, anchor2, machine", ErrInvalidArgument)
+	}
+}
+
+// SetMachineOrigin applies the same machine-coordinate work-origin operation as
+// the vendor controller's wcsSetM: one G10 L2 P0 command containing both axes.
+// Keeping resolution and the write on the server prevents stale browser
+// settings and split X/Y transactions from producing a partial origin.
+func (s *Service) SetMachineOrigin(req MachineOriginRequest) (MachineOriginResult, error) {
+	origin, err := s.ResolveMachineOrigin(req)
+	if err != nil {
+		return MachineOriginResult{}, err
+	}
+	reference := strings.ToLower(strings.TrimSpace(req.Reference))
+	command := machineOriginCommand(origin)
+	result := MachineOriginResult{
+		Action:        "set_machine_origin",
+		Reference:     reference,
+		MachineOrigin: origin,
+		Command:       command,
+	}
+	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, command)
+	err = s.arb.WithMachine(true, func(c *client.Conn) error {
+		st, _ := s.arb.Tracker().Current()
+		mx, xOK := st.MPos["x"]
+		my, yOK := st.MPos["y"]
+		if !xOK || !yOK || !finite(mx) || !finite(my) {
+			return fmt.Errorf("%w: current machine XY position is unavailable", ErrMachineStatusStale)
+		}
+		if _, err := c.SendGcodeLine(command, client.GcodeOpts{ExpectReply: false, Cap: gcodeReplyCap}); err != nil {
+			return err
+		}
+		result.Target = machine.AxisValues{"x": mx - origin.X, "y": my - origin.Y}
+		return nil
+	})
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return MachineOriginResult{}, err
+	}
+	s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
+	return result, nil
+}
+
+func machineOriginCommand(origin store.XYPoint) string {
+	return fmt.Sprintf("G10L2P0X%.4fY%.4f", origin.X, origin.Y)
 }
 
 // ProbeZ performs a single serialized Z probe transaction. It holds the arbiter
@@ -2991,17 +3090,18 @@ func md5hex(b []byte) string {
 
 // Errors returned by the service.
 var (
-	ErrInvalidArgument        = errors.New("service: invalid argument")
-	ErrNotFound               = errors.New("service: not found")
-	ErrNotCached              = errors.New("service: content not cached locally")
-	ErrCacheValidationPending = errors.New("service: cache validation pending")
-	ErrMachineStatusStale     = errors.New("service: machine status is stale")
-	ErrRecoveryUnavailable    = errors.New("service: recovery unavailable")
-	ErrRetryUnavailable       = errors.New("service: retry unavailable")
-	ErrDiscardUnavailable     = errors.New("service: discard unavailable")
-	ErrNoActiveGcode          = errors.New("service: no active gcode selected")
-	ErrActiveGcodeUnavailable = errors.New("service: active gcode is not runnable")
-	ErrProbeUnavailable       = errors.New("service: probe unavailable")
-	ErrToolChangeUnavailable  = errors.New("service: tool change is not awaiting confirmation")
-	ErrDirectoryNotEmpty      = errors.New("service: directory not empty")
+	ErrInvalidArgument              = errors.New("service: invalid argument")
+	ErrNotFound                     = errors.New("service: not found")
+	ErrNotCached                    = errors.New("service: content not cached locally")
+	ErrCacheValidationPending       = errors.New("service: cache validation pending")
+	ErrMachineStatusStale           = errors.New("service: machine status is stale")
+	ErrMachineParametersUnavailable = errors.New("service: machine parameters are unavailable")
+	ErrRecoveryUnavailable          = errors.New("service: recovery unavailable")
+	ErrRetryUnavailable             = errors.New("service: retry unavailable")
+	ErrDiscardUnavailable           = errors.New("service: discard unavailable")
+	ErrNoActiveGcode                = errors.New("service: no active gcode selected")
+	ErrActiveGcodeUnavailable       = errors.New("service: active gcode is not runnable")
+	ErrProbeUnavailable             = errors.New("service: probe unavailable")
+	ErrToolChangeUnavailable        = errors.New("service: tool change is not awaiting confirmation")
+	ErrDirectoryNotEmpty            = errors.New("service: directory not empty")
 )

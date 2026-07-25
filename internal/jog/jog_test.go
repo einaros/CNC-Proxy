@@ -695,6 +695,44 @@ func TestJogSetOriginSendsControllerCommand(t *testing.T) {
 	t.Fatalf("no origin command observed: %v", fm.Gcodes())
 }
 
+func TestJogSetMachineOriginUsesOneVendorG10L2Command(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	status := "<Idle|MPos:-100,-80,-3|WPos:0,0,0>"
+	fm.SetStatus(status)
+	if !mgr.arb.Tracker().ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.SetMachineOrigin(2, machine.AxisValues{"x": -287.51, "y": -202.11})
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("origin ack = %+v, want seq 2", ack)
+	}
+	if math.Abs(ack.Target["x"]-187.51) > 1e-9 || math.Abs(ack.Target["y"]-122.11) > 1e-9 {
+		t.Fatalf("origin verification target = %+v", ack.Target)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range fm.Gcodes() {
+			if line == "G10L2P0X-287.5100Y-202.1100" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no machine-origin command observed: %v", fm.Gcodes())
+}
+
 func TestJogFastTickDoesNotFloodMotionEvents(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()

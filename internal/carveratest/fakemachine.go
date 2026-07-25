@@ -1466,6 +1466,11 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 		m.applyWorkPositionLocked(fakeAxisValues(values, has))
 		return
 	}
+	if hasG10 && fakeNear(values['L'], 2) && fakeNear(values['P'], 0) {
+		m.advanceMotionLocked(time.Now())
+		m.applyWorkOffsetLocked(fakeAxisValues(values, has))
+		return
+	}
 	if hasG92 {
 		m.advanceMotionLocked(time.Now())
 		m.applyWorkPositionLocked(fakeAxisValues(values, has))
@@ -2085,6 +2090,45 @@ func (m *FakeMachine) applyWorkPositionLocked(targets map[byte]float64) {
 		}
 		wpos = ensureFakeAxisLen(wpos, idx+1)
 		wpos[idx] = target
+	}
+	fields[wi].value = formatFakeAxisList(wpos)
+	m.status = formatFakeStatus(bracketed, state, fields)
+}
+
+func (m *FakeMachine) applyWorkOffsetLocked(offsets map[byte]float64) {
+	if len(offsets) == 0 {
+		return
+	}
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	mi := findFakeStatusField(fields, "MPos")
+	if mi < 0 {
+		return
+	}
+	mpos, ok := parseFakeAxisList(fields[mi].value)
+	if !ok {
+		return
+	}
+	wi := findFakeStatusField(fields, "WPos")
+	wpos := append([]float64(nil), mpos...)
+	if wi >= 0 {
+		if current, ok := parseFakeAxisList(fields[wi].value); ok {
+			wpos = current
+		}
+	} else {
+		fields = append(fields, fakeStatusField{key: "WPos"})
+		wi = len(fields) - 1
+	}
+	for axis, offset := range offsets {
+		idx, ok := fakeAxisIndex[axis]
+		if !ok || !fakeFinite(offset) {
+			continue
+		}
+		mpos = ensureFakeAxisLen(mpos, idx+1)
+		wpos = ensureFakeAxisLen(wpos, idx+1)
+		wpos[idx] = mpos[idx] - offset
 	}
 	fields[wi].value = formatFakeAxisList(wpos)
 	m.status = formatFakeStatus(bracketed, state, fields)

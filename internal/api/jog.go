@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/uwin/cnc-proxy/internal/jog"
 	"github.com/uwin/cnc-proxy/internal/machine"
+	"github.com/uwin/cnc-proxy/internal/service"
 )
 
 func (s *Server) getJogCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -26,19 +27,22 @@ func (s *Server) getJogCapabilities(w http.ResponseWriter, r *http.Request) {
 }
 
 type jogClientMessage struct {
-	Type     string             `json:"type"`
-	Seq      int64              `json:"seq"`
-	Deadman  bool               `json:"deadman"`
-	Axes     map[string]float64 `json:"axes"`
-	Slow     bool               `json:"slow"`
-	Action   string             `json:"action"`
-	Axis     string             `json:"axis"`
-	Distance float64            `json:"distance"`
-	Value    *float64           `json:"value"`
-	Target   map[string]float64 `json:"target"`
-	Feed     float64            `json:"feed_mm_min"`
-	SafeZ    float64            `json:"safe_z_mm"`
-	SafeZOn  *bool              `json:"safe_z_enabled"`
+	Type      string             `json:"type"`
+	Seq       int64              `json:"seq"`
+	Deadman   bool               `json:"deadman"`
+	Axes      map[string]float64 `json:"axes"`
+	Slow      bool               `json:"slow"`
+	Action    string             `json:"action"`
+	Axis      string             `json:"axis"`
+	Distance  float64            `json:"distance"`
+	Value     *float64           `json:"value"`
+	Reference string             `json:"reference"`
+	X         float64            `json:"x"`
+	Y         float64            `json:"y"`
+	Target    map[string]float64 `json:"target"`
+	Feed      float64            `json:"feed_mm_min"`
+	SafeZ     float64            `json:"safe_z_mm"`
+	SafeZOn   *bool              `json:"safe_z_enabled"`
 }
 
 func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +119,17 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			sess.SetOrigin(msg.Seq, msg.Axis, value)
+		case "origin_reference":
+			origin, err := s.svc.ResolveMachineOrigin(service.MachineOriginRequest{
+				Reference: msg.Reference,
+				X:         msg.X,
+				Y:         msg.Y,
+			})
+			if err != nil {
+				sess.ReportError(msg.Seq, jog.CodeBadInput, err.Error())
+				continue
+			}
+			sess.SetMachineOrigin(msg.Seq, machine.AxisValues{"x": origin.X, "y": origin.Y})
 		case "target":
 			target, err := parseJogTarget(msg.Target)
 			if err != nil {
@@ -135,7 +150,7 @@ func (s *Server) jogWS(w http.ResponseWriter, r *http.Request) {
 			}
 			sess.Target(msg.Seq, target, msg.Feed, safeZEnabled, safeZ)
 		default:
-			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, target, step, origin, control, disarm")
+			sess.ReportError(msg.Seq, jog.CodeBadInput, "type must be one of: arm, input, target, step, origin, origin_reference, control, disarm")
 		}
 	}
 }

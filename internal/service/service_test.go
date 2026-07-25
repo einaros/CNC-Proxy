@@ -984,10 +984,10 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 		"coordinate.clearance_x=-5.0",
 		"coordinate.clearance_y=-21.0",
 		"coordinate.clearance_z=-3.0",
-		"coordinate.anchor1_x=-287.51",
-		"coordinate.anchor1_y=-202.11",
-		"coordinate.anchor2_offset_x=88.5",
-		"coordinate.anchor2_offset_y=45.0",
+		"coordinate.anchor1_x -287.51 ## X Machine coordinates of anchor1",
+		"coordinate.anchor1_y -202.11 ## Y Machine coordinates of anchor1",
+		"coordinate.anchor2_offset_x 88.5 # Anchor2 X Offset relative to anchor1",
+		"coordinate.anchor2_offset_y 45.0 # Anchor2 Y Offset relative to anchor1",
 		"atc.probe.fast_rate_mm_m=300",
 		"atc.probe.slow_rate_mm_m=60",
 		"atc.probe.retract_mm=2",
@@ -1035,9 +1035,63 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 }
 
 func TestParseMachineConfigAcceptsVendorConfigFileSyntax(t *testing.T) {
-	config := parseMachineConfig("# vendor config\ncoordinate.anchor1_x -287.51\ncoordinate.anchor1_y\t-202.11\nsoft_endstop.enable true\n")
+	config := parseMachineConfig("# vendor config\ncoordinate.anchor1_x -287.51 ## X Machine coordinates of anchor1\ncoordinate.anchor1_y\t-202.11 # Y Machine coordinates of anchor1\nsoft_endstop.enable true # enable soft limits\n")
 	if config["coordinate.anchor1_x"] != "-287.51" || config["coordinate.anchor1_y"] != "-202.11" || config["soft_endstop.enable"] != "true" {
 		t.Fatalf("parsed config = %+v", config)
+	}
+}
+
+func TestLearnMachineParametersRejectsAConfigWithoutCompleteAnchors(t *testing.T) {
+	svc, m, _ := serviceWithMachine(t)
+	m.SetGcodeReply("model", "model = CarveraAir")
+	m.PutFile("/sd/config.txt", []byte(strings.Join([]string{
+		"coordinate.anchor1_x -287.51",
+		"coordinate.anchor1_y -202.11",
+		"coordinate.anchor2_offset_x 88.5",
+	}, "\n")))
+
+	_, err := svc.LearnMachineParameters()
+	if !errors.Is(err, ErrMachineParametersUnavailable) {
+		t.Fatalf("LearnMachineParameters error = %v, want ErrMachineParametersUnavailable", err)
+	}
+	if svc.UISettings().Machine.Learned.Anchors.Available {
+		t.Fatal("partial machine settings were persisted as a usable anchor profile")
+	}
+}
+
+func TestSetMachineOriginUsesServerAnchorsAndVendorG10L2Transaction(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:-100,-80,-3|WPos:0,0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	ui := svc.UISettings()
+	ui.Machine.Learned = store.MachineLearned{
+		LearnedAt: time.Now(),
+		Anchors: store.MachineAnchorProfile{
+			Available: true,
+			Anchor1:   store.XYPoint{X: -287.51, Y: -202.11},
+			Anchor2:   store.XYPoint{X: -199.01, Y: -157.11},
+		},
+	}
+	if _, err := svc.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.SetMachineOrigin(MachineOriginRequest{Reference: "anchor1", X: 10, Y: -3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MachineOrigin != (store.XYPoint{X: -277.51, Y: -205.11}) {
+		t.Fatalf("machine origin = %+v", result.MachineOrigin)
+	}
+	if math.Abs(result.Target["x"]-177.51) > 1e-9 || math.Abs(result.Target["y"]-125.11) > 1e-9 {
+		t.Fatalf("verification target = %+v", result.Target)
+	}
+	want := "G10L2P0X-277.5100Y-205.1100"
+	if got := m.Gcodes(); len(got) != 1 || got[0] != want {
+		t.Fatalf("gcodes = %v, want [%s]", got, want)
 	}
 }
 

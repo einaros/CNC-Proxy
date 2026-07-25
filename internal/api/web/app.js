@@ -751,6 +751,27 @@ async function loadUISettings() {
   }
 }
 
+async function refreshMachineLearnedSettings() {
+  try {
+    const r = await request("/api/ui/settings");
+    const incoming = normalizeMachineSettings((await r.json()).machine);
+    const current = normalizeMachineSettings(state.ui.machine);
+    const incomingLearnedAt = Date.parse(incoming.learned?.learned_at || "");
+    const currentLearnedAt = Date.parse(current.learned?.learned_at || "");
+    if (Number.isFinite(currentLearnedAt) && (!Number.isFinite(incomingLearnedAt) || incomingLearnedAt < currentLearnedAt)) return;
+    state.ui.machine = {
+      ...current,
+      learned: incoming.learned,
+      learned_profiles: incoming.learned_profiles,
+    };
+    renderMachineSettings();
+    renderJog();
+  } catch {
+    // The normal connection/status surfaces report outages. A read-only
+    // refresh must not replace local action feedback with a duplicate notice.
+  }
+}
+
 function applyUISettings(ui) {
   state.ui = normalizeUISettings(ui);
   state.logFilter = state.ui.log.filter || "all";
@@ -1555,6 +1576,10 @@ function machineLearnedSummaryLines(learned) {
   else if (Number.isFinite(seek)) lines.push(`seek feed ${Math.round(seek)} mm/min`);
   const configCount = Object.keys(learned.config || {}).length;
   const diagCount = Object.keys(learned.diagnostics || {}).length;
+  const anchors = learned.anchors || {};
+  if (anchors.available) {
+    lines.push(`Anchor 1 ${fmtCoord(anchors.anchor1?.x)}, ${fmtCoord(anchors.anchor1?.y)}  Anchor 2 ${fmtCoord(anchors.anchor2?.x)}, ${fmtCoord(anchors.anchor2?.y)}`);
+  }
   if (configCount || diagCount) lines.push(`${configCount} config values, ${diagCount} diagnostic groups`);
   return lines;
 }
@@ -1596,6 +1621,7 @@ function openMachineSettings() {
   if (!dialog || dialog.open) return;
   renderMachineSettings();
   dialog.showModal();
+  refreshMachineLearnedSettings();
 }
 
 function closeMachineSettings() {
@@ -6736,6 +6762,20 @@ function originTargetsFromOriginSource() {
   };
 }
 
+function originReferenceRequestFromInputs() {
+  const reference = document.getElementById("origin-set-source")?.value || "anchor1";
+  const x = finiteOr(document.getElementById("origin-set-x")?.value, NaN);
+  const y = finiteOr(document.getElementById("origin-set-y")?.value, NaN);
+  if (!["anchor1", "anchor2", "machine"].includes(reference)) throw new Error("Origin reference is invalid.");
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Origin coordinates must be finite.");
+  return {
+    reference,
+    x,
+    y,
+    label: reference === "anchor2" ? "Anchor 2 origin" : (reference === "anchor1" ? "Anchor 1 origin" : "machine coordinate origin"),
+  };
+}
+
 function renderOriginSetChange() {
   const out = document.getElementById("origin-set-change");
   if (!out) return;
@@ -6861,6 +6901,56 @@ async function setOriginViaGcode(targets, label) {
   }
 }
 
+async function setReferenceOriginViaAPI(origin) {
+  state.jog.originPending = -1;
+  state.jog.originPendingAxis = "xy";
+  state.jog.originPendingMode = "api-reference";
+  state.jog.originPendingAxes = ["x", "y"];
+  state.jog.originPendingTargets = null;
+  state.jog.originPendingLabel = origin.label;
+  setOriginFeedback("Setting " + origin.label + "...");
+  renderJog();
+  try {
+    const response = await request("/api/origin/reference", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reference: origin.reference, x: origin.x, y: origin.y }),
+    });
+    const result = await response.json();
+    state.jog.originPendingTargets = result.target || null;
+    if (!state.jog.originPendingTargets) throw new Error("machine did not return an origin verification target");
+    beginOriginVerification();
+  } catch (e) {
+    clearOriginVerification();
+    setOriginFeedback("Set " + origin.label + " failed: " + e.message, "error");
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+  } finally {
+    renderJog();
+  }
+}
+
+function setReferenceOriginViaJog(origin) {
+  const seq = sendJog({
+    type: "origin_reference",
+    reference: origin.reference,
+    x: origin.x,
+    y: origin.y,
+  });
+  if (!seq) {
+    setOriginFeedback("Set " + origin.label + " failed: jog service is not connected.", "error");
+    return;
+  }
+  state.jog.originPending = seq;
+  state.jog.originPendingAxis = "xy";
+  state.jog.originPendingMode = "jog-reference";
+  state.jog.originPendingAxes = ["x", "y"];
+  state.jog.originPendingIndex = 0;
+  state.jog.originPendingTargets = null;
+  state.jog.originPendingLabel = origin.label;
+  setOriginFeedback("Setting " + origin.label + "...");
+  renderJog();
+}
+
 function sendNextJogOriginAxis() {
   const axes = state.jog.originPendingAxes || [];
   const axis = axes[state.jog.originPendingIndex] || "";
@@ -6929,6 +7019,7 @@ function openOriginDialog(id) {
   if (!dialog || dialog.open) return;
   renderOriginButtons();
   dialog.showModal();
+  if (id === "origin-set-modal") refreshMachineLearnedSettings();
 }
 
 function closeOriginDialog(id) {
@@ -6946,8 +7037,22 @@ function applyXYZOrigin() {
 
 function applyOriginSource() {
   try {
-    const { targets, label } = originTargetsFromOriginSource();
-    applyOriginTargets(targets, label);
+    const origin = originReferenceRequestFromInputs();
+    if (hasPendingOriginOperation() || tapMoveTargetBusy() || state.jog.zStepPending) return;
+    if (state.jog.armed) {
+      if (state.jog.link !== "online") {
+        setOriginFeedback("Jog service is not connected.", "error");
+        connectJog();
+        return;
+      }
+      setReferenceOriginViaJog(origin);
+      return;
+    }
+    if (!machineReadyForOriginSet()) {
+      setOriginFeedback("Machine must be connected and Idle to set origin.", "error");
+      return;
+    }
+    setReferenceOriginViaAPI(origin);
   } catch (e) {
     setOriginFeedback(e.message, "error");
     renderJog();
@@ -7229,7 +7334,19 @@ function applyJogEvent(ev) {
       state.jog.tapFeedbackKind = "";
     }
     if (ev.seq && ev.seq === state.jog.originPending) {
-      handleOriginAck();
+      if (state.jog.originPendingMode === "jog-reference") {
+        state.jog.originPending = 0;
+        state.jog.originPendingAxis = "";
+        state.jog.originPendingTargets = ev.target || null;
+        if (state.jog.originPendingTargets) beginOriginVerification();
+        else {
+          const label = state.jog.originPendingLabel;
+          clearOriginVerification();
+          setOriginFeedback("Set " + label + " failed: machine did not return an origin verification target.", "error");
+        }
+      } else {
+        handleOriginAck();
+      }
     }
     state.jog.error = "";
     state.jog.errorCode = "";

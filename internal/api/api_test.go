@@ -1123,6 +1123,51 @@ func TestLearnMachineParametersAPI(t *testing.T) {
 	}
 }
 
+func TestSetMachineOriginReferenceAPIUsesPersistedAnchorProfile(t *testing.T) {
+	srv, m, tr, svc, _ := serverWithMachineState(t)
+	status := "<Idle|MPos:-100,-80,-3|WPos:0,0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	ui := svc.UISettings()
+	ui.Machine.Learned = store.MachineLearned{
+		LearnedAt: time.Now(),
+		Anchors: store.MachineAnchorProfile{
+			Available: true,
+			Anchor1:   store.XYPoint{X: -287.51, Y: -202.11},
+			Anchor2:   store.XYPoint{X: -199.01, Y: -157.11},
+		},
+	}
+	if _, err := svc.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := postJSON(t, srv.URL+"/api/origin/reference", map[string]any{
+		"reference": "anchor1",
+		"x":         10,
+		"y":         -3,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	var result service.MachineOriginResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Command != "G10L2P0X-277.5100Y-205.1100" {
+		t.Fatalf("origin result = %+v", result)
+	}
+	if math.Abs(result.Target["x"]-177.51) > 1e-9 || math.Abs(result.Target["y"]-125.11) > 1e-9 {
+		t.Fatalf("verification target = %+v", result.Target)
+	}
+	if got := m.Gcodes(); len(got) != 1 || got[0] != result.Command {
+		t.Fatalf("gcodes = %v, want [%s]", got, result.Command)
+	}
+}
+
 func TestUISettingsAPIRejectsInvalidMacro(t *testing.T) {
 	srv, _ := newTestServer(t)
 	req, _ := http.NewRequest("PUT", srv.URL+"/api/ui/settings", strings.NewReader(`{"macros":[{"id":"bad","name":"Bad","lines":["   "]}]}`))
@@ -1199,6 +1244,12 @@ func serverWithMachineState(t *testing.T) (*httptest.Server, *carveratest.FakeMa
 
 func serverWithJog(t *testing.T, auth bool) (*httptest.Server, *carveratest.FakeMachine, *machine.Tracker) {
 	t.Helper()
+	srv, m, tr, _ := serverWithJogState(t, auth)
+	return srv, m, tr
+}
+
+func serverWithJogState(t *testing.T, auth bool) (*httptest.Server, *carveratest.FakeMachine, *machine.Tracker, *service.Service) {
+	t.Helper()
 	m, err := carveratest.New()
 	if err != nil {
 		t.Fatal(err)
@@ -1232,7 +1283,7 @@ func serverWithJog(t *testing.T, auth bool) (*httptest.Server, *carveratest.Fake
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return srv, m, tr
+	return srv, m, tr, svc
 }
 
 func TestJogCapabilities(t *testing.T) {
@@ -1342,6 +1393,49 @@ func TestJogWebSocketStep(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no step jog command observed: %v", m.Gcodes())
+}
+
+func TestJogWebSocketSetsServerResolvedAnchorOrigin(t *testing.T) {
+	srv, m, _, svc := serverWithJogState(t, false)
+	ui := svc.UISettings()
+	ui.Machine.Learned = store.MachineLearned{
+		LearnedAt: time.Now(),
+		Anchors: store.MachineAnchorProfile{
+			Available: true,
+			Anchor1:   store.XYPoint{X: -287.51, Y: -202.11},
+			Anchor2:   store.XYPoint{X: -199.01, Y: -157.11},
+		},
+	}
+	if _, err := svc.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+
+	writeWS(t, c, map[string]any{
+		"type":      "origin_reference",
+		"seq":       2,
+		"reference": "anchor1",
+		"x":         10,
+		"y":         -3,
+	})
+	ack := readWSEvent(t, c, "ack")
+	if ack.Seq != 2 || math.Abs(ack.Target["x"]-277.51) > 1e-9 || math.Abs(ack.Target["y"]-205.11) > 1e-9 {
+		t.Fatalf("origin ack = %+v", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range m.Gcodes() {
+			if line == "G10L2P0X-277.5100Y-205.1100" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no server-resolved origin command observed: %v", m.Gcodes())
 }
 
 func TestJogWebSocketTarget(t *testing.T) {

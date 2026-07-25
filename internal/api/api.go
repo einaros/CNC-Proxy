@@ -77,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs", s.getRuns)
 	mux.HandleFunc("DELETE /api/runs", s.clearRuns)
 	mux.HandleFunc("POST /api/gcode", s.postGcode) // body: {line}
+	mux.HandleFunc("POST /api/origin/reference", s.setMachineOrigin)
 	mux.HandleFunc("GET /api/gcode/active", s.getActiveGcode)
 	mux.HandleFunc("POST /api/gcode/active", s.selectActiveGcode)      // body: {path}
 	mux.HandleFunc("POST /api/gcode/active/run", s.runActiveGcode)     // runs selected path
@@ -319,6 +320,8 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrMachineStatusStale):
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, service.ErrMachineParametersUnavailable):
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case session.Retryable(err):
 		// Machine busy / controller mid-transfer / not idle: try again later.
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
@@ -347,6 +350,19 @@ func (s *Server) postGcode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"output": out})
+}
+
+func (s *Server) setMachineOrigin(w http.ResponseWriter, r *http.Request) {
+	var body service.MachineOriginRequest
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	result, err := s.svc.SetMachineOrigin(body)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) probeZ(w http.ResponseWriter, r *http.Request) {
