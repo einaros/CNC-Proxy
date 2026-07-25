@@ -1582,10 +1582,11 @@ func TestTraceOutlineUsesVendorMarginLaserModeAndVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TraceOutline: %v", err)
 	}
-	if !res.Verified || res.Points != 4 || res.CommandCount != 6 {
+	if res.Verified || res.Points != 4 || res.CommandCount != 7 {
 		t.Fatalf("trace result = %+v", res)
 	}
 	want := []string{
+		"M497.4",
 		"M494.0",
 		"G53 G0 Z-3.0000",
 		"G90 G0 X10.0000 Y20.0000",
@@ -1666,6 +1667,7 @@ func TestTraceOutlineKeepsProbeLaserEnabledAfterFailure(t *testing.T) {
 		t.Fatal("expected trace move failure")
 	}
 	want := []string{
+		"M497.4",
 		"M494.0",
 		"G53 G0 Z-3.0000",
 	}

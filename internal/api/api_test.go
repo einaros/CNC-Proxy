@@ -1634,10 +1634,11 @@ func TestTraceOutlineEndpointSerializesProbeLaserTrace(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Verified || result.Points != 2 || result.CommandCount != 4 {
+	if result.Verified || result.Points != 2 || result.CommandCount != 5 {
 		t.Fatalf("trace result = %+v", result)
 	}
 	want := []string{
+		"M497.4",
 		"M494.0",
 		"G53 G0 Z-3.0000",
 		"G90 G0 X0.0000 Y0.0000",
