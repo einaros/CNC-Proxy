@@ -456,6 +456,32 @@ test("Tap Move ignores a second tap until the first target is observed", () => {
   assert.equal(sent, 0);
 });
 
+test("Trace outline waits for a pending Tap Move target", async () => {
+  let feedback = null;
+  let requests = 0;
+  const ctx = buildContext(["tapMoveTargetBusy", "traceOutline"], [], {
+    state: {
+      outline: {
+        active: true,
+        points: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+        pointProbePending: false,
+        fieldProbePending: false,
+        tracePending: false,
+      },
+      jog: { armed: false, targetPending: 0, targetMotionPending: 42 },
+    },
+    isProbeToolActive: () => true,
+    setOutlineFeedback: (message, kind) => { feedback = { message, kind }; },
+    request: () => { requests++; },
+  });
+  await vm.runInContext("traceOutline()", ctx);
+  assert.deepEqual(feedback, {
+    message: "Wait for tap move to finish before tracing an outline.",
+    kind: "error",
+  });
+  assert.equal(requests, 0);
+});
+
 test("jog motion keeps observed machine position distinct from its prediction", () => {
   const state = {
     jog: {

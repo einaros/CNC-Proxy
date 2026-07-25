@@ -1640,8 +1640,8 @@ func TestTraceOutlineEndpointSerializesProbeLaserTrace(t *testing.T) {
 	want := []string{
 		"M494.0",
 		"G53 G0 Z-3.0000",
-		"G53 G0 X0.0000 Y0.0000",
-		"G53 G1 X10.0000 Y0.0000 F600.0000",
+		"G90 G0 X0.0000 Y0.0000",
+		"G90 G1 X10.0000 Y0.0000 F600.0000",
 	}
 	got := m.Gcodes()
 	if len(got) != len(want) {

@@ -1816,7 +1816,21 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 		if st.Tool == nil || st.Tool.Active != 0 {
 			return fmt.Errorf("%w: active tool is %s", ErrProbeUnavailable, toolStatusLabel(st.Tool))
 		}
+		// Admission is based on the tracker, which can lag a just-released jog
+		// lease. Observe Idle on this exact machine connection before issuing any
+		// trace command so a tap move cannot be followed by a queued trace.
+		st, preflightErr := s.waitMachineIdle(c, traceStatusMinTimeout)
+		if preflightErr != nil {
+			return fmt.Errorf("%w: could not verify Idle before tracing: %v", ErrMachineStatusStale, preflightErr)
+		}
+		if st.State != machine.Idle {
+			return fmt.Errorf("%w: machine is not Idle before tracing (%s)", ErrMachineStatusStale, statusSummary(st))
+		}
 		points := traceOutlinePoints(req)
+		workOffsetX, workOffsetY, offsetErr := traceWorkOffset(st)
+		if offsetErr != nil {
+			return offsetErr
+		}
 		res = TraceOutlineResult{
 			Action:       "trace_outline",
 			Points:       len(points),
@@ -1828,6 +1842,16 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 			_, err := s.sendTraceLine(c, line)
 			return err
 		}
+		waitForMotion := func(timeout time.Duration) error {
+			st, err := s.waitMachineIdle(c, timeout)
+			if err != nil {
+				return fmt.Errorf("%w: could not verify trace motion: %v", ErrMachineStatusStale, err)
+			}
+			if st.State != machine.Idle {
+				return fmt.Errorf("%w: trace motion did not finish (%s)", ErrMachineStatusStale, statusSummary(st))
+			}
+			return nil
+		}
 		// M494.0 is the firmware's margin/outline laser command. The vendor's
 		// Z-probe workflows use M494.1 (and separately enable 3D-probe mode),
 		// so keep the trace on the established margin command.
@@ -1837,24 +1861,27 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 		var err error
 		first := points[0]
 		if err = run(fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM)); err == nil {
-			err = run(fmt.Sprintf("G53 G0 X%.4f Y%.4f", first.X, first.Y))
+			err = waitForMotion(traceStatusMinTimeout)
+		}
+		if err == nil {
+			err = run(fmt.Sprintf("G90 G0 X%.4f Y%.4f", first.X-workOffsetX, first.Y-workOffsetY))
+		}
+		if err == nil {
+			err = waitForMotion(traceStatusMinTimeout)
 		}
 		for i := 1; err == nil && i < len(points); i++ {
 			p := points[i]
-			err = run(fmt.Sprintf("G53 G1 X%.4f Y%.4f F%.4f", p.X, p.Y, req.FeedMM))
+			// Match the vendor margin script: G53 is used only for the safe-Z
+			// lift, while all XY moves explicitly use absolute work coordinates.
+			// Deriving those from the observed MPos/WPos offset retains the
+			// requested physical target even if the operator changed work zero.
+			err = run(fmt.Sprintf("G90 G1 X%.4f Y%.4f F%.4f", p.X-workOffsetX, p.Y-workOffsetY, req.FeedMM))
+			if err == nil {
+				err = waitForMotion(traceIdleTimeout([]TracePoint{points[i-1], p}, req.FeedMM))
+			}
 		}
 		if err != nil {
 			res.Message = "Trace outline failed: " + err.Error()
-			return err
-		}
-		st, err = s.waitMachineIdle(c, traceIdleTimeout(points, req.FeedMM))
-		if err != nil {
-			res.Message = "Trace outline could not verify final machine status: " + err.Error()
-			return err
-		}
-		if st.State != machine.Idle {
-			err := fmt.Errorf("%w: trace commands sent, but machine reports %s", ErrMachineStatusStale, statusSummary(st))
-			res.Message = err.Error()
 			return err
 		}
 		res.Verified = true
@@ -1871,6 +1898,17 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 		return res, err
 	}
 	return res, nil
+}
+
+func traceWorkOffset(st machine.Status) (float64, float64, error) {
+	mx, haveMX := finiteAxisValue(st.MPos, "x")
+	my, haveMY := finiteAxisValue(st.MPos, "y")
+	wx, haveWX := finiteAxisValue(st.WPos, "x")
+	wy, haveWY := finiteAxisValue(st.WPos, "y")
+	if !haveMX || !haveMY || !haveWX || !haveWY {
+		return 0, 0, fmt.Errorf("%w: current machine and work XY positions are unavailable", ErrMachineStatusStale)
+	}
+	return mx - wx, my - wy, nil
 }
 
 func validateProbeZRequest(req ProbeZRequest) error {

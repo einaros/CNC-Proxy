@@ -1567,14 +1567,14 @@ func TestSetUISettingsKeepsNewerLearnedAnchorsFromStaleBrowserSave(t *testing.T)
 
 func TestTraceOutlineUsesVendorMarginLaserModeAndVerifies(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
-	status := "<Idle|MPos:0,0,0|WPos:0,0,0|T:0,0>"
+	status := "<Idle|MPos:-100,-50,-3|WPos:10,20,0|T:0,0>"
 	m.SetStatus(status)
 	if !tr.ObserveStatusPayload(status) {
 		t.Fatal("failed to seed tracker status")
 	}
 
 	res, err := svc.TraceOutline(TraceOutlineRequest{
-		MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 10, Y: 5}},
+		MachinePoints: []TracePoint{{X: -100, Y: -50}, {X: -90, Y: -50}, {X: -90, Y: -45}},
 		SafeZMM:       5,
 		FeedMM:        600,
 		Closed:        true,
@@ -1588,10 +1588,10 @@ func TestTraceOutlineUsesVendorMarginLaserModeAndVerifies(t *testing.T) {
 	want := []string{
 		"M494.0",
 		"G53 G0 Z-3.0000",
-		"G53 G0 X0.0000 Y0.0000",
-		"G53 G1 X10.0000 Y0.0000 F600.0000",
-		"G53 G1 X10.0000 Y5.0000 F600.0000",
-		"G53 G1 X0.0000 Y0.0000 F600.0000",
+		"G90 G0 X10.0000 Y20.0000",
+		"G90 G1 X20.0000 Y20.0000 F600.0000",
+		"G90 G1 X20.0000 Y25.0000 F600.0000",
+		"G90 G1 X10.0000 Y20.0000 F600.0000",
 	}
 	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
 		t.Fatalf("trace gcodes = %v, want %v", got, want)

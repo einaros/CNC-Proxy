@@ -2235,7 +2235,7 @@ function renderOutlineCapture() {
     trace.hidden = !probeActive;
     trace.disabled = busy;
     setTextIfChanged(trace, o.tracePending ? "Tracing..." : "Trace outline");
-    setSoftDisabled(trace, !busy && (!o.active || o.points.length < 2 || state.jog.armed));
+    setSoftDisabled(trace, !busy && (!o.active || o.points.length < 2 || state.jog.armed || tapMoveTargetBusy()));
   }
   if (curve) {
     curve.checked = !!o.curveFit;
@@ -2785,6 +2785,10 @@ async function traceOutline() {
   }
   if (state.jog.armed) {
     setOutlineFeedback("Disarm tap move before tracing an outline.", "error");
+    return;
+  }
+  if (tapMoveTargetBusy()) {
+    setOutlineFeedback("Wait for tap move to finish before tracing an outline.", "error");
     return;
   }
   if (o.pointProbePending || o.fieldProbePending || o.tracePending) return;
