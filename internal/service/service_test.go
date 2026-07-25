@@ -1642,29 +1642,85 @@ func TestTraceOutlineUsesVendorMarginLaserModeAndVerifies(t *testing.T) {
 	res, err := svc.TraceOutline(TraceOutlineRequest{
 		MachinePoints: []TracePoint{{X: -100, Y: -50}, {X: -90, Y: -50}, {X: -90, Y: -45}},
 		SafeZMM:       5,
-		FeedMM:        600,
+		FeedMM:        10000,
 		Closed:        true,
 	})
 	if err != nil {
 		t.Fatalf("TraceOutline: %v", err)
 	}
-	if res.Verified || res.Points != 4 || res.CommandCount != 7 {
+	if !res.Verified || res.Points != 4 || res.CommandCount != 6 {
 		t.Fatalf("trace result = %+v", res)
 	}
 	want := []string{
-		"M497.4",
 		"M494.0",
 		"G53 G0 Z-3.0000",
 		"G90 G0 X10.0000 Y20.0000",
-		"G90 G1 X20.0000 Y20.0000 F600.0000",
-		"G90 G1 X20.0000 Y25.0000 F600.0000",
-		"G90 G1 X10.0000 Y20.0000 F600.0000",
+		"G90 G1 X20.0000 Y20.0000 F10000.0000",
+		"G90 G1 X20.0000 Y25.0000 F10000.0000",
+		"G90 G1 X10.0000 Y20.0000 F10000.0000",
 	}
 	if got := m.Gcodes(); !stringSlicesEqual(got, want) {
 		t.Fatalf("trace gcodes = %v, want %v", got, want)
 	}
 	if !m.Snapshot().ProbeLaserActive {
 		t.Fatal("trace turned the probe laser off")
+	}
+	for _, line := range svc.GcodeLog().Recent() {
+		if line.Dir == "recv" && line.Text == "ok" {
+			t.Fatalf("trace fabricated a machine acknowledgement in the gcode log: %+v", line)
+		}
+	}
+}
+
+func TestTraceOutlineNeverQueuesTheNextMotionBeforeThePriorTargetIsIdle(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:0,0,-3|WPos:0,0,-3|T:0,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	type traceResult struct {
+		result TraceOutlineResult
+		err    error
+	}
+	done := make(chan traceResult, 1)
+	go func() {
+		result, err := svc.TraceOutline(TraceOutlineRequest{
+			MachinePoints: []TracePoint{{X: 0, Y: 0}, {X: 12, Y: 0}, {X: 12, Y: 12}},
+			SafeZMM:       -3,
+			FeedMM:        720,
+		})
+		done <- traceResult{result: result, err: err}
+	}()
+
+	maxQueued := 0
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	var got traceResult
+	for {
+		select {
+		case got = <-done:
+			if n := len(m.Snapshot().Motion); n > maxQueued {
+				maxQueued = n
+			}
+			goto finished
+		case <-ticker.C:
+			if n := len(m.Snapshot().Motion); n > maxQueued {
+				maxQueued = n
+			}
+		}
+	}
+
+finished:
+	if got.err != nil {
+		t.Fatalf("TraceOutline: %v", got.err)
+	}
+	if !got.result.Verified {
+		t.Fatalf("trace result = %+v", got.result)
+	}
+	if maxQueued > 1 {
+		t.Fatalf("trace queued %d simultaneous motion segments; want at most 1", maxQueued)
 	}
 }
 
@@ -1733,7 +1789,6 @@ func TestTraceOutlineKeepsProbeLaserEnabledAfterFailure(t *testing.T) {
 		t.Fatal("expected trace move failure")
 	}
 	want := []string{
-		"M497.4",
 		"M494.0",
 		"G53 G0 Z-3.0000",
 	}

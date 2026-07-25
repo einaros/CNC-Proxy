@@ -1684,6 +1684,8 @@ const recoveryStatusTimeout = 2 * time.Second
 const (
 	traceStatusPollInterval = 250 * time.Millisecond
 	traceStatusMinTimeout   = 5 * time.Second
+	traceStatusMaxTimeout   = 2 * time.Minute
+	tracePositionTolerance  = 0.05
 	probeIdleTimeout        = 2 * time.Minute
 )
 
@@ -1851,21 +1853,34 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 			_, err := s.sendTraceLine(c, line)
 			return err
 		}
-		// Match the vendor margin script exactly: set the margin ATC state, turn
-		// on its laser, then submit the lift, positioning move, and outline as a
-		// single sequenced motion program. Waiting for Idle between those lines is
-		// neither vendor behavior nor safe: it can wait on an unrelated state.
-		if err := run("M497.4"); err != nil {
-			return err
+		waitForMotion := func(target machine.AxisValues, timeout time.Duration) error {
+			st, err := s.waitTraceMotion(c, target, timeout)
+			if err != nil {
+				return fmt.Errorf("%w: could not verify trace motion: %v", ErrMachineStatusStale, err)
+			}
+			if st.State != machine.Idle {
+				return fmt.Errorf("%w: trace motion did not finish (%s)", ErrMachineStatusStale, statusSummary(st))
+			}
+			return nil
 		}
+		// M497.4 is an internal marker in the firmware-owned M495 margin script,
+		// not a controller command. The official controller submits one M495
+		// operation and the firmware feeds that private script through its
+		// conveyor. Sending the script's private marker and motion lines as
+		// separate WiFi frames does not reproduce that sequencing.
 		if err := run("M494.0"); err != nil {
 			return err
 		}
 		var err error
 		first := points[0]
-		err = run(fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM))
+		if err = run(fmt.Sprintf("G53 G0 Z%.4f", req.SafeZMM)); err == nil {
+			err = waitForMotion(machine.AxisValues{"z": req.SafeZMM}, traceStatusMaxTimeout)
+		}
 		if err == nil {
 			err = run(fmt.Sprintf("G90 G0 X%.4f Y%.4f", first.X-workOffsetX, first.Y-workOffsetY))
+		}
+		if err == nil {
+			err = waitForMotion(machine.AxisValues{"x": first.X, "y": first.Y}, traceStatusMaxTimeout)
 		}
 		for i := 1; err == nil && i < len(points); i++ {
 			p := points[i]
@@ -1874,12 +1889,19 @@ func (s *Service) TraceOutline(req TraceOutlineRequest) (TraceOutlineResult, err
 			// Deriving those from the observed MPos/WPos offset retains the
 			// requested physical target even if the operator changed work zero.
 			err = run(fmt.Sprintf("G90 G1 X%.4f Y%.4f F%.4f", p.X-workOffsetX, p.Y-workOffsetY, req.FeedMM))
+			if err == nil {
+				err = waitForMotion(
+					machine.AxisValues{"x": p.X, "y": p.Y},
+					traceIdleTimeout(points[i-1], p, req.FeedMM),
+				)
+			}
 		}
 		if err != nil {
 			res.Message = "Trace outline failed: " + err.Error()
 			return err
 		}
-		res.Message = fmt.Sprintf("Trace outline submitted with %d points.", res.Points)
+		res.Verified = true
+		res.Message = fmt.Sprintf("Trace outline completed with %d points.", res.Points)
 		return nil
 	})
 	if err != nil {
@@ -2006,6 +2028,63 @@ func traceOutlinePoints(req TraceOutlineRequest) []TracePoint {
 	return points
 }
 
+func traceIdleTimeout(from, to TracePoint, feedMMMin float64) time.Duration {
+	if feedMMMin <= 0 || math.IsNaN(feedMMMin) || math.IsInf(feedMMMin, 0) {
+		return traceStatusMinTimeout
+	}
+	length := math.Hypot(to.X-from.X, to.Y-from.Y)
+	estimated := time.Duration((length/feedMMMin)*float64(time.Minute)) + 10*time.Second
+	if estimated < traceStatusMinTimeout {
+		return traceStatusMinTimeout
+	}
+	if estimated > traceStatusMaxTimeout {
+		return traceStatusMaxTimeout
+	}
+	return estimated
+}
+
+func (s *Service) waitTraceMotion(c *client.Conn, target machine.AxisValues, timeout time.Duration) (machine.Status, error) {
+	deadline := time.Now().Add(timeout)
+	var last machine.Status
+	for {
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			return st, err
+		}
+		last = st
+		if st.State == machine.Idle && traceTargetReached(st.MPos, target) {
+			return st, nil
+		}
+		if st.State != machine.Idle && st.State != machine.Run {
+			return st, fmt.Errorf("machine entered %s before reaching %s", statusSummary(st), traceTargetLabel(target))
+		}
+		if time.Now().After(deadline) {
+			return last, fmt.Errorf("timed out in %s before reaching %s", statusSummary(last), traceTargetLabel(target))
+		}
+		time.Sleep(traceStatusPollInterval)
+	}
+}
+
+func traceTargetReached(actual, target machine.AxisValues) bool {
+	for axis, want := range target {
+		got, ok := finiteAxisValue(actual, axis)
+		if !ok || math.Abs(got-want) > tracePositionTolerance {
+			return false
+		}
+	}
+	return true
+}
+
+func traceTargetLabel(target machine.AxisValues) string {
+	parts := make([]string, 0, 3)
+	for _, axis := range []string{"x", "y", "z"} {
+		if value, ok := finiteAxisValue(target, axis); ok {
+			parts = append(parts, fmt.Sprintf("%s %.4f", strings.ToUpper(axis), value))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (s *Service) waitMachineIdle(c *client.Conn, timeout time.Duration) (machine.Status, error) {
 	deadline := time.Now().Add(timeout)
 	var last machine.Status
@@ -2060,9 +2139,6 @@ func (s *Service) sendTraceLine(c *client.Conn, line string) (string, error) {
 	if err != nil {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
 		return out, err
-	}
-	if out == "" {
-		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
 	}
 	return out, nil
 }

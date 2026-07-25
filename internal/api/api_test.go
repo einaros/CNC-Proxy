@@ -1681,7 +1681,7 @@ func TestTraceOutlineEndpointSerializesProbeLaserTrace(t *testing.T) {
 	resp := postJSON(t, srv.URL+"/api/outline/trace", map[string]any{
 		"machine_points": []map[string]float64{{"x": 0, "y": 0}, {"x": 10, "y": 0}},
 		"safe_z_mm":      5,
-		"feed_mm_min":    600,
+		"feed_mm_min":    10000,
 		"closed":         false,
 	})
 	defer resp.Body.Close()
@@ -1693,15 +1693,14 @@ func TestTraceOutlineEndpointSerializesProbeLaserTrace(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Verified || result.Points != 2 || result.CommandCount != 5 {
+	if !result.Verified || result.Points != 2 || result.CommandCount != 4 {
 		t.Fatalf("trace result = %+v", result)
 	}
 	want := []string{
-		"M497.4",
 		"M494.0",
 		"G53 G0 Z-3.0000",
 		"G90 G0 X0.0000 Y0.0000",
-		"G90 G1 X10.0000 Y0.0000 F600.0000",
+		"G90 G1 X10.0000 Y0.0000 F10000.0000",
 	}
 	got := m.Gcodes()
 	if len(got) != len(want) {
