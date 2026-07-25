@@ -677,7 +677,6 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target requires at least one axis"})
 		return
 	}
-	hasXYTarget := false
 	for axis, value := range targetAxes {
 		if axis != "x" && axis != "y" && axis != "z" {
 			s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target axis must be one of: x, y, z"})
@@ -686,9 +685,6 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "target requires finite coordinates"})
 			return
-		}
-		if axis == "x" || axis == "y" {
-			hasXYTarget = true
 		}
 	}
 	if safeZEnabled && (math.IsNaN(safeZMM) || math.IsInf(safeZMM, 0)) {
@@ -767,9 +763,10 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		s.emit(Event{Type: "target_complete", Seq: seq, Target: finalTarget})
 		return
 	}
+	hasXYMove := fullDelta.X != 0 || fullDelta.Y != 0
 
 	lastCmd := ""
-	if safeZEnabled && hasXYTarget {
+	if safeZEnabled && hasXYMove {
 		plannedZ, ok := planned["z"]
 		if !ok || math.IsNaN(plannedZ) || math.IsInf(plannedZ, 0) {
 			s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine Z position is unavailable for safe tap move"})
@@ -787,7 +784,7 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 			}
 		}
 	}
-	if safeZEnabled && hasXYTarget {
+	if safeZEnabled && hasXYMove {
 		xyTarget := copyAxes(planned)
 		if x, ok := targetAxes["x"]; ok {
 			xyTarget["x"] = x
