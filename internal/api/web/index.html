@@ -404,8 +404,9 @@
   .probe-confirm-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .probe-confirm-actions button { min-height: 40px; justify-content: center; }
   .machine-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
-  .machine-settings-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 8px; align-items: center; }
-  .machine-settings-actions button { flex: 0 1 auto; }
+  .machine-settings-actions { display: flex; justify-content: flex-start; align-items: center; }
+  .machine-settings-actions button { min-width: 148px; }
+  #machine-learn-status { min-width: 0; min-height: 32px; display: grid; align-content: center; overflow: auto; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   #machine-learn-status[data-kind="ok"] { color: var(--ok); }
   #machine-learn-status[data-kind="error"] { color: var(--err); }
   .machine-learned-summary { display: grid; gap: 3px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
@@ -1142,7 +1143,7 @@
     <div class="machine-settings-actions">
       <button type="button" id="machine-learn">Learn from machine</button>
     </div>
-    <div id="machine-learn-status" class="outline-summary" aria-live="polite"></div>
+    <div id="machine-learn-status" aria-live="polite"></div>
     <div id="machine-learned-summary" class="machine-learned-summary"></div>
   </div>
 </dialog>
