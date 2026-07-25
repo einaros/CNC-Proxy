@@ -173,18 +173,32 @@ const fieldProbeFunctions = [
   "fieldProbeCenterSpacing",
   "normalizedClosedPolygon",
   "buildBoundaryProbePoints",
+  "buildOutlineEdgeProbePoints",
+  "projectPointToProbePath",
   "closedPathSegments",
   "sampleClosedPath",
   "closedPathMaxSampleGap",
   "createProbeSpacingIndex",
   "addProbeSpacingPoint",
   "probeSpacingIndexAllows",
-  "buildPoissonProbePoints",
+  "buildRelaxedProbePoints",
+  "buildProbeDomainSamples",
+  "buildBestProbeLattice",
+  "buildProbeLatticeCandidate",
+  "probeCoverageScore",
+  "largestProbeCoverageHole",
+  "relaxProbeDistribution",
+  "createProbeNearestIndex",
+  "nearestIndexedProbe",
+  "projectProbeSpacingConstraints",
+  "probePointInsideAlongMove",
+  "probeDistributionValid",
   "pointBounds",
   "probeSpotFitsPolygon",
   "distancePointToSegment",
   "polygonCentroid",
   "averagePoint",
+  "distance2",
   "pointInPolygon",
 ];
 const fieldProbeConsts = [
@@ -209,7 +223,7 @@ test("field probes form one evenly spaced boundary-to-interior distribution", ()
   assert.equal(built.tooDense, false);
   const firstField = built.points.findIndex((point) => point.probe_kind === "field");
   assert.ok(firstField > 0, "even border probes precede the interior");
-  assert.ok(built.points.slice(0, firstField).every((point) => point.probe_kind === "border"));
+  assert.ok(built.points.slice(0, firstField).every((point) => point.probe_kind === "outline" || point.probe_kind === "border"));
   assert.ok(built.points.slice(firstField).every((point) => point.probe_kind === "field"));
   for (let i = 0; i < built.points.length; i++) {
     for (let j = i + 1; j < built.points.length; j++) {
@@ -217,7 +231,7 @@ test("field probes form one evenly spaced boundary-to-interior distribution", ()
         built.points[i].x - built.points[j].x,
         built.points[i].y - built.points[j].y,
       );
-      assert.ok(distance >= 9.9998, `probe points ${i} and ${j} keep the 10 mm center spacing`);
+      assert.ok(distance + 1e-7 >= 10, `probe points ${i} and ${j} keep the 10 mm center spacing`);
     }
   }
   const onBorder = (point) => Math.min(
@@ -236,7 +250,7 @@ test("field probes form one evenly spaced boundary-to-interior distribution", ()
       worstUncovered = Math.max(worstUncovered, nearest);
     }
   }
-  assert.ok(worstUncovered <= 12.5, `no interior gap zone exceeds 1.25 spacing (got ${worstUncovered})`);
+  assert.ok(worstUncovered <= 7.2, `square reconstruction cells stay near the optimal spacing / √2 coverage (got ${worstUncovered})`);
 
   const border = built.points.slice(0, firstField);
   const field = built.points.slice(firstField);
@@ -244,7 +258,7 @@ test("field probes form one evenly spaced boundary-to-interior distribution", ()
     const alongEdge = point.x === 0 || point.x === 40 ? point.y : point.x;
     if (alongEdge <= 10 || alongEdge >= 30) continue;
     const nearestField = Math.min(...field.map((candidate) => Math.hypot(candidate.x - point.x, candidate.y - point.y)));
-    assert.ok(nearestField <= 12.5, `border-to-interior distance at ${point.x},${point.y} stays near the requested spacing (got ${nearestField})`);
+    assert.ok(nearestField <= 10.001, `border-to-interior distance at ${point.x},${point.y} stays at the requested spacing (got ${nearestField})`);
   }
 });
 
@@ -297,18 +311,225 @@ test("concave field probe distribution preserves spacing and fills narrow region
         built.points[i].x - built.points[j].x,
         built.points[i].y - built.points[j].y,
       );
-      assert.ok(distance >= 9.9998, `concave probe points ${i} and ${j} keep the 10 mm center spacing`);
+      assert.ok(distance + 1e-7 >= 10, `concave probe points ${i} and ${j} keep the 10 mm center spacing`);
     }
   }
   let worstUncovered = 0;
+  let worstPoint = null;
   for (let y = 1; y < 60; y++) {
     for (let x = 1; x < 60; x++) {
       if (x > 25 && y > 20) continue;
       const nearest = Math.min(...built.points.map((point) => Math.hypot(point.x - x, point.y - y)));
-      worstUncovered = Math.max(worstUncovered, nearest);
+      if (nearest > worstUncovered) {
+        worstUncovered = nearest;
+        worstPoint = { x, y };
+      }
     }
   }
-  assert.ok(worstUncovered <= 12.5, `concave outline has no gap zone over 1.25 spacing (got ${worstUncovered})`);
+  assert.ok(worstUncovered <= 9.5, `concave outline keeps every independently sampled reconstruction cell below one spacing (got ${worstUncovered} at ${JSON.stringify(worstPoint)})`);
+});
+
+test("sharp outline edges are fixed probes without violating spot spacing", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 37, y: 0 },
+    { x: 37, y: 23 },
+    { x: 20, y: 23 },
+    { x: 20, y: 41 },
+    { x: 0, y: 41 },
+  ];
+  const built = JSON.parse(vm.runInContext(
+    `JSON.stringify(buildFieldProbePreview(${JSON.stringify(outline)}, 8))`,
+    ctx,
+  ));
+  assert.equal(built.issue, "");
+  assert.equal(built.tooDense, false);
+  for (const edge of outline) {
+    assert.ok(
+      built.points.some((point) => point.probe_kind === "outline" && Math.hypot(point.x - edge.x, point.y - edge.y) <= 1e-7),
+      `sharp edge ${edge.x},${edge.y} is retained as a probe`,
+    );
+  }
+  for (let i = 0; i < built.points.length; i++) {
+    for (let j = i + 1; j < built.points.length; j++) {
+      const distance = Math.hypot(built.points[i].x - built.points[j].x, built.points[i].y - built.points[j].y);
+      assert.ok(distance + 1e-7 >= 10, `edge-aware probe points ${i} and ${j} keep the 10 mm center spacing`);
+    }
+  }
+
+  const closeEdges = [
+    { x: 0, y: 0 },
+    { x: 40, y: 0 },
+    { x: 40, y: 40 },
+    { x: 26, y: 40 },
+    { x: 26, y: 34 },
+    { x: 20, y: 34 },
+    { x: 20, y: 40 },
+    { x: 0, y: 40 },
+  ];
+  const closeBuilt = JSON.parse(vm.runInContext(
+    `JSON.stringify(buildFieldProbePreview(${JSON.stringify(closeEdges)}, 8))`,
+    ctx,
+  ));
+  assert.equal(closeBuilt.issue, "");
+  for (let i = 0; i < closeBuilt.points.length; i++) {
+    for (let j = i + 1; j < closeBuilt.points.length; j++) {
+      const distance = Math.hypot(
+        closeBuilt.points[i].x - closeBuilt.points[j].x,
+        closeBuilt.points[i].y - closeBuilt.points[j].y,
+      );
+      assert.ok(distance + 1e-7 >= 10, `close border/edge probes ${i} and ${j} still keep the 10 mm center spacing`);
+    }
+  }
+});
+
+test("adversarial outlines have no independently sampled reconstruction holes", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const circle = Array.from({ length: 24 }, (_, index) => {
+    const angle = index * Math.PI * 2 / 24;
+    return { x: 50 + Math.cos(angle) * 40, y: 50 + Math.sin(angle) * 40 };
+  });
+  const outlines = {
+    diamond: [{ x: 0, y: 30 }, { x: 50, y: 0 }, { x: 90, y: 35 }, { x: 55, y: 75 }, { x: 10, y: 65 }],
+    narrow: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 18 }, { x: 0, y: 18 }],
+    u_shape: [{ x: 0, y: 0 }, { x: 80, y: 0 }, { x: 80, y: 60 }, { x: 60, y: 60 }, { x: 60, y: 20 }, { x: 20, y: 20 }, { x: 20, y: 60 }, { x: 0, y: 60 }],
+    circle,
+  };
+  for (const [name, outline] of Object.entries(outlines)) {
+    const result = JSON.parse(vm.runInContext(
+      `(() => {
+        const built = buildFieldProbePreview(${JSON.stringify(outline)}, 8);
+        const fineDomain = buildProbeDomainSamples(${JSON.stringify(outline)}, 5);
+        return JSON.stringify({ built, coverage: probeCoverageScore(built.points, fineDomain, 10) });
+      })()`,
+      ctx,
+    ));
+    assert.equal(result.built.issue, "", `${name} builds without an issue`);
+    assert.equal(result.built.tooDense, false, `${name} stays within the probe cap`);
+    assert.ok(Math.sqrt(result.coverage.maxDistance2) < 10, `${name} has no fine-grid coverage hole of one spacing`);
+    for (let i = 0; i < result.built.points.length; i++) {
+      for (let j = i + 1; j < result.built.points.length; j++) {
+        const distance = Math.hypot(
+          result.built.points[i].x - result.built.points[j].x,
+          result.built.points[i].y - result.built.points[j].y,
+        );
+        assert.ok(distance + 1e-7 >= 10, `${name} probe points ${i} and ${j} keep the 10 mm center spacing`);
+      }
+    }
+  }
+});
+
+test("production-size field probe distribution remains dense and responsive", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 300, y: 0 },
+    { x: 300, y: 200 },
+    { x: 0, y: 200 },
+  ];
+  const started = performance.now();
+  const result = JSON.parse(vm.runInContext(
+    `(() => {
+      const built = buildFieldProbePreview(${JSON.stringify(outline)}, 8);
+      return JSON.stringify({
+        built,
+        coverage: probeCoverageScore(built.points, buildProbeDomainSamples(${JSON.stringify(outline)}, 5), 10)
+      });
+    })()`,
+    ctx,
+  ));
+  const elapsed = performance.now() - started;
+  assert.equal(result.built.issue, "");
+  assert.equal(result.built.tooDense, false);
+  assert.ok(result.built.points.length >= 650, `production field retains dense sampling (${result.built.points.length})`);
+  assert.ok(Math.sqrt(result.coverage.maxDistance2) < 10, "production field has no fine-grid coverage hole of one spacing");
+  assert.ok(elapsed < 1500, `production field generation remains responsive (${elapsed.toFixed(1)} ms)`);
+});
+
+test("over-cap field spacing fails deterministically without a long preview stall", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 300, y: 0 },
+    { x: 300, y: 200 },
+    { x: 0, y: 200 },
+  ];
+  const started = performance.now();
+  const built = JSON.parse(vm.runInContext(
+    `JSON.stringify(buildFieldProbePreview(${JSON.stringify(outline)}, 0))`,
+    ctx,
+  ));
+  const elapsed = performance.now() - started;
+  assert.equal(built.tooDense, true);
+  assert.equal(built.issue, "spot gap creates too many probe points");
+  assert.ok(elapsed < 1500, `over-cap preview terminates responsively (${elapsed.toFixed(1)} ms)`);
+});
+
+test("generated probe spread triangulates without bridging outside a concave outline", () => {
+  const triangulationFunctions = [
+    "buildHeightMeshVertices",
+    "constrainedOutlineTriangles",
+    "orderedOutlineBoundaryIndices",
+    "projectPointToClosedPath",
+    "polygonIndexArea",
+    "triangulateBoundaryRing",
+    "insertTriangulationPoint",
+    "triangleCross",
+    "triangleCCW",
+    "pointInTriangle2D",
+    "pointOnSegment2D",
+    "improveConstrainedDelaunay",
+    "triangulationEdges",
+    "triangulationEdgeKey",
+    "quadrilateralAllowsFlip",
+    "pointInsideCircumcircle",
+    "pointInPolygonOrBoundary",
+    "interpolateZ",
+  ];
+  const ctx = buildContext([...fieldProbeFunctions, ...triangulationFunctions], fieldProbeConsts);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 50, y: 0 },
+    { x: 50, y: 50 },
+    { x: 28, y: 50 },
+    { x: 28, y: 44 },
+    { x: 22, y: 44 },
+    { x: 22, y: 50 },
+    { x: 0, y: 50 },
+  ];
+  const result = JSON.parse(vm.runInContext(
+    `(() => {
+      const built = buildFieldProbePreview(${JSON.stringify(outline)}, 8);
+      const meshPoints = buildHeightMeshVertices(
+        built.points.map((point) => ({ ...point, z: 0 })),
+        ${JSON.stringify(outline)}
+      );
+      const faces = constrainedOutlineTriangles(meshPoints, ${JSON.stringify(outline)});
+      const invalid = faces.filter((face) => {
+        const vertices = face.map((index) => meshPoints[index]);
+        const checks = [{
+          x: (vertices[0].x + vertices[1].x + vertices[2].x) / 3,
+          y: (vertices[0].y + vertices[1].y + vertices[2].y) / 3
+        }];
+        for (let index = 0; index < 3; index++) {
+          const a = vertices[index];
+          const b = vertices[(index + 1) % 3];
+          checks.push(
+            { x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 },
+            { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+            { x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 }
+          );
+        }
+        return checks.some((point) => !pointInPolygonOrBoundary(point, ${JSON.stringify(outline)}));
+      });
+      return JSON.stringify({ built, faceCount: faces.length, invalidCount: invalid.length });
+    })()`,
+    ctx,
+  ));
+  assert.equal(result.built.issue, "");
+  assert.ok(result.faceCount > 0);
+  assert.equal(result.invalidCount, 0, "reconstruction faces stay inside the captured concave outline");
 });
 
 test("field height samples are exported relative to the probed floor", () => {
@@ -375,6 +596,7 @@ test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and 
   const ctx = buildContext(
     [
       "buildHeightOBJ",
+      "buildHeightMeshVertices",
       "exportWorkOrigin",
       "requireHeightExportOutline",
       "triangleCCW",
@@ -392,6 +614,7 @@ test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and 
       "triangulationEdgeKey",
       "quadrilateralAllowsFlip",
       "pointInsideCircumcircle",
+      "interpolateZ",
       "fieldProbeExportPoints",
       "fieldProbeHeightReference",
       "cloneOutlineOrigin",
@@ -448,8 +671,9 @@ test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and 
 
   state.outline.fieldProbeResults[8] = { ...state.outline.fieldProbeResults[0], machine_z: -19 };
   const duplicateOBJ = vm.runInContext("buildHeightOBJ()", ctx);
-  assert.equal(duplicateOBJ.split("\n").filter((line) => line.startsWith("v ")).length, 9);
+  assert.equal(duplicateOBJ.split("\n").filter((line) => line.startsWith("v ")).length, 10);
   assert.match(duplicateOBJ, /^p 9$/m, "a coincident ninth sample remains an explicit OBJ point");
+  assert.match(duplicateOBJ, /# mesh_vertex_count: 10/, "a missing sharp outline corner is restored as an interpolated mesh vertex");
 });
 
 test("PGM export uses the same current work origin instead of the captured outline origin", () => {

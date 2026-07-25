@@ -2564,26 +2564,27 @@ function updateFieldProbePreview() {
     o.fieldProbeIssue = "curve fit generated too many outline points";
     return;
   }
-  const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap());
+  const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap(), outlineWorkPoints());
   o.fieldProbePreview = built.points;
   o.fieldProbeTooDense = built.tooDense;
   o.fieldProbeIssue = built.issue || "";
 }
 
-function buildFieldProbePreview(points, spotGap) {
+function buildFieldProbePreview(points, spotGap, outlinePoints = points) {
   const spacing = fieldProbeCenterSpacing(spotGap);
   const polygon = normalizedClosedPolygon(points);
   if (polygon.length < 3) return { points: [], tooDense: false, issue: "field probe needs a closed outline" };
-  const boundary = buildBoundaryProbePoints(polygon, spacing);
+  const boundary = buildBoundaryProbePoints(polygon, outlinePoints, spacing);
   if (boundary.issue || boundary.tooDense) {
     return { points: [], tooDense: !!boundary.tooDense, issue: boundary.issue || "spot gap creates too many probe points" };
   }
-  // The boundary and interior are one distribution. Even perimeter samples
-  // seed a deterministic Poisson frontier which grows inward at the requested
-  // center spacing; a fine final scan fills any admissible holes the frontier
-  // could not reach. Captured outline vertices define the polygon, but are not
-  // arbitrary fixed probe sites that can push entire lattice rows away.
-  const field = buildPoissonProbePoints(polygon, spacing, boundary.points);
+  // Keep the gap-safe boundary fixed, choose the best globally phased square
+  // or triangular packing, then optimize the interior as a reconstruction
+  // mesh. Repeated centroidal relaxation moves each free site toward the
+  // center of its measured coverage cell; a largest-hole pass inserts another
+  // site whenever the spacing rule permits one. This optimizes the surface
+  // cells themselves rather than accepting the first locally valid packing.
+  const field = buildRelaxedProbePoints(polygon, spacing, boundary.points);
   const ordered = boundary.points.concat(field.points);
   return {
     points: ordered.map((p, i) => ({
@@ -2605,7 +2606,7 @@ function normalizedClosedPolygon(points) {
   return out;
 }
 
-function buildBoundaryProbePoints(polygon, spacing) {
+function buildBoundaryProbePoints(polygon, outlinePoints, spacing) {
   const path = closedPathSegments(polygon);
   if (!path.segments.length || !Number.isFinite(spacing) || spacing <= 0) {
     return { points: [], tooDense: false, issue: "field probe needs a valid outline" };
@@ -2614,19 +2615,20 @@ function buildBoundaryProbePoints(polygon, spacing) {
   if (targetCount >= MAX_FIELD_PROBE_POINTS) {
     return { points: [], tooDense: true, issue: "spot gap creates too many border probe points" };
   }
-  let best = { points: [], maxArcGap: Infinity };
+  const edgeSeeds = buildOutlineEdgeProbePoints(outlinePoints, path, spacing);
+  let best = { points: edgeSeeds, maxArcGap: closedPathMaxSampleGap(edgeSeeds, path.perimeter) };
   // A phase which straddles a curved or sharp corner can put equal arc-length
   // samples too close in Euclidean space. Try phases and, when necessary, one
   // fewer sample until no lower-count candidate can beat the best result.
-  for (let count = targetCount; count > best.points.length; count--) {
-    for (let phaseIndex = 0; phaseIndex < 24; phaseIndex++) {
-      const samples = sampleClosedPath(path, count, phaseIndex / 24);
-      const candidate = [];
-      const spacingIndex = createProbeSpacingIndex([], spacing);
+  for (let count = targetCount; count >= Math.max(1, targetCount - 4); count--) {
+    for (let phaseIndex = 0; phaseIndex < 12; phaseIndex++) {
+      const samples = sampleClosedPath(path, count, phaseIndex / 12);
+      const candidate = edgeSeeds.map((point) => ({ ...point }));
+      const spacingIndex = createProbeSpacingIndex(candidate, spacing);
       for (const sample of samples) {
         const point = {
-          x: Number(sample.x.toFixed(4)),
-          y: Number(sample.y.toFixed(4)),
+          x: sample.x,
+          y: sample.y,
           probe_kind: "border",
           path_distance: sample.path_distance,
         };
@@ -2641,11 +2643,95 @@ function buildBoundaryProbePoints(polygon, spacing) {
       }
     }
   }
+  const spacingIndex = createProbeSpacingIndex(best.points, spacing);
+  const denseSamples = sampleClosedPath(path, Math.max(targetCount, Math.ceil(path.perimeter / (spacing / 4))), 0);
+  while (best.points.length < MAX_FIELD_PROBE_POINTS) {
+    let selected = null;
+    let selectedDistance2 = -Infinity;
+    for (const sample of denseSamples) {
+      if (!probeSpacingIndexAllows(spacingIndex, sample)) continue;
+      let nearestDistance2 = Infinity;
+      for (const point of best.points) nearestDistance2 = Math.min(nearestDistance2, distance2(sample, point));
+      if (nearestDistance2 > selectedDistance2 + 1e-12) {
+        selected = sample;
+        selectedDistance2 = nearestDistance2;
+      }
+    }
+    if (!selected) break;
+    const point = {
+      x: selected.x,
+      y: selected.y,
+      probe_kind: "border",
+      path_distance: selected.path_distance,
+    };
+    best.points.push(point);
+    addProbeSpacingPoint(spacingIndex, point);
+  }
+  if (best.points.length >= MAX_FIELD_PROBE_POINTS) {
+    return { points: [], tooDense: true, issue: "spot gap creates too many border probe points" };
+  }
+  best.points.sort((a, b) => a.path_distance - b.path_distance);
   return {
-    points: best.points.map((point) => ({ x: point.x, y: point.y, probe_kind: "border" })),
+    points: best.points.map((point) => ({ x: point.x, y: point.y, probe_kind: point.probe_kind })),
     tooDense: false,
     issue: "",
   };
+}
+
+function buildOutlineEdgeProbePoints(outlinePoints, path, spacing) {
+  const points = normalizedClosedPolygon(outlinePoints);
+  if (points.length < 3) return [];
+  const candidates = [];
+  for (let index = 0; index < points.length; index++) {
+    const previous = points[(index - 1 + points.length) % points.length];
+    const point = points[index];
+    const next = points[(index + 1) % points.length];
+    const inX = point.x - previous.x;
+    const inY = point.y - previous.y;
+    const outX = next.x - point.x;
+    const outY = next.y - point.y;
+    const inLength = Math.hypot(inX, inY);
+    const outLength = Math.hypot(outX, outY);
+    if (inLength <= 1e-9 || outLength <= 1e-9) continue;
+    const cosine = Math.max(-1, Math.min(1, (inX * outX + inY * outY) / (inLength * outLength)));
+    const turn = 1 - cosine;
+    if (turn < 0.08) continue;
+    const projection = projectPointToProbePath(point, path);
+    candidates.push({ ...projection, turn, sourceIndex: index });
+  }
+  candidates.sort((a, b) => b.turn - a.turn || a.path_distance - b.path_distance || a.sourceIndex - b.sourceIndex);
+  const selected = [];
+  const spacingIndex = createProbeSpacingIndex([], spacing);
+  for (const candidate of candidates) {
+    const point = {
+      x: candidate.x,
+      y: candidate.y,
+      probe_kind: "outline",
+      path_distance: candidate.path_distance,
+    };
+    if (!probeSpacingIndexAllows(spacingIndex, point)) continue;
+    selected.push(point);
+    addProbeSpacingPoint(spacingIndex, point);
+  }
+  return selected;
+}
+
+function projectPointToProbePath(point, path) {
+  let best = { x: path.segments[0].a.x, y: path.segments[0].a.y, path_distance: 0, distance2: Infinity };
+  for (const segment of path.segments) {
+    const dx = segment.b.x - segment.a.x;
+    const dy = segment.b.y - segment.a.y;
+    const t = Math.max(0, Math.min(1, ((point.x - segment.a.x) * dx + (point.y - segment.a.y) * dy) / (segment.length * segment.length)));
+    const x = segment.a.x + dx * t;
+    const y = segment.a.y + dy * t;
+    const distance2Value = Math.pow(point.x - x, 2) + Math.pow(point.y - y, 2);
+    const pathDistance = segment.start + t * segment.length;
+    if (distance2Value < best.distance2 - 1e-12 ||
+        (Math.abs(distance2Value - best.distance2) <= 1e-12 && pathDistance < best.path_distance)) {
+      best = { x, y, path_distance: pathDistance, distance2: distance2Value };
+    }
+  }
+  return best;
 }
 
 function closedPathSegments(points) {
@@ -2713,118 +2799,342 @@ function probeSpacingIndexAllows(index, candidate) {
   for (let y = cellY - 1; y <= cellY + 1; y++) {
     for (let x = cellX - 1; x <= cellX + 1; x++) {
       for (const point of index.cells.get(x + ":" + y) || []) {
-        if (Math.hypot(candidate.x - point.x, candidate.y - point.y) < index.spacing - 0.0001) return false;
+        if (Math.hypot(candidate.x - point.x, candidate.y - point.y) + 1e-9 < index.spacing) return false;
       }
     }
   }
   return true;
 }
 
-function buildPoissonProbePoints(polygon, spacing, reserved = []) {
-  const out = [];
-  const spacingIndex = createProbeSpacingIndex(reserved, spacing);
-  const active = reserved.slice();
-  let activeIndex = 0;
-  let tooDense = false;
-
-  const accept = (raw) => {
-    const candidate = {
-      x: Number(raw.x.toFixed(4)),
-      y: Number(raw.y.toFixed(4)),
-      probe_kind: "field",
-    };
-    if (!probeSpotFitsPolygon(candidate, polygon) || !probeSpacingIndexAllows(spacingIndex, candidate)) return false;
-    if (reserved.length + out.length >= MAX_FIELD_PROBE_POINTS) {
+function buildRelaxedProbePoints(polygon, spacing, reserved = []) {
+  const domain = buildProbeDomainSamples(polygon, spacing);
+  const boundaryCount = reserved.length;
+  const initial = buildBestProbeLattice(polygon, spacing, reserved, domain);
+  const points = reserved.map((point) => ({ ...point })).concat(initial.points);
+  let tooDense = points.length >= MAX_FIELD_PROBE_POINTS && initial.truncated;
+  for (let cycle = 0; cycle < 12 && !tooDense; cycle++) {
+    for (let iteration = 0; iteration < 36; iteration++) {
+      const moved = relaxProbeDistribution(points, boundaryCount, domain, polygon, spacing, iteration);
+      if (moved <= spacing * 0.0002 && probeDistributionValid(points, boundaryCount, polygon, spacing)) break;
+    }
+    const hole = largestProbeCoverageHole(points, domain, spacing);
+    if (!hole.point || hole.distance + 1e-9 < spacing) break;
+    if (points.length >= MAX_FIELD_PROBE_POINTS) {
       tooDense = true;
-      return false;
+      break;
     }
-    out.push(candidate);
-    active.push(candidate);
-    addProbeSpacingPoint(spacingIndex, candidate);
-    return true;
-  };
-
-  const growFrontier = () => {
-    const attempts = 24;
-    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-    while (activeIndex < active.length && !tooDense) {
-      const base = active[activeIndex++];
-      const phase = (activeIndex * 0.6180339887498949 % 1) * Math.PI * 2;
-      for (let attempt = 0; attempt < attempts; attempt++) {
-        const radiusBand = ((attempt * 11) % attempts) / (attempts - 1);
-        const radius = spacing * (1.00002 + radiusBand * 0.2);
-        const angle = phase + attempt * goldenAngle;
-        accept({
-          x: base.x + Math.cos(angle) * radius,
-          y: base.y + Math.sin(angle) * radius,
-        });
-        if (tooDense) break;
-      }
-    }
-  };
-
-  // Start with the equilateral sites implied by each adjacent pair of boundary
-  // samples. This makes the first interior row conform to the outline at the
-  // same spacing as the rest of the field instead of depending on arbitrary
-  // Poisson candidate angles.
-  for (let i = 0; i < reserved.length && !tooDense; i++) {
-    const a = reserved[i];
-    const b = reserved[(i + 1) % reserved.length];
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const length = Math.hypot(dx, dy);
-    if (length <= 1e-9 || length > spacing * 2 + 0.0001) continue;
-    const height2 = spacing * spacing - (length * length) / 4;
-    if (height2 < -0.0001) continue;
-    const height = Math.sqrt(Math.max(0, height2));
-    const midX = (a.x + b.x) / 2;
-    const midY = (a.y + b.y) / 2;
-    const nx = -dy / length;
-    const ny = dx / length;
-    if (accept({ x: midX + nx * height, y: midY + ny * height })) continue;
-    accept({ x: midX - nx * height, y: midY - ny * height });
+    points.push({ x: hole.point.x, y: hole.point.y, probe_kind: "field" });
   }
+  return {
+    points: points.slice(boundaryCount).map((point) => ({
+      x: point.x,
+      y: point.y,
+      probe_kind: "field",
+    })),
+    tooDense,
+  };
+}
 
-  growFrontier();
-  if (!tooDense) {
-    // Bridson growth can leave a pocket when every nearby active site happens
-    // to aim away from it. A spacing/3 scan is a deterministic maximality pass:
-    // every accepted seed is grown immediately, so isolated gap zones cannot
-    // survive merely because of candidate angle or boundary shape.
-    const bounds = pointBounds(polygon);
-    const step = spacing / 3;
-    let row = 0;
-    for (let y = bounds.y_min; y <= bounds.y_max + 1e-9 && !tooDense; y += step, row++) {
-      const offset = row % 2 ? step / 2 : 0;
-      const leftToRight = row % 4 < 2;
-      const start = leftToRight ? bounds.x_min + offset : bounds.x_max - offset;
-      const end = leftToRight ? bounds.x_max : bounds.x_min;
-      const delta = leftToRight ? step : -step;
-      for (let x = start; leftToRight ? x <= end + 1e-9 : x >= end - 1e-9; x += delta) {
-        if (!accept({ x, y })) continue;
-        growFrontier();
-        if (tooDense) break;
+function buildProbeDomainSamples(polygon, spacing) {
+  const bounds = pointBounds(polygon);
+  const width = Math.max(0, bounds.x_max - bounds.x_min);
+  const height = Math.max(0, bounds.y_max - bounds.y_min);
+  const maxSamples = 30000;
+  const step = Math.max(spacing / 4, Math.sqrt((width * height) / maxSamples) || spacing / 4);
+  const samples = [];
+  let row = 0;
+  for (let y = bounds.y_min + PROBE_SPOT_RADIUS_MM; y <= bounds.y_max - PROBE_SPOT_RADIUS_MM + 1e-9; y += step, row++) {
+    const offset = row % 2 ? step / 2 : 0;
+    for (let x = bounds.x_min + PROBE_SPOT_RADIUS_MM + offset; x <= bounds.x_max - PROBE_SPOT_RADIUS_MM + 1e-9; x += step) {
+      const point = { x, y };
+      if (probeSpotFitsPolygon(point, polygon)) samples.push(point);
+    }
+  }
+  const center = polygonCentroid(polygon);
+  if (probeSpotFitsPolygon(center, polygon)) samples.push(center);
+  return samples;
+}
+
+function buildBestProbeLattice(polygon, spacing, reserved, domain) {
+  const offsets = [0, 0.5];
+  const scoreStride = Math.max(1, Math.ceil(domain.length / 2500));
+  const scoringDomain = scoreStride === 1 ? domain : domain.filter((_, index) => index % scoreStride === 0);
+  let best = { points: [], truncated: false, score: null };
+  for (const kind of ["triangular", "square"]) {
+    const rotationDegrees = kind === "triangular" ? [0, 10, 20, 30, 40, 50] : [0, 15, 30, 45, 60, 75];
+    const rotations = rotationDegrees.map((degrees) => degrees * Math.PI / 180);
+    for (const rotation of rotations) {
+      for (const offsetX of offsets) {
+        for (const offsetY of offsets) {
+          const candidate = buildProbeLatticeCandidate(polygon, spacing, reserved, kind, rotation, offsetX, offsetY);
+          // This one lattice is already a constructive proof that more than
+          // the supported number of mutually gap-safe probes fit. No broader
+          // search or relaxation can make the requested preview usable.
+          if (candidate.truncated) return { ...candidate, score: null };
+          if (candidate.points.length < best.points.length) continue;
+          const score = probeCoverageScore(reserved.concat(candidate.points), scoringDomain, spacing);
+          if (candidate.points.length > best.points.length ||
+              !best.score ||
+              score.maxDistance2 < best.score.maxDistance2 - 1e-9 ||
+              (Math.abs(score.maxDistance2 - best.score.maxDistance2) <= 1e-9 && score.meanDistance2 < best.score.meanDistance2 - 1e-9)) {
+            best = { ...candidate, score };
+          }
+        }
       }
     }
   }
-  if (!tooDense && !out.length) {
-    const center = polygonCentroid(polygon);
-    accept(center);
-    growFrontier();
+  return best;
+}
+
+function buildProbeLatticeCandidate(polygon, spacing, reserved, kind, rotation, offsetXFrac, offsetYFrac) {
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  const toLattice = (point) => ({ x: point.x * cos + point.y * sin, y: -point.x * sin + point.y * cos });
+  const fromLattice = (point) => ({ x: point.x * cos - point.y * sin, y: point.x * sin + point.y * cos });
+  const bounds = pointBounds(polygon.map(toLattice));
+  const rowGap = kind === "triangular" ? spacing * Math.sqrt(3) / 2 : spacing;
+  const firstY = Math.floor((bounds.y_min - rowGap) / rowGap) * rowGap + offsetYFrac * rowGap;
+  const firstX = Math.floor((bounds.x_min - spacing) / spacing) * spacing + offsetXFrac * spacing;
+  const spacingIndex = createProbeSpacingIndex(reserved, spacing);
+  const points = [];
+  let truncated = false;
+  let row = 0;
+  for (let y = firstY; y <= bounds.y_max + rowGap + 1e-9; y += rowGap, row++) {
+    const rowOffset = kind === "triangular" && row % 2 ? spacing / 2 : 0;
+    for (let x = firstX + rowOffset; x <= bounds.x_max + spacing + 1e-9; x += spacing) {
+      const source = fromLattice({ x, y });
+      const point = { x: source.x, y: source.y, probe_kind: "field" };
+      if (!probeSpotFitsPolygon(point, polygon) || !probeSpacingIndexAllows(spacingIndex, point)) continue;
+      if (reserved.length + points.length >= MAX_FIELD_PROBE_POINTS) {
+        truncated = true;
+        break;
+      }
+      points.push(point);
+      addProbeSpacingPoint(spacingIndex, point);
+    }
+    if (truncated) break;
   }
-  if (!tooDense && reserved.length + out.length >= MAX_FIELD_PROBE_POINTS) {
-    const bounds = pointBounds(polygon);
-    const step = spacing / 3;
-    for (let y = bounds.y_min; y <= bounds.y_max + 1e-9 && !tooDense; y += step) {
-      for (let x = bounds.x_min; x <= bounds.x_max + 1e-9; x += step) {
-        const candidate = { x, y };
-        if (!probeSpotFitsPolygon(candidate, polygon) || !probeSpacingIndexAllows(spacingIndex, candidate)) continue;
-        tooDense = true;
+  return { points, truncated };
+}
+
+function probeCoverageScore(points, domain, spacing) {
+  if (!points.length || !domain.length) return { maxDistance2: Infinity, meanDistance2: Infinity };
+  const index = createProbeNearestIndex(points, spacing);
+  let maxDistance2 = 0;
+  let sumDistance2 = 0;
+  for (const sample of domain) {
+    const nearest = nearestIndexedProbe(index, sample).distance2;
+    maxDistance2 = Math.max(maxDistance2, nearest);
+    sumDistance2 += nearest;
+  }
+  return { maxDistance2, meanDistance2: sumDistance2 / domain.length };
+}
+
+function largestProbeCoverageHole(points, domain, spacing) {
+  if (!points.length || !domain.length) return { point: null, distance: 0 };
+  const index = createProbeNearestIndex(points, spacing);
+  let point = null;
+  let distance2Value = -Infinity;
+  for (const sample of domain) {
+    const nearest = nearestIndexedProbe(index, sample).distance2;
+    if (nearest > distance2Value + 1e-12) {
+      point = sample;
+      distance2Value = nearest;
+    }
+  }
+  return { point, distance: Math.sqrt(Math.max(0, distance2Value)) };
+}
+
+function relaxProbeDistribution(points, fixedCount, domain, polygon, spacing, iteration) {
+  if (points.length <= fixedCount || !domain.length) return 0;
+  const index = createProbeNearestIndex(points, spacing);
+  const sumX = new Float64Array(points.length);
+  const sumY = new Float64Array(points.length);
+  const counts = new Uint32Array(points.length);
+  for (const sample of domain) {
+    // Boundary probes are immutable constraints, not owners of interior
+    // reconstruction area. Assign every interior domain sample to the nearest
+    // movable site so the first free row is actively pulled toward any
+    // boundary-to-interior void instead of leaving that void in a fixed cell.
+    const nearest = nearestIndexedProbe(index, sample, fixedCount);
+    if (nearest.index < fixedCount) continue;
+    sumX[nearest.index] += sample.x;
+    sumY[nearest.index] += sample.y;
+    counts[nearest.index]++;
+  }
+  const proposed = points.map((point) => ({ ...point }));
+  const relaxation = 0.42;
+  const maxStep = spacing * 0.28;
+  for (let pointIndex = fixedCount; pointIndex < points.length; pointIndex++) {
+    if (!counts[pointIndex]) continue;
+    const point = points[pointIndex];
+    let vx = (sumX[pointIndex] / counts[pointIndex] - point.x) * relaxation;
+    let vy = (sumY[pointIndex] / counts[pointIndex] - point.y) * relaxation;
+    const length = Math.hypot(vx, vy);
+    if (length > maxStep) {
+      vx *= maxStep / length;
+      vy *= maxStep / length;
+    }
+    proposed[pointIndex].x += vx;
+    proposed[pointIndex].y += vy;
+  }
+  projectProbeSpacingConstraints(proposed, points, fixedCount, polygon, spacing, iteration);
+  if (!probeDistributionValid(proposed, fixedCount, polygon, spacing)) {
+    let accepted = null;
+    for (let attempt = 1; attempt <= 14; attempt++) {
+      const alpha = Math.pow(2, -attempt);
+      const blended = points.map((point, pointIndex) => pointIndex < fixedCount ? point : ({
+        ...point,
+        x: point.x + (proposed[pointIndex].x - point.x) * alpha,
+        y: point.y + (proposed[pointIndex].y - point.y) * alpha,
+      }));
+      if (probeDistributionValid(blended, fixedCount, polygon, spacing)) {
+        accepted = blended;
         break;
       }
     }
+    if (!accepted) return 0;
+    proposed.splice(0, proposed.length, ...accepted);
   }
-  return { points: out, tooDense };
+  let maxMove = 0;
+  for (let pointIndex = fixedCount; pointIndex < points.length; pointIndex++) {
+    maxMove = Math.max(maxMove, Math.hypot(proposed[pointIndex].x - points[pointIndex].x, proposed[pointIndex].y - points[pointIndex].y));
+    points[pointIndex].x = proposed[pointIndex].x;
+    points[pointIndex].y = proposed[pointIndex].y;
+  }
+  return maxMove;
+}
+
+function createProbeNearestIndex(points, spacing) {
+  const index = { spacing, points, cells: new Map() };
+  for (let pointIndex = 0; pointIndex < points.length; pointIndex++) {
+    const point = points[pointIndex];
+    const cellX = Math.floor(point.x / spacing);
+    const cellY = Math.floor(point.y / spacing);
+    const key = cellX + ":" + cellY;
+    const cell = index.cells.get(key) || [];
+    cell.push(pointIndex);
+    index.cells.set(key, cell);
+  }
+  return index;
+}
+
+function nearestIndexedProbe(index, candidate, minimumIndex = 0) {
+  const cellX = Math.floor(candidate.x / index.spacing);
+  const cellY = Math.floor(candidate.y / index.spacing);
+  let bestIndex = -1;
+  let bestDistance2 = Infinity;
+  for (let radius = 0; radius <= 3; radius++) {
+    for (let y = cellY - radius; y <= cellY + radius; y++) {
+      for (let x = cellX - radius; x <= cellX + radius; x++) {
+        if (radius && x > cellX - radius && x < cellX + radius && y > cellY - radius && y < cellY + radius) continue;
+        for (const pointIndex of index.cells.get(x + ":" + y) || []) {
+          if (pointIndex < minimumIndex) continue;
+          const distance = distance2(candidate, index.points[pointIndex]);
+          if (distance < bestDistance2) {
+            bestDistance2 = distance;
+            bestIndex = pointIndex;
+          }
+        }
+      }
+    }
+    if (bestIndex >= 0 && bestDistance2 <= Math.pow(radius * index.spacing, 2)) break;
+  }
+  if (bestIndex < 0) {
+    for (let pointIndex = minimumIndex; pointIndex < index.points.length; pointIndex++) {
+      const distance = distance2(candidate, index.points[pointIndex]);
+      if (distance < bestDistance2) {
+        bestDistance2 = distance;
+        bestIndex = pointIndex;
+      }
+    }
+  }
+  return { index: bestIndex, distance2: bestDistance2 };
+}
+
+function projectProbeSpacingConstraints(proposed, previous, fixedCount, polygon, spacing, iteration) {
+  const target = spacing + 0.0002;
+  for (let pass = 0; pass < 10; pass++) {
+    let maxOverlap = 0;
+    const index = createProbeNearestIndex(proposed, spacing);
+    for (let i = 0; i < proposed.length; i++) {
+      const cellX = Math.floor(proposed[i].x / spacing);
+      const cellY = Math.floor(proposed[i].y / spacing);
+      for (let y = cellY - 1; y <= cellY + 1; y++) {
+        for (let x = cellX - 1; x <= cellX + 1; x++) {
+          for (const j of index.cells.get(x + ":" + y) || []) {
+            if (j <= i) continue;
+            let dx = proposed[i].x - proposed[j].x;
+            let dy = proposed[i].y - proposed[j].y;
+            let distance = Math.hypot(dx, dy);
+            if (distance >= target) continue;
+            if (distance <= 1e-12) {
+              const angle = ((i + 1) * 2.399963229728653 + (j + iteration + 1) * 0.7548776662466927);
+              dx = Math.cos(angle);
+              dy = Math.sin(angle);
+              distance = 1;
+            }
+            const overlap = target - distance;
+            maxOverlap = Math.max(maxOverlap, overlap);
+            const ux = dx / distance;
+            const uy = dy / distance;
+            const iFree = i >= fixedCount;
+            const jFree = j >= fixedCount;
+            if (iFree && jFree) {
+              proposed[i].x += ux * overlap / 2;
+              proposed[i].y += uy * overlap / 2;
+              proposed[j].x -= ux * overlap / 2;
+              proposed[j].y -= uy * overlap / 2;
+            } else if (iFree) {
+              proposed[i].x += ux * overlap;
+              proposed[i].y += uy * overlap;
+            } else if (jFree) {
+              proposed[j].x -= ux * overlap;
+              proposed[j].y -= uy * overlap;
+            }
+          }
+        }
+      }
+    }
+    for (let pointIndex = fixedCount; pointIndex < proposed.length; pointIndex++) {
+      if (probeSpotFitsPolygon(proposed[pointIndex], polygon)) continue;
+      proposed[pointIndex] = probePointInsideAlongMove(previous[pointIndex], proposed[pointIndex], polygon);
+    }
+    if (maxOverlap <= 0.0001) break;
+  }
+}
+
+function probePointInsideAlongMove(previous, candidate, polygon) {
+  if (probeSpotFitsPolygon(candidate, polygon)) return candidate;
+  let low = 0;
+  let high = 1;
+  let best = { ...previous };
+  for (let iteration = 0; iteration < 28; iteration++) {
+    const ratio = (low + high) / 2;
+    const point = {
+      ...candidate,
+      x: previous.x + (candidate.x - previous.x) * ratio,
+      y: previous.y + (candidate.y - previous.y) * ratio,
+    };
+    if (probeSpotFitsPolygon(point, polygon)) {
+      best = point;
+      low = ratio;
+    } else {
+      high = ratio;
+    }
+  }
+  return best;
+}
+
+function probeDistributionValid(points, fixedCount, polygon, spacing) {
+  const spacingIndex = createProbeSpacingIndex([], spacing);
+  for (let pointIndex = 0; pointIndex < points.length; pointIndex++) {
+    const point = points[pointIndex];
+    if (pointIndex >= fixedCount && !probeSpotFitsPolygon(point, polygon)) return false;
+    if (!probeSpacingIndexAllows(spacingIndex, point)) return false;
+    addProbeSpacingPoint(spacingIndex, point);
+  }
+  return true;
 }
 
 function pointBounds(points) {
@@ -2880,6 +3190,12 @@ function averagePoint(points) {
     y += point.y;
   }
   return { x: x / points.length, y: y / points.length };
+}
+
+function distance2(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
 }
 
 function pointInPolygon(point, polygon) {
@@ -3647,10 +3963,11 @@ function buildHeightOBJ() {
   const outline = outlineEffectiveExportPoints(origin);
   const samples = fieldProbeExportPoints(origin).filter((point) => [point.x, point.y, point.z].every(Number.isFinite));
   if (samples.length < 3) throw new Error("field probe needs at least three samples");
+  const meshVertices = buildHeightMeshVertices(samples, outline);
   const triangulationPoints = [];
   const triangulationVertexIndices = [];
-  for (let index = 0; index < samples.length; index++) {
-    const point = samples[index];
+  for (let index = 0; index < meshVertices.length; index++) {
+    const point = meshVertices[index];
     if (triangulationPoints.some((seen) => Math.hypot(seen.x - point.x, seen.y - point.y) <= 0.000001)) continue;
     triangulationPoints.push(point);
     triangulationVertexIndices.push(index);
@@ -3673,17 +3990,45 @@ function buildHeightOBJ() {
     "# CNC Z coordinates: " + reference.label,
     "# z_reference_machine_mm: " + pathNum(reference.machineZ),
     "# sample_count: " + samples.length,
+    "# mesh_vertex_count: " + meshVertices.length,
     "o outline_field_probe",
   ];
-  for (const point of samples) {
+  for (const point of meshVertices) {
     lines.push("v " + pathNum(point.x) + " " + pathNum(point.y) + " " + pathNum(point.z));
   }
   for (const face of faces) lines.push("f " + face.map((index) => index + 1).join(" "));
   const used = new Set(faces.flat());
-  for (let index = 0; index < samples.length; index++) {
+  for (let index = 0; index < meshVertices.length; index++) {
     if (!used.has(index)) lines.push("p " + (index + 1));
   }
   return lines.join("\n") + "\n";
+}
+
+function buildHeightMeshVertices(samples, outline) {
+  const vertices = samples.map((point) => ({ ...point }));
+  if (outline.length < 3) return vertices;
+  for (let index = 0; index < outline.length; index++) {
+    const previous = outline[(index - 1 + outline.length) % outline.length];
+    const point = outline[index];
+    const next = outline[(index + 1) % outline.length];
+    const inX = point.x - previous.x;
+    const inY = point.y - previous.y;
+    const outX = next.x - point.x;
+    const outY = next.y - point.y;
+    const inLength = Math.hypot(inX, inY);
+    const outLength = Math.hypot(outX, outY);
+    if (inLength <= 1e-9 || outLength <= 1e-9) continue;
+    const cosine = Math.max(-1, Math.min(1, (inX * outX + inY * outY) / (inLength * outLength)));
+    if (1 - cosine < 0.08) continue;
+    if (vertices.some((seen) => Math.hypot(seen.x - point.x, seen.y - point.y) <= 0.000001)) continue;
+    vertices.push({
+      x: point.x,
+      y: point.y,
+      z: interpolateZ(point.x, point.y, samples),
+      probe_kind: "mesh_outline",
+    });
+  }
+  return vertices;
 }
 
 function triangleCCW(points, face) {
@@ -3713,9 +4058,9 @@ function orderedOutlineBoundaryIndices(points, outline) {
     kind: point.probe_kind,
     projection: projectPointToClosedPath(point, outline),
   }));
-  const hasKinds = projections.some(({ kind }) => kind === "outline" || kind === "border");
+  const hasKinds = projections.some(({ kind }) => kind === "outline" || kind === "border" || kind === "mesh_outline");
   const boundary = projections.filter(({ kind, projection }) =>
-    hasKinds ? kind === "outline" || kind === "border" : projection.distance <= 0.05
+    hasKinds ? kind === "outline" || kind === "border" || kind === "mesh_outline" : projection.distance <= 0.05
   );
   boundary.sort((a, b) => a.projection.along - b.projection.along || a.index - b.index);
   const indices = boundary.map(({ index }) => index);
