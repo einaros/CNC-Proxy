@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -49,7 +50,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "deploy:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("deployment completed: source=%s backup=%s restarted=%v\n", res.Result.SourceDir, res.Result.BackupDir, res.Result.Restarted)
+	fmt.Printf("deployment completed: source=%s restarted=%v\n", res.Result.SourceDir, res.Result.Restarted)
 	if res.Result.ManagerUpgrade != nil {
 		fmt.Printf("manager upgrade scheduled: target=%s proxy_start_on_relaunch=%v\n", res.Result.ManagerUpgrade.TargetBinary, res.Result.ManagerUpgrade.ProxyStartOnRelaunch)
 		if res.Result.ManagerUpgrade.ProxyStartOnRelaunch {
@@ -141,7 +142,6 @@ type deployResponse struct {
 	OK     bool `json:"ok"`
 	Result struct {
 		SourceDir      string `json:"source_dir"`
-		BackupDir      string `json:"backup_dir"`
 		BuildLog       string `json:"build_log"`
 		Restarted      bool   `json:"restarted"`
 		ManagerUpgrade *struct {
@@ -156,6 +156,67 @@ type deployResponse struct {
 }
 
 func upload(target, token string, restart bool, component, zipPath string) (deployResponse, error) {
+	return uploadWithRetry(target, token, restart, component, zipPath, 8, 500*time.Millisecond)
+}
+
+func uploadWithRetry(target, token string, restart bool, component, zipPath string, attempts int, initialDelay time.Duration) (deployResponse, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var (
+		out   deployResponse
+		err   error
+		delay = initialDelay
+	)
+	for attempt := 0; attempt < attempts; attempt++ {
+		out, err = uploadOnce(target, token, restart, component, zipPath)
+		if err == nil || !isTransientDeployError(err) {
+			return out, err
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "deploy: remote files are still busy; retrying in %s\n", delay)
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		if delay < 4*time.Second {
+			delay *= 2
+		}
+	}
+	return out, err
+}
+
+type deployStatusError struct {
+	status int
+	detail string
+}
+
+func (e *deployStatusError) Error() string {
+	return fmt.Sprintf("status %d: %s", e.status, e.detail)
+}
+
+func isTransientDeployError(err error) bool {
+	var statusErr *deployStatusError
+	if !errors.As(err, &statusErr) || statusErr.status < 500 {
+		return false
+	}
+	detail := strings.ToLower(statusErr.detail)
+	for _, fragment := range []string{
+		"being used by another process",
+		"used by another process",
+		"cannot access the file",
+		"access is denied",
+		"sharing violation",
+	} {
+		if strings.Contains(detail, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func uploadOnce(target, token string, restart bool, component, zipPath string) (deployResponse, error) {
 	u := strings.TrimRight(target, "/") + "/api/deploy"
 	q := url.Values{}
 	if !restart {
@@ -216,7 +277,7 @@ func upload(target, token string, restart bool, component, zipPath string) (depl
 		if out.Error == "" {
 			out.Error = resp.Status
 		}
-		return out, fmt.Errorf("status %d: %s", resp.StatusCode, out.Error)
+		return out, &deployStatusError{status: resp.StatusCode, detail: out.Error}
 	}
 	return out, nil
 }

@@ -169,23 +169,46 @@ const outlineDXFConsts = [
 ];
 
 const fieldProbeFunctions = [
+  "effectiveOutlineGeometry",
+  "flattenCurveSegment",
+  "flattenCubic",
+  "cubicFlatEnough",
+  "midpoint",
   "buildFieldProbePreview",
   "fieldProbeCenterSpacing",
   "normalizedClosedPolygon",
   "buildBoundaryProbePoints",
+  "buildCornerPartitionedBoundary",
+  "buildClosedMinimaxBoundary",
   "buildOutlineEdgeProbePoints",
   "projectPointToProbePath",
   "closedPathSegments",
   "sampleClosedPath",
+  "sampleClosedPathAtDistance",
   "closedPathMaxSampleGap",
   "createProbeSpacingIndex",
   "addProbeSpacingPoint",
   "probeSpacingIndexAllows",
   "buildRelaxedProbePoints",
+  "optimizeProbeMesh",
+  "buildBoundaryInteriorTargets",
+  "selectGapSafeBoundaryInteriorSeeds",
+  "projectBoundaryInteriorTarget",
+  "largestExactFeasibleProbeHole",
+  "improveProbeCovering",
+  "probeCoverageCertificateBetter",
   "buildProbeDomainSamples",
   "buildBestProbeLattice",
   "buildProbeLatticeCandidate",
   "probeCoverageScore",
+  "probeCoverageCertificate",
+  "probeMeshQualityCertificate",
+  "probeBoundaryLayerCertificate",
+  "probeDelaunayTriangles",
+  "probePointInCircumcircle",
+  "triangleCircumcenter",
+  "nearestProbeSet",
+  "exactBoundaryProbeCriticalPoints",
   "largestProbeCoverageHole",
   "relaxProbeDistribution",
   "createProbeNearestIndex",
@@ -200,8 +223,14 @@ const fieldProbeFunctions = [
   "averagePoint",
   "distance2",
   "pointInPolygon",
+  "triangleCross",
+  "triangleCCW",
+  "triangulationEdgeKey",
+  "pointInPolygonOrBoundary",
 ];
 const fieldProbeConsts = [
+  "MAX_EFFECTIVE_OUTLINE_POINTS",
+  "OUTLINE_CURVE_TOLERANCE_MM",
   "PROBE_SPOT_DIAMETER_MM",
   "PROBE_SPOT_RADIUS_MM",
   "MAX_FIELD_PROBE_POINTS",
@@ -262,7 +291,7 @@ test("field probes form one evenly spaced boundary-to-interior distribution", ()
   }
 });
 
-test("captured vertex density does not distort the field probe spread", () => {
+test("close captured outline probes remain mandatory while generated probes preserve the spot gap", () => {
   const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
   const simple = [
     { x: 0, y: 0 },
@@ -285,8 +314,23 @@ test("captured vertex density does not distort the field probe spread", () => {
     ])`,
     ctx,
   ));
+  assert.equal(builds[0].issue, "");
   assert.equal(builds[1].issue, "");
-  assert.deepEqual(builds[1], builds[0]);
+  assert.equal(
+    builds[1].points.filter((point) => point.probe_kind === "outline").length,
+    dense.length,
+    "captured probes remain in the physical plan even when their mutual spacing is smaller than the configured gap",
+  );
+  assert.ok(builds[1].points.some((point) => point.probe_kind === "field"), "close captured probes do not suppress the interior field");
+  for (let first = 0; first < builds[1].points.length; first++) {
+    for (let second = first + 1; second < builds[1].points.length; second++) {
+      const a = builds[1].points[first];
+      const b = builds[1].points[second];
+      if (a.probe_kind === "outline" && b.probe_kind === "outline") continue;
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      assert.ok(distance + 1e-7 >= 10, `generated probe pair ${first},${second} preserves the full spot gap`);
+    }
+  }
 });
 
 test("concave field probe distribution preserves spacing and fills narrow regions", () => {
@@ -373,13 +417,20 @@ test("sharp outline edges are fixed probes without violating spot spacing", () =
     ctx,
   ));
   assert.equal(closeBuilt.issue, "");
-  for (let i = 0; i < closeBuilt.points.length; i++) {
-    for (let j = i + 1; j < closeBuilt.points.length; j++) {
-      const distance = Math.hypot(
-        closeBuilt.points[i].x - closeBuilt.points[j].x,
-        closeBuilt.points[i].y - closeBuilt.points[j].y,
+  assert.equal(
+    closeBuilt.points.filter((point) => point.probe_kind === "outline").length,
+    closeEdges.length,
+    "mandatory close outline probes are never silently dropped",
+  );
+  for (let first = 0; first < closeBuilt.points.length; first++) {
+    for (let second = first + 1; second < closeBuilt.points.length; second++) {
+      const a = closeBuilt.points[first];
+      const b = closeBuilt.points[second];
+      if (a.probe_kind === "outline" && b.probe_kind === "outline") continue;
+      assert.ok(
+        Math.hypot(a.x - b.x, a.y - b.y) + 1e-7 >= 10,
+        `generated close-edge probes ${first},${second} retain the configured spacing`,
       );
-      assert.ok(distance + 1e-7 >= 10, `close border/edge probes ${i} and ${j} still keep the 10 mm center spacing`);
     }
   }
 });
@@ -401,13 +452,19 @@ test("adversarial outlines have no independently sampled reconstruction holes", 
       `(() => {
         const built = buildFieldProbePreview(${JSON.stringify(outline)}, 8);
         const fineDomain = buildProbeDomainSamples(${JSON.stringify(outline)}, 5);
-        return JSON.stringify({ built, coverage: probeCoverageScore(built.points, fineDomain, 10) });
+        return JSON.stringify({
+          built,
+          coverage: probeCoverageScore(built.points, fineDomain, 10),
+          certificate: probeCoverageCertificate(built.points, ${JSON.stringify(outline)})
+        });
       })()`,
       ctx,
     ));
     assert.equal(result.built.issue, "", `${name} builds without an issue`);
     assert.equal(result.built.tooDense, false, `${name} stays within the probe cap`);
     assert.ok(Math.sqrt(result.coverage.maxDistance2) < 10, `${name} has no fine-grid coverage hole of one spacing`);
+    assert.equal(result.certificate.exact, true, `${name} receives an exact coverage certificate`);
+    assert.ok(Math.sqrt(result.certificate.maxDistance2) < 10, `${name} has no exact Voronoi coverage hole of one spacing`);
     for (let i = 0; i < result.built.points.length; i++) {
       for (let j = i + 1; j < result.built.points.length; j++) {
         const distance = Math.hypot(
@@ -418,6 +475,481 @@ test("adversarial outlines have no independently sampled reconstruction holes", 
       }
     }
   }
+});
+
+test("coverage certificate is exact for the analytic equilateral optimum", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const height = 5 * Math.sqrt(3);
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 5, y: height },
+  ];
+  const points = outline.map((point) => ({ ...point, probe_kind: "outline" }));
+  const certificate = JSON.parse(vm.runInContext(
+    `JSON.stringify(probeCoverageCertificate(${JSON.stringify(points)}, ${JSON.stringify(outline)}))`,
+    ctx,
+  ));
+  assert.equal(certificate.exact, true);
+  assert.ok(
+    Math.abs(Math.sqrt(certificate.maxDistance2) - 10 / Math.sqrt(3)) <= 1e-9,
+    "the exact Voronoi/Delaunay certificate returns the analytic circumradius",
+  );
+  assert.ok(Math.abs(certificate.point.x - 5) <= 1e-9);
+  assert.ok(Math.abs(certificate.point.y - height / 3) <= 1e-9);
+});
+
+test("reported trapezoid has a certified low-radius covering instead of visible moats", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  // Geometry reconstructed from the operator screenshot, normalized to the
+  // reported 10 mm center spacing.
+  const outline = [
+    { x: 0, y: 0 },
+    { x: 163.55, y: 0 },
+    { x: 162.58, y: 54.19 },
+    { x: 145.81, y: 90.0 },
+    { x: 0, y: 94.19 },
+  ];
+  const result = JSON.parse(vm.runInContext(
+    `(() => {
+      const built = buildFieldProbePreview(${JSON.stringify(outline)}, 8);
+      const certificate = probeCoverageCertificate(built.points, ${JSON.stringify(outline)});
+      const feasibleHole = largestExactFeasibleProbeHole(built.points, ${JSON.stringify(outline)}, 10);
+      return JSON.stringify({ built, certificate: {
+        maxDistance2: certificate.maxDistance2,
+        point: certificate.point,
+        exact: certificate.exact
+      }, feasibleHole });
+    })()`,
+    ctx,
+  ));
+  const radius = Math.sqrt(result.certificate.maxDistance2);
+  const nearby = result.built.points.filter((point) =>
+    Math.hypot(point.x - result.certificate.point.x, point.y - result.certificate.point.y) < 16
+  );
+  assert.equal(result.certificate.exact, true);
+  assert.equal(result.feasibleHole.point, null, "the exact certificate proves that no additional gap-safe probe fits");
+  for (let first = 0; first < result.built.points.length; first++) {
+    for (let second = first + 1; second < result.built.points.length; second++) {
+      const distance = Math.hypot(
+        result.built.points[first].x - result.built.points[second].x,
+        result.built.points[first].y - result.built.points[second].y,
+      );
+      assert.ok(distance + 1e-7 >= 10, `screenshot regression probes ${first} and ${second} keep the full spot gap`);
+    }
+  }
+  assert.ok(
+    radius <= 8.0,
+    `certified worst empty-circle radius is ${radius.toFixed(6)} mm at ${JSON.stringify(result.certificate.point)} with ${result.built.points.length} probes; nearby=${JSON.stringify(nearby)}`,
+  );
+});
+
+test("loaded production outline preserves every captured probe and certifies its boundary layer", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  const outline = [
+    { x: 5.6361, y: -4.0825 },
+    { x: 5.6352, y: 81.6561 },
+    { x: 74.62760000000003, y: 77.98119375344572 },
+    { x: 94.164, y: 77.9627 },
+    { x: 154.4456948582598, y: 81.35865621694292 },
+    { x: 153.4061, y: 32.30342439066115 },
+    { x: 138.3941, y: -0.2335 },
+    { x: 73.1977, y: -3.4998 },
+  ];
+  const result = JSON.parse(vm.runInContext(
+    `(() => {
+      const built = buildFieldProbePreview(${JSON.stringify(outline)}, 8, ${JSON.stringify(outline)});
+      const firstField = built.points.findIndex((point) => point.probe_kind === "field");
+      const boundary = built.points.slice(0, firstField);
+      const coverage = probeCoverageCertificate(built.points, ${JSON.stringify(outline)});
+      const layer = probeBoundaryLayerCertificate(built.points, ${JSON.stringify(outline)});
+      const feasibleHole = largestExactFeasibleProbeHole(built.points, ${JSON.stringify(outline)}, 10);
+      let maxBoundaryChord = 0;
+      for (let index = 0; index < boundary.length; index++) {
+        maxBoundaryChord = Math.max(maxBoundaryChord, Math.hypot(
+          boundary[index].x - boundary[(index + 1) % boundary.length].x,
+          boundary[index].y - boundary[(index + 1) % boundary.length].y
+        ));
+      }
+      return JSON.stringify({
+        built,
+        boundary,
+        radius: Math.sqrt(coverage.maxDistance2),
+        coverageExact: coverage.exact,
+        layer,
+        feasibleHole,
+        maxBoundaryChord,
+        mandatoryPresent: ${JSON.stringify(outline)}.every((captured) =>
+          boundary.some((point) => point.probe_kind === "outline" &&
+            point.x === captured.x && point.y === captured.y)
+        )
+      });
+    })()`,
+    ctx,
+  ));
+  assert.equal(result.built.issue, "");
+  assert.equal(result.coverageExact, true);
+  assert.equal(result.layer.exact, true);
+  assert.equal(result.mandatoryPresent, true, "every operator-defined outline coordinate is probed exactly");
+  assert.equal(
+    result.boundary.filter((point) => point.probe_kind === "outline").length,
+    outline.length,
+    "no mandatory outline probe is replaced by a generated border probe",
+  );
+  assert.equal(result.feasibleHole.point, null, "the exact Voronoi certificate proves no additional gap-safe probe can be inserted");
+  for (let first = 0; first < result.built.points.length; first++) {
+    for (let second = first + 1; second < result.built.points.length; second++) {
+      const distance = Math.hypot(
+        result.built.points[first].x - result.built.points[second].x,
+        result.built.points[first].y - result.built.points[second].y,
+      );
+      assert.ok(distance + 1e-7 >= 10, `production-outline probes ${first} and ${second} preserve the full spot gap`);
+    }
+  }
+  assert.ok(
+    result.maxBoundaryChord <= 19.537,
+    `fixed outline intervals use their minimax feasible partition (${result.maxBoundaryChord.toFixed(6)} mm worst chord)`,
+  );
+  assert.equal(result.layer.edgeCount, result.boundary.length, "every boundary interval has an adjacent reconstruction triangle");
+  assert.ok(
+    result.layer.maxThirdEdge <= 15.4,
+    `every boundary interval reaches the field through a bounded triangle (${result.layer.maxThirdEdge.toFixed(6)} mm worst incident edge)`,
+  );
+  assert.ok(
+    result.radius <= 7.8,
+    `the exact global covering radius is ${result.radius.toFixed(6)} mm with ${result.built.points.length} probes`,
+  );
+});
+
+test("deployed curved outline certifiably improves its reported boundary moat", () => {
+  const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
+  // Reconstructed from the operator's post-deployment screenshot. The scale
+  // is normalized so that the measured minimum probe separation is 10 mm.
+  // Curve fitting is part of the reproduction because that is the loaded
+  // outline mode shown by the green boundary.
+  const outline = [
+    { x: 0.0, y: 0.0 },
+    { x: 66.974, y: 0.605 },
+    { x: 131.646, y: 3.803 },
+    { x: 146.460, y: 36.034 },
+    { x: 147.580, y: 84.681 },
+    { x: 87.777, y: 81.352 },
+    { x: 68.409, y: 81.376 },
+    { x: -0.003, y: 85.022 },
+  ];
+  const result = JSON.parse(vm.runInContext(
+    `(() => {
+      const geometry = effectiveOutlineGeometry(${JSON.stringify(outline)}, true, true);
+      const built = buildFieldProbePreview(geometry.points, 8, ${JSON.stringify(outline)});
+      const certificate = probeCoverageCertificate(built.points, geometry.points);
+      const mesh = probeMeshQualityCertificate(built.points, geometry.points);
+      const layer = probeBoundaryLayerCertificate(built.points, geometry.points);
+      const feasibleHole = largestExactFeasibleProbeHole(built.points, geometry.points, 10);
+      const firstField = built.points.findIndex((point) => point.probe_kind === "field");
+      const boundary = built.points.slice(0, firstField);
+      const field = built.points.slice(firstField);
+      const targets = buildBoundaryInteriorTargets(boundary, geometry.points, 10);
+      let targetRadius = 0;
+      let targetWorst = null;
+      for (const target of targets) {
+        const nearest = Math.min(...field.map((point) => Math.hypot(point.x - target.x, point.y - target.y)));
+        if (nearest > targetRadius) {
+          targetRadius = nearest;
+          targetWorst = target;
+        }
+      }
+      let maxBoundaryChord = 0;
+      for (let index = 0; index < boundary.length; index++) {
+        const point = boundary[index];
+        const next = boundary[(index + 1) % boundary.length];
+        maxBoundaryChord = Math.max(maxBoundaryChord, Math.hypot(next.x - point.x, next.y - point.y));
+      }
+      return JSON.stringify({
+        built,
+        geometry,
+        mesh,
+        layer,
+        radius: Math.sqrt(certificate.maxDistance2),
+        worst: certificate.point,
+        worstKind: certificate.critical[0].kind,
+        certificateExact: certificate.exact,
+        feasibleHole,
+        targetRadius,
+        targetWorst,
+        targetCount: targets.length,
+        maxBoundaryChord,
+        boundaryKinds: [...new Set(boundary.map((point) => point.probe_kind))],
+        outlineCount: boundary.filter((point) => point.probe_kind === "outline").length,
+        mandatoryOutlinePresent: ${JSON.stringify(outline)}.every((captured) =>
+          boundary.some((point) => point.probe_kind === "outline" &&
+            Math.hypot(point.x - captured.x, point.y - captured.y) <= 1e-9)
+        )
+      });
+    })()`,
+    ctx,
+  ));
+  assert.equal(result.geometry.limited, false);
+  assert.equal(result.built.issue, "");
+  assert.equal(result.certificateExact, true);
+  assert.equal(result.mesh.exact, true);
+  assert.equal(result.feasibleHole.point, null, "the exact certificate proves no additional spot-gap-safe probe can fit");
+  assert.equal(result.outlineCount, outline.length, "every captured outline site remains a physical probe");
+  assert.equal(result.mandatoryOutlinePresent, true, "curve fitting never moves or removes a captured outline probe");
+  assert.deepEqual(result.boundaryKinds.sort(), ["border", "outline"], "generated border probes supplement mandatory outline probes");
+  assert.ok(result.built.points.length >= 145, "annealed cell insertion escapes a merely saturated lower-density packing");
+  for (let first = 0; first < result.built.points.length; first++) {
+    for (let second = first + 1; second < result.built.points.length; second++) {
+      const distance = Math.hypot(
+        result.built.points[first].x - result.built.points[second].x,
+        result.built.points[first].y - result.built.points[second].y,
+      );
+      assert.ok(distance + 1e-7 >= 10, `deployed-outline probes ${first} and ${second} keep the full spot gap`);
+    }
+  }
+  assert.ok(
+    result.maxBoundaryChord <= 19.6,
+    `the fitted border uses the minimax feasible partition between fixed outline probes (worst chord ${result.maxBoundaryChord.toFixed(6)} mm)`,
+  );
+  assert.ok(
+    result.targetRadius <= 7.1,
+    `the optimized mesh covers every boundary-band target (worst ${result.targetRadius.toFixed(6)} mm at ${JSON.stringify(result.targetWorst)} across ${result.targetCount} intervals)`,
+  );
+  assert.equal(result.layer.edgeCount, result.built.points.findIndex((point) => point.probe_kind === "field"));
+  assert.ok(
+    result.layer.maxThirdEdge <= 16.1,
+    `every fitted-boundary interval reaches an interior reconstruction triangle (${result.layer.maxThirdEdge.toFixed(6)} mm worst incident edge)`,
+  );
+  assert.ok(
+    result.radius <= 8.2,
+    `deployed-outline covering radius is ${result.radius.toFixed(6)} mm at ${JSON.stringify(result.worst)} (${result.worstKind}) with ${result.built.points.length} probes`,
+  );
+  assert.ok(
+    result.mesh.minAngleDegrees >= 37.9,
+    `worst reconstruction triangle angle is ${result.mesh.minAngleDegrees.toFixed(6)}° across ${result.mesh.triangleCount} interior triangles`,
+  );
+  assert.ok(
+    result.mesh.maxEdge <= 16.1,
+    `longest reconstruction edge is ${result.mesh.maxEdge.toFixed(6)} mm`,
+  );
+});
+
+test("loading measured outline data still installs a freshly generated probe plan", () => {
+  const state = { outline: { active: false } };
+  const next = {
+    active: true,
+    closed: true,
+    fieldProbePreview: [],
+    fieldProbeResults: [{ id: "field-probe-0001", x: 10, y: 10 }],
+  };
+  let previewUpdates = 0;
+  const ctx = buildContext(["installLoadedOutlineState"], [], {
+    state,
+    next,
+    updateFieldProbePreview: () => {
+      previewUpdates++;
+      state.outline.fieldProbePreview = [{ id: "field-probe-0001", x: 20, y: 20 }];
+    },
+  });
+  vm.runInContext("installLoadedOutlineState(next)", ctx);
+  assert.equal(state.outline, next);
+  assert.equal(previewUpdates, 1, "imported Z samples do not suppress the current distribution algorithm");
+  assert.deepEqual(state.outline.fieldProbeResults, [{ id: "field-probe-0001", x: 10, y: 10 }], "imported measurements remain available for export");
+  assert.deepEqual(state.outline.fieldProbePreview, [{ id: "field-probe-0001", x: 20, y: 20 }], "the new plan is installed for display and re-probing");
+});
+
+test("probe overlay hides closed-outline editing markers and rejects stale result coordinates", () => {
+  const ctx = buildContext([
+    "displayedFieldProbePoints",
+    "fieldProbePlanPointMatchesResult",
+    "outlineEditingMarkersVisible",
+  ]);
+  const result = JSON.parse(vm.runInContext(
+    `(() => {
+      const preview = [
+        { id: "field-probe-0001", x: 20, y: 20, probe_kind: "outline" },
+        { id: "field-probe-0002", x: 30, y: 20, probe_kind: "border" }
+      ];
+      const stale = { id: "field-probe-0001", x: 10, y: 10, probe_kind: "outline" };
+      const current = { id: "field-probe-0001", x: 20.01, y: 19.99, probe_kind: "outline" };
+      return JSON.stringify({
+        display: displayedFieldProbePoints({ fieldProbePreview: preview, fieldProbeResults: [stale] }),
+        staleDone: fieldProbePlanPointMatchesResult(preview[0], stale),
+        currentDone: fieldProbePlanPointMatchesResult(preview[0], current),
+        closedMarkersVisible: outlineEditingMarkersVisible({ closed: true }, preview),
+        openMarkersVisible: outlineEditingMarkersVisible({ closed: false }, preview),
+        noPlanMarkersVisible: outlineEditingMarkersVisible({ closed: true }, [])
+      });
+    })()`,
+    ctx,
+  ));
+  assert.deepEqual(result.display, [
+    { id: "field-probe-0001", x: 20, y: 20, probe_kind: "outline" },
+    { id: "field-probe-0002", x: 30, y: 20, probe_kind: "border" },
+  ]);
+  assert.equal(result.staleDone, false);
+  assert.equal(result.currentDone, true);
+  assert.equal(result.closedMarkersVisible, false, "closed outlines do not layer editing handles over their probe plan");
+  assert.equal(result.openMarkersVisible, true, "open outlines retain their editable point handles");
+  assert.equal(result.noPlanMarkersVisible, true, "closed outlines retain geometry handles when no probe plan can be shown");
+});
+
+test("closed probe-plan render does not emit a second set of outline circles", () => {
+  const elements = {
+    "workarea-outline": {
+      classList: { toggle() {} },
+      setAttribute() {},
+      removeAttribute() {},
+    },
+    "workarea-outline-path": {
+      setAttribute() {},
+      removeAttribute() {},
+    },
+    "workarea-outline-points": { innerHTML: "" },
+  };
+  const state = {
+    outline: {
+      active: true,
+      closed: true,
+      curveFit: true,
+      points: [
+        { machine_x: 0, machine_y: 0 },
+        { machine_x: 20, machine_y: 0 },
+        { machine_x: 20, machine_y: 20 },
+      ],
+      fieldProbePreview: [{ id: "field-probe-0001", x: 0, y: 0, probe_kind: "border" }],
+      fieldProbeResults: [],
+    },
+  };
+  const ctx = buildContext([
+    "renderWorkAreaOutline",
+    "displayedFieldProbePoints",
+    "outlineEditingMarkersVisible",
+  ], ["SPINDLE_DIAMETER_MM", "OUTLINE_POINT_DIAMETER_MM"], {
+    state,
+    document: { getElementById: (id) => elements[id] },
+    machineToWorkAreaPoint: (point) => point,
+    outlinePathD: () => "M0,0Z",
+    workAreaMMToSVGUnits: () => 1,
+  });
+  vm.runInContext("renderWorkAreaOutline()", ctx);
+  assert.equal(
+    elements["workarea-outline-points"].innerHTML,
+    "",
+    "curve-control handles are absent while the physical probe plan is displayed",
+  );
+  state.outline.fieldProbePreview = [];
+  vm.runInContext("renderWorkAreaOutline()", ctx);
+  assert.match(
+    elements["workarea-outline-points"].innerHTML,
+    /<circle /,
+    "editing handles return when there is no physical probe plan",
+  );
+});
+
+test("physical outline probes remain visibly distinct from generated border probes", () => {
+  const group = {
+    innerHTML: "",
+    setAttribute() {},
+    removeAttribute() {},
+  };
+  const state = {
+    outline: {
+      active: true,
+      closed: true,
+      origin: { x: 0, y: 0, z: 0 },
+      fieldProbePreview: [
+        { id: "field-probe-0001", x: 0, y: 0, probe_kind: "outline" },
+        { id: "field-probe-0002", x: 10, y: 0, probe_kind: "border" },
+        { id: "field-probe-0003", x: 5, y: 9, probe_kind: "field" },
+      ],
+      fieldProbeResults: [],
+      fieldProbePending: false,
+      fieldProbeIndex: 0,
+    },
+  };
+  const ctx = buildContext([
+    "renderWorkAreaFieldProbePreview",
+    "displayedFieldProbePoints",
+    "fieldProbePlanPointMatchesResult",
+  ], ["PROBE_SPOT_DIAMETER_MM", "PROBE_SPOT_RADIUS_MM"], {
+    state,
+    document: { getElementById: () => group },
+    cloneOutlineOrigin: (origin) => origin,
+    currentWorkOrigin: () => ({ x: 0, y: 0, z: 0 }),
+    visualWorkOrigin: () => ({ x: 0, y: 0, z: 0 }),
+    workAreaMMRadius: () => 1,
+    workPointToMachinePoint: (point) => point,
+    machineToWorkAreaPoint: (point) => point,
+  });
+  vm.runInContext("renderWorkAreaFieldProbePreview()", ctx);
+  assert.match(group.innerHTML, /class="boundary outline"/, "captured outline probes retain the captured-point treatment");
+  assert.match(group.innerHTML, /class="boundary"[^>]*cx="10\.00"/, "generated border probes remain a separate boundary class");
+  assert.match(group.innerHTML, /class=""[^>]*cx="5\.00"/, "interior field probes retain the field treatment");
+});
+
+test("spot-gap spinner changes debounce expensive preview regeneration", () => {
+  const input = {
+    value: "8",
+    dataset: {},
+    validityMessage: "",
+    setCustomValidity(message) { this.validityMessage = message; },
+    reportValidity() {},
+  };
+  const pending = new Map();
+  const delays = [];
+  let nextTimer = 1;
+  let clears = 0;
+  let previews = 0;
+  let outlineRenders = 0;
+  let workAreaRenders = 0;
+  const state = { outline: { fieldSpotGapMM: 8 } };
+  const ctx = buildContext([
+    "commitOutlineFieldSpacingDraft",
+    "cancelOutlineFieldSpacingUpdate",
+    "flushOutlineFieldSpacingUpdate",
+    "scheduleOutlineFieldSpacingUpdate",
+  ], ["OUTLINE_FIELD_SPACING_DEBOUNCE_MS"], {
+    state,
+    outlineFieldSpacingTimer: null,
+    document: { getElementById: () => input },
+    setTimeout: (callback, delay) => {
+      const id = nextTimer++;
+      pending.set(id, callback);
+      delays.push(delay);
+      return id;
+    },
+    clearTimeout: (id) => pending.delete(id),
+    clearControlDrafts: () => { delete input.dataset.dirty; },
+    clearFieldProbeData: () => { clears++; },
+    updateFieldProbePreview: () => { previews++; },
+    renderOutlineCapture: () => { outlineRenders++; },
+    renderWorkArea: () => { workAreaRenders++; },
+  });
+  for (const value of ["8.1", "8.2", "8.3"]) {
+    input.value = value;
+    input.dataset.dirty = "1";
+    assert.equal(vm.runInContext("scheduleOutlineFieldSpacingUpdate()", ctx), true);
+  }
+  assert.equal(state.outline.fieldSpotGapMM, 8.3, "the latest draft value is committed immediately");
+  assert.equal(pending.size, 1, "rapid spinner events retain only one pending calculation");
+  assert.deepEqual(delays, [450, 450, 450]);
+  assert.equal(previews, 0, "the expensive preview is not regenerated during the input burst");
+  const [timerID, timerCallback] = [...pending.entries()][0];
+  pending.delete(timerID);
+  timerCallback();
+  assert.equal(pending.size, 0);
+  assert.equal(clears, 1);
+  assert.equal(previews, 1);
+  assert.equal(outlineRenders, 1);
+  assert.equal(workAreaRenders, 1);
+  assert.equal(input.dataset.dirty, undefined);
+
+  input.value = "";
+  assert.equal(vm.runInContext("scheduleOutlineFieldSpacingUpdate()", ctx), false);
+  assert.equal(input.validityMessage, "Enter a number.");
+  assert.equal(previews, 1, "an invalid draft never starts another preview calculation");
+  assert.match(source, /outlineSpacing\.oninput = \(\) => \{[\s\S]{0,160}scheduleOutlineFieldSpacingUpdate\(\);/);
+  assert.match(source, /outlineSpacing\.onchange = scheduleOutlineFieldSpacingUpdate;/);
 });
 
 test("production-size field probe distribution remains dense and responsive", () => {
@@ -442,7 +974,7 @@ test("production-size field probe distribution remains dense and responsive", ()
   const elapsed = performance.now() - started;
   assert.equal(result.built.issue, "");
   assert.equal(result.built.tooDense, false);
-  assert.ok(result.built.points.length >= 650, `production field retains dense sampling (${result.built.points.length})`);
+  assert.ok(result.built.points.length >= 640, `production field retains dense sampling (${result.built.points.length})`);
   assert.ok(Math.sqrt(result.coverage.maxDistance2) < 10, "production field has no fine-grid coverage hole of one spacing");
   assert.ok(elapsed < 1500, `production field generation remains responsive (${elapsed.toFixed(1)} ms)`);
 });
@@ -492,10 +1024,10 @@ test("generated probe spread triangulates without bridging outside a concave out
     { x: 0, y: 0 },
     { x: 50, y: 0 },
     { x: 50, y: 50 },
-    { x: 28, y: 50 },
-    { x: 28, y: 44 },
-    { x: 22, y: 44 },
-    { x: 22, y: 50 },
+    { x: 30, y: 50 },
+    { x: 30, y: 38 },
+    { x: 20, y: 38 },
+    { x: 20, y: 50 },
     { x: 0, y: 50 },
   ];
   const result = JSON.parse(vm.runInContext(

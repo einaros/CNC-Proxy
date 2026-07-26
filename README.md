@@ -319,6 +319,10 @@ Remote source deployments can also replace the tray manager that receives the
 deployment. Use `deploy ... -component all` to build both binaries, or
 `deploy ... -manager` as a shortcut. Use `deploy ... -component manager` /
 `-manager-only` to upgrade only `cnc-tray.exe`.
+Source updates are mirrored into the configured source directory without
+renaming that directory or retaining source backups. Deploys are serialized,
+retry transient Windows sharing violations, and remove stale deploy staging,
+previous-binary, and legacy source-backup artifacts on the next deployment.
 The manager build uses `go build -mod=mod -tags tray ./cmd/tray` on the target
 PC, so Windows targets also need whatever local Go/cgo toolchain is required to
 build the tray app. The running tray app launches the staged new binary as a

@@ -146,19 +146,24 @@ test("outline file load reports transient completion only through the bottom sta
     feedbackDisplay: "",
     feedbackDisplayKind: "",
   };
+  let previewUpdates = 0;
   const ctx = vm.createContext({
     state,
     confirm: () => true,
     outlineStateFromJSON: () => loaded,
-    updateFieldProbePreview: () => {},
+    updateFieldProbePreview: () => { previewUpdates++; },
     renderOutlineCapture: () => {},
     renderWorkArea: () => {},
     setStatusMessage: (...args) => messages.push(args),
   });
-  vm.runInContext(extractFunction("loadOutlineFile"), ctx);
+  vm.runInContext([
+    extractFunction("installLoadedOutlineState"),
+    extractFunction("loadOutlineFile"),
+  ].join("\n"), ctx);
   await vm.runInContext(`loadOutlineFile({text: async () => "{}"})`, ctx);
 
   assert.equal(state.outline, loaded);
+  assert.equal(previewUpdates, 1, "a loaded closed outline always regenerates the current probe plan");
   assert.equal(loaded.feedbackDisplay, "");
   assert.deepEqual(messages.map(([key, text, kind]) => ({ key, text, kind })), [
     { key: "outline", text: "Loading outline...", kind: "" },
@@ -189,6 +194,9 @@ test("field probing keeps every travel and retract at the starting machine Z", a
   const ctx = vm.createContext({
     state,
     isProbeToolActive: () => true,
+    cancelOutlineFieldSpacingUpdate: () => {},
+    commitOutlineFieldSpacingDraft: () => true,
+    clearControlDrafts: () => {},
     updateFieldProbePreview: () => {},
     currentOutlineCapturePosition: () => ({ machine: { z: -41 } }),
     setOutlineFeedback: () => {},
@@ -241,6 +249,9 @@ test("field probing without a floor confirms and uses the current Z origin", asy
   const ctx = vm.createContext({
     state,
     isProbeToolActive: () => true,
+    cancelOutlineFieldSpacingUpdate: () => {},
+    commitOutlineFieldSpacingDraft: () => true,
+    clearControlDrafts: () => {},
     updateFieldProbePreview: () => {},
     currentOutlineCapturePosition: () => ({ machine: { z: -35 } }),
     setOutlineFeedback: () => {},

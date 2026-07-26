@@ -88,6 +88,32 @@ func TestRestartAlwaysLeavesProcessRunning(t *testing.T) {
 	})
 }
 
+func TestStartAfterDeploymentRejectsImmediateProxyExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script as the supervised proxy")
+	}
+	dir := t.TempDir()
+	proxy := filepath.Join(dir, "proxy.sh")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"-print-config-schema\" ]; then exit 0; fi\n" +
+		"exit 23\n"
+	if err := os.WriteFile(proxy, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ProxyBinary = proxy
+	sup := NewSupervisor(cfg, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := sup.StartAfterDeployment(ctx)
+	if err == nil {
+		t.Fatal("StartAfterDeployment reported success for a proxy that exited immediately")
+	}
+	if !strings.Contains(err.Error(), "stopped before becoming ready") {
+		t.Fatalf("StartAfterDeployment error = %q", err)
+	}
+}
+
 func TestProxyWorkingDirIgnoresMissingSourceDir(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SourceDir = filepath.Join(t.TempDir(), "missing")

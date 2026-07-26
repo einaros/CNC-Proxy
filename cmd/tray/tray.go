@@ -109,7 +109,12 @@ func onReady() {
 			}
 		})
 		if *upgradeStartProxy {
-			_ = app.Supervisor.Start()
+			startCtx, startCancel := context.WithTimeout(ctx, 15*time.Second)
+			if err := app.Supervisor.StartAfterDeployment(startCtx); err != nil {
+				systray.SetTitle("CNC ⚠")
+				mState.SetTitle("Proxy restart failed: " + err.Error())
+			}
+			startCancel()
 		}
 		updateMountItem(app, mMount)
 		updateRefreshMountItem(app, mRefreshMount, false)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -25,6 +26,7 @@ type ProcessState struct {
 
 type Supervisor struct {
 	mu       sync.Mutex
+	deployMu sync.Mutex
 	cfg      Config
 	cmd      *exec.Cmd
 	done     chan error
@@ -155,6 +157,63 @@ func (s *Supervisor) Restart(ctx context.Context) error {
 		return err
 	}
 	return s.Start()
+}
+
+// StartAfterDeployment removes only stale processes whose executable is
+// one of the configured managed proxy binary's deployment paths. A relaunched
+// manager cannot inherit its predecessor's in-memory child-process handle, so
+// without this recovery an orphaned old binary can keep the API port and make
+// a freshly built proxy exit immediately while deployment appears successful.
+func (s *Supervisor) StartAfterDeployment(ctx context.Context) error {
+	readyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := stopStaleManagedProxyProcesses(readyCtx, s.Config()); err != nil {
+		return err
+	}
+	if err := s.Start(); err != nil {
+		return err
+	}
+	return s.waitUntilProxyReady(readyCtx)
+}
+
+func (s *Supervisor) waitUntilProxyReady(ctx context.Context) error {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	healthURL := APIBase(s.Config()) + "/healthz"
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var healthySince time.Time
+	for {
+		state := s.State()
+		if !state.Running {
+			if state.LastExit == "" {
+				return errors.New("proxy stopped before becoming ready")
+			}
+			return fmt.Errorf("proxy stopped before becoming ready: %s", state.LastExit)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		healthy := err == nil && resp.StatusCode == http.StatusOK
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if healthy {
+			if healthySince.IsZero() {
+				healthySince = time.Now()
+			} else if time.Since(healthySince) >= 300*time.Millisecond {
+				return nil
+			}
+		} else {
+			healthySince = time.Time{}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for rebuilt proxy readiness: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Supervisor) Build(ctx context.Context) (string, error) {
