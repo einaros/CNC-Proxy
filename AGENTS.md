@@ -156,9 +156,17 @@ Injection & control model (both modes — proxy alone OR with controller attache
   gcode, recovery commands, realtime control, jog input, file mutations, or
   anything else affecting the machine must show immediate visible feedback,
   an in-progress/disabled state while the request is active, and a terminal
-  success/failure message at the control or panel where the operator clicked.
+  success/failure message in the bottom status bar.
   When the machine can be observed afterward, verify and show the observed
   result; never leave the operator guessing whether a command was issued.
+- **No inline status messages.** Pending, success, failure, warning, validation,
+  connection, and other transient messages must appear exclusively in the
+  bottom status bar; never render or duplicate them inside a panel, toolbar,
+  dialog, popover, drawer, form, or beside the control that caused them. Inline
+  surfaces may show persistent domain data/readouts, native field validation,
+  confirmation copy, and stable busy state through button labels, disabled
+  state, or `aria-busy`, but the bottom status bar is the only message surface
+  and the only status live region.
 - **Live UI updates must not break operator input.** SSE/poll snapshots are a
   server-state stream, not permission to overwrite active local UI state. A
   refresh must not replace DOM nodes that own event handlers, focus, selection,
@@ -167,8 +175,8 @@ Injection & control model (both modes — proxy alone OR with controller attache
   committed server state and local draft state: while the control is focused,
   dirty, dragging, or request-busy, preserve the local value until blur,
   explicit commit, cancel, or a verified terminal result. Never let a periodic
-  snapshot silently re-enable a busy machine-action control or erase a visible
-  success/failure message before the operator can read it.
+  snapshot silently re-enable a busy machine-action control or erase the
+  bottom-bar success/failure message before the operator can read it.
 - **No invented UX, states, or success claims.** Before adding any visible text,
   UI element, notification, log entry, status, setting, fallback, or behavior,
   stop and weigh whether it is explicitly requested, required for correctness,
@@ -229,8 +237,8 @@ Injection & control model (both modes — proxy alone OR with controller attache
   diagnostic.
 - **Make the primary action visually primary.** High-risk or session-defining
   controls such as arming tap move need a dedicated hit area, stronger visual
-  weight, clear state, and nearby feedback. Secondary settings must not compete
-  with them.
+  weight, and clear state. Secondary settings must not compete with them;
+  action feedback remains in the bottom status bar.
 - **Use a local sizing contract for dense control panels.** Within a panel,
   controls that are peers must share explicit heights, label rhythm, and row
   alignment. Buttons beside labeled inputs should align to the input box, not
@@ -251,9 +259,10 @@ Injection & control model (both modes — proxy alone OR with controller attache
   based on 4px/8px increments or an existing component token. Do not add
   one-off spacing values to make a single screen "look okay"; that breaks
   scanability and future maintenance.
-- **Keep status visually quieter than actions.** Coordinate readouts, machine
-  state, and feedback should be close to the control they explain, but they
-  should not steal focus from the active machine-action controls.
+- **Keep persistent status visually quieter than actions.** Coordinate
+  readouts, machine state, and other persistent domain data must not steal
+  focus from active machine-action controls. Transient messages do not belong
+  in these local readouts; they go only to the bottom status bar.
 - **Do not duplicate persistent status.** If a value is already present in a
   global/status bar, do not repeat it in a local panel unless the local copy is
   transformed into task-specific context, such as a hover cursor coordinate or a
@@ -261,7 +270,8 @@ Injection & control model (both modes — proxy alone OR with controller attache
 - **Machine-action UI must remain explicit.** Every control that can move the
   machine, alter origin, run recovery, mutate files, or change durable machine
   UI state needs immediate visible feedback, a disabled/in-progress state while
-  active, and a concrete terminal result when the effect can be verified.
+  active, and a concrete terminal result in the bottom status bar when the
+  effect can be verified.
 - **Accessibility is a baseline, not an optional pass.** Changed controls must
   remain operable by keyboard, expose usable labels/names/states, show visible
   focus, avoid hover-only or drag-only operation without an equivalent control,
@@ -278,14 +288,15 @@ Injection & control model (both modes — proxy alone OR with controller attache
   view controls, and short commands, but task workflows belong in grouped
   control clusters or panels. A tool workflow such as insert tool, spindle
   lock, stickout adjustment, and calibration state must be laid out as one
-  coherent tool group with a shared sizing contract and local feedback, not as
-  unrelated controls appended to the global top bar.
+  coherent tool group with a shared sizing contract, not as unrelated controls
+  appended to the global top bar; its transient feedback still belongs only in
+  the bottom status bar.
 - **Control dimensions must be stable across state changes.** Toggle labels,
   terminal messages, live values, translated strings, and validation text must
   not resize peer controls, push actions to a new row, or make a toolbar jump.
   Allocate fixed/min widths for controls whose labels change (`Lock` vs
-  `Unlock`, `Run` vs `Running`, numeric values, status badges), keep dynamic
-  feedback in reserved status slots, and prefer stateful classes/icons inside a
+  `Unlock`, `Run` vs `Running`, numeric values, status badges), route dynamic
+  messages to the bottom status bar, and prefer stateful classes/icons inside a
   fixed button over changing the button's footprint.
 - **Toolbar row count is invariant at runtime.** A toolbar that is one row at
   load must remain one row for the lifetime of that viewport. Operator actions,
@@ -305,10 +316,11 @@ Injection & control model (both modes — proxy alone OR with controller attache
   commit/cancel. This applies especially to number inputs and range sliders,
   where repeated assignment breaks dragging, keyboard edits, and click
   handlers.
-- **Group feedback with the control that caused it.** Success/failure/pending
-  text belongs in the same local group as the action, with reserved space so it
-  does not disturb layout. Avoid global or constantly overwritten status text
-  for local machine actions unless it is a secondary copy of the local result.
+- **The bottom status bar owns all transient messages.** Success, failure,
+  pending, warning, validation, and connection text must never be shown inline
+  or copied into a local control group. Use stable message keys and the shared
+  bottom-bar lifecycle so a live snapshot cannot resurrect stale text or
+  overwrite an in-flight action result.
 
 ## Layout
 

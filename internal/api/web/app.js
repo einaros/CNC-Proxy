@@ -44,8 +44,6 @@ const state = {
   ui: { macros: [], macro_buttons: [], log: { filter: "all", autoscroll: true }, gamepad: defaultGamepadSettings(), machine: defaultMachineSettings() },
   settingsSaveTimer: null,
   machineLearnPending: false,
-  machineLearnFeedback: "",
-  machineLearnFeedbackKind: "",
   macroRunning: false,
   activeTab: "active-job",
 	filesLoaded: false,
@@ -439,8 +437,6 @@ function defaultOutlineState() {
     filePending: false,
     feedback: "",
     feedbackKind: "",
-    feedbackDisplay: "",
-    feedbackDisplayKind: "",
   };
 }
 
@@ -1494,11 +1490,6 @@ function renderMachineSettings() {
     learn.setAttribute("aria-busy", state.machineLearnPending ? "true" : "false");
     setTextIfChanged(learn, state.machineLearnPending ? "Learning..." : "Learn from machine");
   }
-  const learnStatus = document.getElementById("machine-learn-status");
-  if (learnStatus) {
-    learnStatus.textContent = state.machineLearnFeedback || "";
-    learnStatus.dataset.kind = state.machineLearnFeedbackKind || "";
-  }
   renderMachineLearnedSummary(m.learned);
 }
 
@@ -1594,8 +1585,7 @@ async function learnMachineParameters() {
     state.settingsSaveTimer = null;
   }
   state.machineLearnPending = true;
-  state.machineLearnFeedback = "Learning machine parameters...";
-  state.machineLearnFeedbackKind = "info";
+  setStatusMessage("machine-learn", "Learning machine parameters...", "info", { timeoutMs: 0, force: true });
   try {
     renderMachineSettings();
     const r = await request("/api/machine/learn", { method: "POST" });
@@ -1605,13 +1595,11 @@ async function learnMachineParameters() {
     // "Learning..." after the machine operation has completed.
     state.machineLearnPending = false;
     if (result.ui) applyUISettings(result.ui);
-    state.machineLearnFeedback = result.message || "Learned machine parameters from firmware.";
-    state.machineLearnFeedbackKind = "ok";
+    setStatusMessage("machine-learn", result.message || "Learned machine parameters from firmware.", "ok", { force: true });
     renderMachineSettings();
     renderJog();
   } catch (e) {
-    state.machineLearnFeedback = "Learning machine parameters failed: " + e.message;
-    state.machineLearnFeedbackKind = "error";
+    setStatusMessage("machine-learn", "Learning machine parameters failed: " + e.message, "error", { force: true });
     renderMachineSettings();
   } finally {
     state.machineLearnPending = false;
@@ -2258,7 +2246,6 @@ function outlineSummaryText() {
   else if (o.fieldProbeResults.length && Number.isFinite(o.fieldReferenceMachineZ)) {
     parts.push("field Z0 at M " + fmtCoord(o.fieldReferenceMachineZ));
   }
-  if (o.fieldProbeIssue) parts.push(o.fieldProbeIssue);
   return parts.join(" | ");
 }
 
@@ -2284,7 +2271,6 @@ function renderOutlineCapture() {
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
-  const actionStatus = document.getElementById("outline-action-status");
   const busy = !!o.floorProbePending || !!o.fieldProbePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
@@ -2357,15 +2343,6 @@ function renderOutlineCapture() {
     setSoftDisabled(exportHeight, !busy && o.fieldProbeResults.length < 3);
   }
   if (summary) summary.textContent = outlineSummaryText();
-  if (o.feedback) {
-    o.feedbackDisplay = o.feedback;
-    o.feedbackDisplayKind = o.feedbackKind;
-  }
-  if (actionStatus) {
-    actionStatus.textContent = o.feedbackDisplay || "";
-    if (o.feedbackDisplayKind) actionStatus.dataset.kind = o.feedbackDisplayKind;
-    else delete actionStatus.dataset.kind;
-  }
   consumeStatusFeedback("outline", o, "feedback", "feedbackKind");
 }
 
@@ -2406,6 +2383,9 @@ function flushOutlineFieldSpacingUpdate(render = true) {
   clearControlDrafts(input);
   clearFieldProbeData(true);
   updateFieldProbePreview();
+  if (state.outline.fieldProbeIssue) {
+    setStatusMessage("outline-plan", state.outline.fieldProbeIssue + ".", "error", { force: true });
+  }
   if (render) {
     renderOutlineCapture();
     renderWorkArea();
@@ -7030,20 +7010,11 @@ function renderToolActions(m = state.machine || {}) {
 }
 
 function setToolFeedback(text, kind) {
-  const local = document.getElementById("tool-action-status");
-  if (local) {
-    local.textContent = text || "";
-    local.className = "tool-action-status" + (kind ? " " + kind : "");
-  }
   setStatusMessage("tool", text, kind, { force: true });
 }
 
 function clearToolFeedback() {
-  const local = document.getElementById("tool-action-status");
-  if (local) {
-    local.textContent = "";
-    local.className = "tool-action-status";
-  }
+  setStatusMessage("tool", "");
 }
 
 function appendGcodeLine(ln) {

@@ -133,8 +133,6 @@ test("outline file load reports transient completion only through the bottom sta
       filePending: false,
       feedback: "",
       feedbackKind: "",
-      feedbackDisplay: "",
-      feedbackDisplayKind: "",
     },
   };
   const loaded = {
@@ -143,8 +141,6 @@ test("outline file load reports transient completion only through the bottom sta
     fieldProbeResults: [],
     feedback: "",
     feedbackKind: "",
-    feedbackDisplay: "",
-    feedbackDisplayKind: "",
   };
   let previewUpdates = 0;
   const ctx = vm.createContext({
@@ -164,7 +160,6 @@ test("outline file load reports transient completion only through the bottom sta
 
   assert.equal(state.outline, loaded);
   assert.equal(previewUpdates, 1, "a loaded closed outline always regenerates the current probe plan");
-  assert.equal(loaded.feedbackDisplay, "");
   assert.deepEqual(messages.map(([key, text, kind]) => ({ key, text, kind })), [
     { key: "outline", text: "Loading outline...", kind: "" },
     { key: "outline", text: "Loaded outline with 4 points.", kind: "ok" },

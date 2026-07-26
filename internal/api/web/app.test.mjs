@@ -2320,34 +2320,42 @@ test("commands wait for Tap Move to release its lease", async () => {
   assert.equal(state.jog.commandDisarm, null);
 });
 
-test("machine learning always leaves its pending state with terminal feedback", async () => {
-  const state = { machineLearnPending: false, machineLearnFeedback: "", machineLearnFeedbackKind: "" };
+test("machine learning always leaves pending state and reports through the bottom status bar", async () => {
+  const state = { machineLearnPending: false };
   const calls = [];
+  const messages = [];
   const ctx = buildContext(["learnMachineParameters"], [], {
     state,
     request: async () => ({ json: async () => ({ ui: { machine: {} }, message: "Machine parameters learned." }) }),
     applyUISettings: () => calls.push("settings"),
     renderMachineSettings: () => calls.push("render"),
     renderJog: () => calls.push("jog"),
+    setStatusMessage: (...args) => messages.push(args),
   });
   await vm.runInContext("learnMachineParameters()", ctx);
   assert.equal(state.machineLearnPending, false);
-  assert.equal(state.machineLearnFeedback, "Machine parameters learned.");
-  assert.equal(state.machineLearnFeedbackKind, "ok");
+  assert.deepEqual(messages.map(([key, text, kind]) => ({ key, text, kind })), [
+    { key: "machine-learn", text: "Learning machine parameters...", kind: "info" },
+    { key: "machine-learn", text: "Machine parameters learned.", kind: "ok" },
+  ]);
   assert.ok(calls.includes("settings") && calls.includes("jog"));
 
-  const failedState = { machineLearnPending: false, machineLearnFeedback: "", machineLearnFeedbackKind: "" };
+  const failedState = { machineLearnPending: false };
+  const failedMessages = [];
   const failed = buildContext(["learnMachineParameters"], [], {
     state: failedState,
     request: async () => { throw new Error("offline"); },
     applyUISettings: () => {},
     renderMachineSettings: () => {},
     renderJog: () => {},
+    setStatusMessage: (...args) => failedMessages.push(args),
   });
   await vm.runInContext("learnMachineParameters()", failed);
   assert.equal(failedState.machineLearnPending, false);
-  assert.equal(failedState.machineLearnFeedback, "Learning machine parameters failed: offline");
-  assert.equal(failedState.machineLearnFeedbackKind, "error");
+  assert.deepEqual(failedMessages.map(([key, text, kind]) => ({ key, text, kind })), [
+    { key: "machine-learn", text: "Learning machine parameters...", kind: "info" },
+    { key: "machine-learn", text: "Learning machine parameters failed: offline", kind: "error" },
+  ]);
 });
 
 test("machine learning summary reports learned machine data, not persistence metadata", () => {
@@ -2399,6 +2407,24 @@ test("consumeStatusFeedback emits a terminal result once and clears it", () => {
   );
   assert.equal(emitted.length, 2, "a new terminal result is emitted");
   assert.equal(emitted[1].text, "Move failed: machine is not ready.");
+});
+
+test("outline summary contains persistent probe data, not validation messages", () => {
+  const state = {
+    outline: {
+      active: true,
+      points: [],
+      closed: true,
+      curveFit: false,
+      fieldProbePreview: [],
+      fieldProbeResults: [],
+      fieldProbeIssue: "spot gap creates too many probe points",
+      floorMachineZ: null,
+      fieldReferenceMachineZ: null,
+    },
+  };
+  const ctx = buildContext(["outlineSummaryText"], [], { state });
+  assert.equal(vm.runInContext("outlineSummaryText()", ctx), "0 points | closed");
 });
 
 test("file row ownership preserves pointer and pending action nodes", () => {

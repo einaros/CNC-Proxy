@@ -62,9 +62,9 @@ References:
 - A toolbar/header/action strip has a fixed row count for the lifetime of a
   viewport. Runtime state must not create a second row, change the bar height,
   push content down, or relocate controls.
-- Dynamic text, validation, progress, and async status need reserved slots with
-  fixed or bounded dimensions. If a value can grow, it truncates, scrolls inside
-  its own region, or moves to a deliberate detail surface.
+- Persistent dynamic values need fixed or bounded dimensions. Transient
+  validation, progress, and async messages belong only in the bottom status bar,
+  never in reserved inline message slots.
 - Controls that are peers use a local sizing contract: same height, aligned
   baselines, stable widths for changing labels, and no native-widget mismatch
   between buttons, selects, number inputs, sliders, and toggles.
@@ -74,18 +74,23 @@ References:
 
 ### Feedback And State
 
-- Machine-action controls must show immediate local feedback, an in-progress
-  state while the request is active, and a terminal result at the point of
-  action.
+- Machine-action controls must show an in-progress/disabled state while the
+  request is active, while pending and terminal messages appear exclusively in
+  the bottom status bar.
+- No inline status messages are permitted. Pending, success, failure, warning,
+  validation, connection, and other transient messages must never appear or be
+  duplicated in panels, toolbars, dialogs, popovers, drawers, forms, or beside
+  their triggering controls. The bottom status bar is the sole message surface
+  and sole status live region.
 - Claim success only after the same observable surface the operator would check
   confirms the effect. Otherwise show a concrete failure or leave the state
   pending/unknown.
 - Live SSE/poll updates must not replace DOM nodes that own event handlers,
   focus, dirty input values, pointer capture, menu state, slider drag state, or
   request-pending state.
-- Status should be close to the control or readout it explains, visually quieter
-  than actions, and not duplicated unless transformed into task-specific
-  context.
+- Persistent domain readouts may remain near their controls and should be
+  visually quieter than actions. Confirmation copy and native field validation
+  may remain local; neither may be used as a duplicate transient status surface.
 - Do not repeat a drawer, tab, popover, group, or section heading as the first
   title or field label inside that same visible region. The outer heading
   already labels the region; inner copy must name distinct subgroups or
@@ -140,8 +145,10 @@ Before a UI change is considered done:
 - Check the narrowest supported desktop width and the mobile breakpoint.
 - Check keyboard navigation, visible focus, and screen-reader names for changed
   controls.
-- Check that machine-action controls provide local pending and terminal
-  feedback without causing layout shift.
+- Check that machine-action controls expose stable busy state and route all
+  pending and terminal messages only through the bottom status bar.
+- Check that the bottom status bar is the only `role="status"`/live region and
+  that no inline transient message slot was added.
 - Check that section, drawer, tab, and group labels are not repeated as local
   titles or field labels inside the same visible region.
 - For canvas/3D work, verify the visual surface is nonblank, correctly framed,

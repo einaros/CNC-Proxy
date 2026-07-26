@@ -193,9 +193,6 @@
   .tool-control-stack select, .tool-control-stack input[type="number"] { min-width: 0; border: 1px solid var(--border); background: #252b2d; color: var(--text); padding: 0 8px; }
   .tool-control-stack button { justify-content: center; padding: 0 9px; }
   .tool-control-stack button:hover, .tool-control-stack select:hover, .tool-control-stack input[type="number"]:hover { border-color: var(--accent); }
-  .tool-action-status { min-height: 18px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-  .tool-action-status.ok { color: var(--ok); }
-  .tool-action-status.error { color: var(--err); }
   .active-gcode-body { min-width: 0; display: grid; gap: 8px; }
   .active-gcode-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
   .active-gcode-summary { min-width: 0; }
@@ -307,9 +304,6 @@
   .tap-origin-panel { grid-column: 1 / -1; min-width: 0; display: grid; gap: 14px; align-items: stretch; }
   .origin-action-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px; }
   .origin-action-grid button { min-height: var(--tap-control-h); white-space: nowrap; }
-  .origin-action-status { min-height: 18px; color: var(--muted); font-size: 12px; line-height: 18px; }
-  .origin-action-status[data-kind="ok"] { color: var(--ok); }
-  .origin-action-status[data-kind="error"] { color: var(--err); }
   .origin-modal { width: min(480px, calc(100vw - 24px)); }
   .origin-modal-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .origin-modal-fields label, .origin-modal-source label { min-width: 0; display: grid; grid-template-rows: var(--tap-label-h) var(--tap-control-h); gap: var(--tap-field-gap); color: var(--muted); font-size: 11px; line-height: 1.2; }
@@ -350,7 +344,7 @@
   .outline-preview-controls > #outline-start { border-color: rgba(87,166,214,.72); background: rgba(87,166,214,.18); }
   .outline-active-controls { display: grid; gap: 5px; align-items: stretch; }
   .outline-active-controls label { min-height: 30px; display: flex; gap: 6px; align-items: center; justify-content: center; padding: 4px 8px; color: var(--muted); background: rgba(18,23,28,.88); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
-  .outline-capture { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: 20px 36px 32px; grid-template-areas: "title title title title" "actions actions exports exports" "settings summary summary status"; gap: 6px; align-items: stretch; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
+  .outline-capture { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: 20px 36px 32px; grid-template-areas: "title title title title" "actions actions exports exports" "settings summary summary summary"; gap: 6px; align-items: stretch; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
   .outline-capture[hidden] { display: none; }
   .outline-probe-title { grid-area: title; display: flex; align-items: center; min-width: 0; color: var(--text); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
   .outline-probe-actions, .outline-export-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; min-width: 0; }
@@ -361,11 +355,7 @@
   .outline-probe-settings input[type="number"] { width: 72px; min-width: 0; height: 32px; }
   .outline-export-controls { grid-area: exports; }
   .outline-export-controls button { min-width: 0; height: 36px; min-height: 36px; padding-inline: 8px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .outline-summary, .outline-action-status { min-width: 0; height: 32px; overflow: auto; align-content: center; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .outline-summary { grid-area: summary; }
-  .outline-action-status { grid-area: status; }
-  .outline-action-status[data-kind="ok"] { color: var(--ok); }
-  .outline-action-status[data-kind="error"] { color: var(--danger); }
+  .outline-summary { grid-area: summary; min-width: 0; height: 32px; overflow: auto; align-content: center; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .origin-set-change { min-height: 18px; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .z-step-controls { display: grid; grid-template-rows: minmax(68px, 1fr) auto minmax(68px, 1fr); gap: 8px; align-items: stretch; }
   .z-step-controls button { justify-content: center; min-height: 68px; font-size: 16px; font-weight: 650; }
@@ -418,9 +408,6 @@
   .machine-settings-field > input { width: 100%; min-width: 0; height: var(--machine-settings-control-h); min-height: var(--machine-settings-control-h); }
   .machine-settings-actions { display: flex; justify-content: flex-start; align-items: center; }
   .machine-settings-actions button { width: 168px; min-width: 168px; height: var(--machine-settings-control-h); min-height: var(--machine-settings-control-h); }
-  #machine-learn-status { min-width: 0; height: 40px; min-height: 40px; display: grid; align-content: center; overflow: auto; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  #machine-learn-status[data-kind="ok"] { color: var(--ok); }
-  #machine-learn-status[data-kind="error"] { color: var(--err); }
   .machine-learned-summary { min-width: 0; height: 88px; min-height: 88px; display: grid; align-content: start; gap: 3px; overflow: auto; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
   .jog-summary { display: grid; grid-template-columns: repeat(4, minmax(110px, auto)); gap: 8px 14px; align-items: center; color: var(--muted); }
   .jog-summary span { min-width: 0; }
@@ -506,7 +493,7 @@
   }
   @media (max-width: 760px) {
     header, .toolbar, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
-    .outline-capture { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: 20px 36px 36px 32px 32px; grid-template-areas: "title title" "actions actions" "exports exports" "settings settings" "summary status"; }
+    .outline-capture { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: 20px 36px 36px 32px 32px; grid-template-areas: "title title" "actions actions" "exports exports" "settings settings" "summary summary"; }
     .control-command-drawer .gamepad-axis-row, .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row label:last-child { grid-column: auto; }
     .tap-origin-panel .origin-group + .origin-group { padding-left: 0; border-left: 0; }
@@ -639,7 +626,7 @@
               <div class="tool-control-stack">
                 <div class="tool-task-group">
                   <div id="tool-wait-row" class="tool-state-row">
-                    <div id="tool-wait-status" class="tool-state-text" aria-live="polite">Tool change</div>
+                    <div id="tool-wait-status" class="tool-state-text">Tool change</div>
                     <button type="button" id="tool-continue" class="primary" disabled>Continue</button>
                   </div>
                   <div id="tool-change-row" class="tool-action-row">
@@ -687,7 +674,6 @@
                     <button type="button" id="tool-calibrate">Calibrate</button>
                   </div>
                 </div>
-                <div id="tool-action-status" class="tool-action-status" aria-live="polite"></div>
               </div>
             </div>
           </div>
@@ -1026,7 +1012,6 @@
                 <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
               </div>
               <div id="outline-summary" class="outline-summary"></div>
-              <div id="outline-action-status" class="outline-action-status" role="status" aria-live="polite"></div>
             </div>
           </div>
         </div>
@@ -1118,7 +1103,7 @@
       <label><span id="origin-set-x-label">X Offset</span><input id="origin-set-x" type="number" value="0" step="0.001" inputmode="decimal"></label>
       <label><span id="origin-set-y-label">Y Offset</span><input id="origin-set-y" type="number" value="0" step="0.001" inputmode="decimal"></label>
     </div>
-    <div id="origin-set-change" class="origin-set-change" aria-live="polite"></div>
+    <div id="origin-set-change" class="origin-set-change"></div>
     <div class="origin-modal-actions"><button type="button" id="origin-set-apply">Set Origin</button></div>
   </div>
 </dialog>
@@ -1172,9 +1157,8 @@
     <section class="machine-settings-section" aria-labelledby="machine-settings-controller-title">
       <h3 id="machine-settings-controller-title">Controller profile</h3>
       <div class="machine-settings-actions">
-        <button type="button" id="machine-learn" aria-controls="machine-learn-status machine-learned-summary">Learn from machine</button>
+        <button type="button" id="machine-learn" aria-controls="machine-learned-summary">Learn from machine</button>
       </div>
-      <div id="machine-learn-status" role="status" aria-live="polite" aria-atomic="true"></div>
       <div id="machine-learned-summary" class="machine-learned-summary"></div>
     </section>
   </div>
