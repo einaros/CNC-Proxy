@@ -5004,9 +5004,12 @@ function buildHeightOBJ() {
     triangulationVertexIndices.push(index);
   }
   if (triangulationPoints.length < 3) throw new Error("field probe needs at least three distinct XY sample positions");
-  const faces = constrainedOutlineTriangles(triangulationPoints, outline)
+  const topFaces = constrainedOutlineTriangles(triangulationPoints, outline)
     .map((face) => face.map((index) => triangulationVertexIndices[index]));
-  if (!faces.length) throw new Error("field probe samples could not form a mesh inside the outline");
+  if (!topFaces.length) throw new Error("field probe samples could not form a mesh inside the outline");
+  const boundary = orderedOutlineBoundaryIndices(triangulationPoints, outline)
+    .map((index) => triangulationVertexIndices[index]);
+  const solid = solidifyHeightMesh(meshVertices, topFaces, boundary, 0);
   const reference = fieldProbeHeightReference(origin);
   const originX = axisValue(origin, "x") ?? 0;
   const originY = axisValue(origin, "y") ?? 0;
@@ -5020,19 +5023,65 @@ function buildHeightOBJ() {
     "# cnc_xy_origin_machine_mm: " + pathNum(originX) + " " + pathNum(originY),
     "# CNC Z coordinates: " + reference.label,
     "# z_reference_machine_mm: " + pathNum(reference.machineZ),
+    "# solid: sampled top, vertical outline walls, flat underside at Z=0",
     "# sample_count: " + samples.length,
     "# mesh_vertex_count: " + meshVertices.length,
+    "# solid_vertex_count: " + solid.vertices.length,
     "o outline_field_probe",
+    "s off",
   ];
-  for (const point of meshVertices) {
+  for (const point of solid.vertices) {
     lines.push("v " + pathNum(point.x) + " " + pathNum(point.y) + " " + pathNum(point.z));
   }
-  for (const face of faces) lines.push("f " + face.map((index) => index + 1).join(" "));
-  const used = new Set(faces.flat());
+  lines.push("# faces: top");
+  for (const face of topFaces) lines.push("f " + face.map((index) => index + 1).join(" "));
+  lines.push("# faces: underside");
+  for (const face of solid.undersideFaces) lines.push("f " + face.map((index) => index + 1).join(" "));
+  lines.push("# faces: perimeter");
+  for (const face of solid.wallFaces) lines.push("f " + face.map((index) => index + 1).join(" "));
+  const used = new Set(topFaces.flat());
+  lines.push("# points: unused coincident probe samples");
   for (let index = 0; index < meshVertices.length; index++) {
     if (!used.has(index)) lines.push("p " + (index + 1));
   }
   return lines.join("\n") + "\n";
+}
+
+function solidifyHeightMesh(meshVertices, topFaces, boundary, undersideZ) {
+  if (!Number.isFinite(undersideZ)) throw new Error("solid mesh underside Z is unavailable");
+  if (boundary.length < 3) throw new Error("solid mesh needs at least three boundary vertices");
+  const vertices = meshVertices.map((point) => ({ ...point }));
+  const usedTopIndices = [...new Set(topFaces.flat())].sort((a, b) => a - b);
+  const bottomIndexByTop = new Map();
+  for (const topIndex of usedTopIndices) {
+    const top = meshVertices[topIndex];
+    if (!top) throw new Error("solid mesh contains an invalid top vertex");
+    if (top.z === undersideZ) {
+      bottomIndexByTop.set(topIndex, topIndex);
+      continue;
+    }
+    bottomIndexByTop.set(topIndex, vertices.length);
+    vertices.push({ x: top.x, y: top.y, z: undersideZ });
+  }
+  const bottomIndex = (topIndex) => {
+    const index = bottomIndexByTop.get(topIndex);
+    if (index === undefined) throw new Error("solid mesh boundary is not part of the top surface");
+    return index;
+  };
+  const undersideFaces = topFaces.map((face) =>
+    face.slice().reverse().map((topIndex) => bottomIndex(topIndex))
+  );
+  const wallFaces = [];
+  for (let index = 0; index < boundary.length; index++) {
+    const topA = boundary[index];
+    const topB = boundary[(index + 1) % boundary.length];
+    const bottomA = bottomIndex(topA);
+    const bottomB = bottomIndex(topB);
+    for (const face of [[topA, bottomA, bottomB], [topA, bottomB, topB]]) {
+      if (new Set(face).size === 3) wallFaces.push(face);
+    }
+  }
+  return { vertices, undersideFaces, wallFaces };
 }
 
 function buildHeightMeshVertices(samples, outline) {

@@ -487,8 +487,10 @@ func isTimeout(err error) bool {
 func (k *Conn) QueryState(timeout time.Duration) (string, error) {
 	// A transport preserved after a prior poll timeout may receive that poll's
 	// STATUS_RES late. The protocol has no sequence number, so discard frames
-	// already waiting at a short quiet boundary before sending a new `?`; otherwise
-	// the old state would be attributed to this query and timestamped fresh.
+	// already waiting at a short quiet boundary before sending a new `?`;
+	// otherwise the old state would be attributed to this query and timestamped
+	// fresh. Do not discard an immediate firmware error from a preceding silent
+	// motion command: it is the only direct explanation for a rejected jog.
 	if err := k.drainAvailableFrames(2 * time.Millisecond); err != nil {
 		return "", err
 	}
@@ -501,16 +503,26 @@ func (k *Conn) QueryState(timeout time.Duration) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if f.Cmd == protocol.CmdStatusRes {
+		switch f.Cmd {
+		case protocol.CmdStatusRes:
 			return string(f.Data), nil
+		case protocol.CmdNormalInfo:
+			if err := normalInfoError(f.Data); err != nil {
+				return "", err
+			}
 		}
 	}
 }
 
 func (k *Conn) drainAvailableFrames(quiet time.Duration) error {
 	for {
-		_, err := k.readFrame(time.Now().Add(quiet))
+		f, err := k.readFrame(time.Now().Add(quiet))
 		if err == nil {
+			if f.Cmd == protocol.CmdNormalInfo {
+				if err := normalInfoError(f.Data); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if isTimeout(err) {
@@ -518,6 +530,15 @@ func (k *Conn) drainAvailableFrames(quiet time.Duration) error {
 		}
 		return err
 	}
+}
+
+func normalInfoError(data []byte) error {
+	trimmed := strings.TrimRight(string(data), "\r\n")
+	low := strings.ToLower(strings.TrimSpace(trimmed))
+	if strings.Contains(low, "error") || strings.Contains(low, "alarm") {
+		return fmt.Errorf("machine: %s", trimmed)
+	}
+	return nil
 }
 
 var ErrUploadCanceled = errors.New("upload canceled by machine")

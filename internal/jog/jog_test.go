@@ -591,6 +591,53 @@ func TestJogTargetWithUnchangedXYDoesNotLiftToSafeZ(t *testing.T) {
 	t.Fatalf("Z-only target did not reach fake machine: %v", fm.Gcodes())
 }
 
+func TestJogTargetWithRoundedUnchangedXYDoesNotLiftToSafeZ(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	status := "<Idle|MPos:68.9980,-49.9240,-5.0000|WPos:-49.9240,-10.0000,-5.0000>"
+	fm.SetStatus(status)
+	if !mgr.arb.Tracker().ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	// The browser reconstructs a machine target as WPos + (MPos - WPos).
+	// With ordinary decimal coordinates that can differ from the reported MPos
+	// by a floating-point rounding residue even though the axis is unchanged.
+	mposX := 68.998
+	wposX := -49.924
+	roundedX := wposX + (mposX - wposX)
+	if roundedX == mposX {
+		t.Fatal("test coordinates did not produce the expected rounding residue")
+	}
+	s.Target(2, machine.AxisValues{"x": roundedX, "y": -49.924, "z": -2}, 600, true, 0)
+	ack := drainUntil(t, s, "ack")
+	if ack.Seq != 2 {
+		t.Fatalf("target ack = %+v, want seq 2", ack)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		gcodes := fm.Gcodes()
+		if len(gcodes) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if len(gcodes) != 1 || !strings.Contains(gcodes[0], "Z3.0000") || strings.Contains(gcodes[0], "X") {
+			t.Fatalf("rounded Z-only target gcodes = %v, want one direct Z move", gcodes)
+		}
+		return
+	}
+	t.Fatalf("rounded Z-only target did not reach fake machine: %v", fm.Gcodes())
+}
+
 func TestJogTargetFeedIsNotCappedByContinuousJogLimit(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()

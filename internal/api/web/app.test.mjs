@@ -1106,7 +1106,7 @@ test("field height samples can use the captured Z origin without a floor probe",
   ]);
 });
 
-test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and current work origin", () => {
+test("OBJ export builds a closed solid from the probed floor while preserving Fusion coordinates", () => {
   const results = [];
   for (const y of [0, 10, 20]) {
     for (const x of [0, 10, 20]) {
@@ -1119,9 +1119,9 @@ test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and 
       closed: true,
       points: [results[0], results[2], results[8], results[6]],
       origin: { x: -100, y: -50, z: -20 },
-      floorMachineZ: null,
+      floorMachineZ: -20,
       fieldReferenceMachineZ: -20,
-      fieldReferenceKind: "work_origin",
+      fieldReferenceKind: "floor",
       fieldProbeResults: results,
     },
   };
@@ -1129,6 +1129,7 @@ test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and 
     [
       "buildHeightOBJ",
       "buildHeightMeshVertices",
+      "solidifyHeightMesh",
       "exportWorkOrigin",
       "requireHeightExportOutline",
       "triangleCCW",
@@ -1170,20 +1171,31 @@ test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and 
   const obj = vm.runInContext("buildHeightOBJ()", ctx);
   const vertices = obj.split("\n").filter((line) => line.startsWith("v "));
   const faces = obj.split("\n").filter((line) => line.startsWith("f "));
-  assert.equal(vertices.length, 9);
-  assert.ok(faces.length >= 8, `expected a triangulated 3x3 field, got ${faces.length} faces`);
-  assert.ok(faces.every((line) => line.slice(2).split(" ").every((index) => Number(index) >= 1 && Number(index) <= 9)));
+  assert.equal(vertices.length, 17, "the top vertex on Z=0 is welded directly to the underside");
+  assert.equal(faces.length, 30, "zero-area wall triangles are omitted where the top meets the floor");
+  assert.ok(faces.every((line) => line.slice(2).split(" ").every((index) => Number(index) >= 1 && Number(index) <= 17)));
   assert.match(obj, /# units: millimeters \(OBJ is unitless; choose Millimeter in Fusion Insert Mesh\)/);
   assert.match(obj, /# coordinate system: CNC work coordinates, right-handed Z-up/);
   assert.match(obj, /# axis mapping: OBJ X=CNC X, OBJ Y=CNC Y, OBJ Z=CNC Z/);
   assert.match(obj, /# triangulation: constrained Delaunay with locked outline edges/);
   assert.match(obj, /# cnc_xy_origin_machine_mm: -110 -70/);
+  assert.match(obj, /# CNC Z coordinates: probed floor/);
+  assert.match(obj, /# solid: sampled top, vertical outline walls, flat underside at Z=0/);
+  assert.match(obj, /# solid_vertex_count: 17/);
   assert.ok(vertices.includes("v 10 20 0"), "OBJ XY is offset from the current work origin");
   assert.ok(vertices.includes("v 20 40 1.5"), "OBJ preserves current CNC work coordinates");
   assert.ok(vertices.includes("v 30 40 2"), "millimeter extents are preserved without scaling");
   assert.equal(obj.includes("# cnc_xy_origin_machine_mm: -100 -50"), false, "captured XY origin is not reused after work zero changes");
-  const faceIndices = faces.map((line) => line.slice(2).split(" ").map(Number));
-  const faceEdges = new Set(faceIndices.flatMap(([a, b, c]) => [[a, b], [b, c], [c, a]])
+  const groups = {};
+  let currentGroup = "";
+  for (const line of obj.split("\n")) {
+    if (line.startsWith("# faces: ")) currentGroup = line.slice("# faces: ".length);
+    if (line.startsWith("f ")) (groups[currentGroup] ||= []).push(line.slice(2).split(" ").map(Number));
+  }
+  assert.equal(groups.top.length, 8);
+  assert.equal(groups.underside.length, 8);
+  assert.equal(groups.perimeter.length, 14);
+  const faceEdges = new Set(groups.top.flatMap(([a, b, c]) => [[a, b], [b, c], [c, a]])
     .map(([a, b]) => Math.min(a, b) + ":" + Math.max(a, b)));
   const boundaryRing = [1, 2, 3, 6, 9, 8, 7, 4];
   for (let index = 0; index < boundaryRing.length; index++) {
@@ -1191,21 +1203,53 @@ test("OBJ export preserves Fusion millimeter coordinates, Z-up orientation, and 
     const b = boundaryRing[(index + 1) % boundaryRing.length];
     assert.ok(faceEdges.has(Math.min(a, b) + ":" + Math.max(a, b)), `outline edge ${a}-${b} is retained`);
   }
-  assert.deepEqual([...new Set(faceIndices.flat())].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual([...new Set(groups.top.flat())].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   const parsedVertices = vertices.map((line) => line.slice(2).split(" ").map(Number));
-  for (const line of faces) {
-    const [a, b, c] = line.slice(2).split(" ").map((value) => parsedVertices[Number(value) - 1]);
+  for (const face of groups.top) {
+    const [a, b, c] = face.map((value) => parsedVertices[value - 1]);
     const ab = b.map((value, index) => value - a[index]);
     const ac = c.map((value, index) => value - a[index]);
     const normalZ = ab[0] * ac[1] - ab[1] * ac[0];
-    assert.ok(normalZ > 0, `face ${line} should point toward OBJ +Z / CNC +Z`);
+    assert.ok(normalZ > 0, `top face ${face.join(" ")} points toward OBJ +Z / CNC +Z`);
   }
+  for (const face of groups.underside) {
+    const [a, b, c] = face.map((value) => parsedVertices[value - 1]);
+    assert.ok([a, b, c].every((point) => point[2] === 0), "every underside vertex is on the probed floor");
+    const ab = b.map((value, index) => value - a[index]);
+    const ac = c.map((value, index) => value - a[index]);
+    assert.ok(ab[0] * ac[1] - ab[1] * ac[0] < 0, "underside faces point toward OBJ -Z");
+  }
+  const edgeUse = new Map();
+  for (const face of [...groups.top, ...groups.underside, ...groups.perimeter]) {
+    for (const [a, b] of [[face[0], face[1]], [face[1], face[2]], [face[2], face[0]]]) {
+      const key = Math.min(a, b) + ":" + Math.max(a, b);
+      edgeUse.set(key, (edgeUse.get(key) || 0) + 1);
+    }
+    const [a, b, c] = face.map((value) => parsedVertices[value - 1]);
+    const ab = b.map((value, index) => value - a[index]);
+    const ac = c.map((value, index) => value - a[index]);
+    const cross = [
+      ab[1] * ac[2] - ab[2] * ac[1],
+      ab[2] * ac[0] - ab[0] * ac[2],
+      ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    assert.ok(Math.hypot(...cross) > 1e-9, `solid face ${face.join(" ")} has nonzero area`);
+  }
+  assert.ok([...edgeUse.values()].every((count) => count === 2), "every solid edge belongs to exactly two faces");
+  const signedSixVolume = [...groups.top, ...groups.underside, ...groups.perimeter].reduce((sum, face) => {
+    const [a, b, c] = face.map((value) => parsedVertices[value - 1]);
+    return sum + a[0] * (b[1] * c[2] - b[2] * c[1])
+      + a[1] * (b[2] * c[0] - b[0] * c[2])
+      + a[2] * (b[0] * c[1] - b[1] * c[0]);
+  }, 0);
+  assert.ok(signedSixVolume > 0, "the closed shell has consistent outward winding");
 
   state.outline.fieldProbeResults[8] = { ...state.outline.fieldProbeResults[0], machine_z: -19 };
   const duplicateOBJ = vm.runInContext("buildHeightOBJ()", ctx);
-  assert.equal(duplicateOBJ.split("\n").filter((line) => line.startsWith("v ")).length, 10);
+  assert.equal(duplicateOBJ.split("\n").filter((line) => line.startsWith("v ")).length, 18);
   assert.match(duplicateOBJ, /^p 9$/m, "a coincident ninth sample remains an explicit OBJ point");
   assert.match(duplicateOBJ, /# mesh_vertex_count: 10/, "a missing sharp outline corner is restored as an interpolated mesh vertex");
+  assert.match(duplicateOBJ, /# solid_vertex_count: 18/, "only vertices used above the floor receive underside projections");
 });
 
 test("PGM export uses the same current work origin instead of the captured outline origin", () => {

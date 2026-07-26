@@ -54,6 +54,7 @@ const (
 	statusWaitGap             = 500 * time.Millisecond
 	maxManualStepMM           = 50.0
 	maxTargetFeedMMMin        = 10000.0
+	jogCoordinateResolutionMM = 0.0001
 	targetPositionToleranceMM = 0.02
 	minTargetVerifyGrace      = 2 * time.Second
 )
@@ -792,8 +793,21 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		}
 	}
 
+	// Status and jog commands both carry four decimal places. Work-coordinate
+	// targets are reconstructed in the browser as WPos + (MPos - WPos), which
+	// can leave a floating-point residue on an unchanged axis. Snap residues
+	// smaller than half a wire unit back to the observed position; otherwise a
+	// Z-only request can be misplanned as a safe-Z/XY/Z sequence containing an
+	// invalid `$J X0.0000` segment.
+	effectiveTargetAxes := copyAxes(targetAxes)
+	for axis, value := range effectiveTargetAxes {
+		if math.Abs(value-planned[axis]) < jogCoordinateResolutionMM/2 {
+			effectiveTargetAxes[axis] = planned[axis]
+		}
+	}
+
 	finalTarget := copyAxes(planned)
-	for axis, value := range targetAxes {
+	for axis, value := range effectiveTargetAxes {
 		finalTarget[axis] = value
 	}
 	fullDelta := axesDelta(planned, finalTarget)
@@ -826,10 +840,10 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	}
 	if safeZEnabled && hasXYMove {
 		xyTarget := copyAxes(planned)
-		if x, ok := targetAxes["x"]; ok {
+		if x, ok := effectiveTargetAxes["x"]; ok {
 			xyTarget["x"] = x
 		}
-		if y, ok := targetAxes["y"]; ok {
+		if y, ok := effectiveTargetAxes["y"]; ok {
 			xyTarget["y"] = y
 		}
 		xyDelta := axesDelta(planned, xyTarget)
@@ -844,7 +858,7 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	}
 
 	target := copyAxes(planned)
-	for axis, value := range targetAxes {
+	for axis, value := range effectiveTargetAxes {
 		target[axis] = value
 	}
 	delta := axesDelta(planned, target)

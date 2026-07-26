@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,6 +146,18 @@ func TestQueryState(t *testing.T) {
 	}
 	if payload != "<Idle|MPos:0,0,0|WPos:0,0,0>" {
 		t.Errorf("status = %q", payload)
+	}
+}
+
+func TestQueryStateSurfacesPrecedingMotionError(t *testing.T) {
+	conn := gcodeServer(t, func(c net.Conn) {
+		c.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("error:no delta jog specified\n")))
+		c.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:0,0,0>")))
+	})
+
+	_, err := conn.QueryState(testTimeout)
+	if err == nil || !strings.Contains(err.Error(), "no delta jog specified") {
+		t.Fatalf("QueryState error = %v, want preceding firmware jog error", err)
 	}
 }
 
