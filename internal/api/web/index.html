@@ -86,7 +86,7 @@
   .status-item.error { border-color: rgba(232,106,95,.5); color: var(--err); }
   .status-item.error .status-dot { background: var(--err); }
   #notice-clear { flex: 0 0 auto; }
-  .tabs { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 4px; min-width: 0; margin: 0; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  .tabs { display: grid; grid-template-columns: repeat(3, minmax(112px, 1fr)); gap: 4px; min-width: 0; margin: 0; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
   .tab { width: 100%; min-width: 0; min-height: var(--control-h); border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
   .tab:hover { border-color: rgba(87,166,214,.45); color: var(--text); }
@@ -156,12 +156,6 @@
   .job-message { font-weight: 650; overflow-wrap: anywhere; }
   .job-error { color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
   .job-recovery { display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); gap: 6px; margin-top: 6px; }
-  #run-history { background: var(--panel); border: 1px solid var(--border); }
-  #run-history-panel .detail-body { gap: 8px; }
-  .run-history-actions { display: flex; justify-content: flex-end; }
-  .run-row { display: grid; grid-template-columns: minmax(180px, 1fr) 120px 120px minmax(220px, 1.4fr); gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); align-items: start; }
-  .run-row:last-child { border-bottom: 0; }
-  .run-title { font-weight: 650; overflow-wrap: anywhere; }
   .backup-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
   .metric { min-width: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: grid; gap: 3px; align-content: start; }
   .metric .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -193,32 +187,62 @@
   .tool-control-stack select, .tool-control-stack input[type="number"] { min-width: 0; border: 1px solid var(--border); background: #252b2d; color: var(--text); padding: 0 8px; }
   .tool-control-stack button { justify-content: center; padding: 0 9px; }
   .tool-control-stack button:hover, .tool-control-stack select:hover, .tool-control-stack input[type="number"]:hover { border-color: var(--accent); }
-  .active-gcode-body { min-width: 0; display: grid; gap: 8px; }
-  .active-gcode-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+  #active-job-view { grid-template-rows: max-content; align-content: start; }
+  #active-job-view > .page-section { align-content: start; }
+  #active-gcode-panel { align-content: start; padding: 8px; gap: 0; }
+  .active-gcode-body { min-width: 0; display: grid; grid-template-rows: auto auto; align-content: start; gap: 4px; }
+  .active-gcode-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
   .active-gcode-summary { min-width: 0; }
   #active-gcode-title { font-weight: 650; overflow-wrap: anywhere; }
   #active-gcode-meta { color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
-  .active-gcode-progress { display: grid; grid-template-columns: minmax(152px, auto) repeat(2, minmax(76px, auto)); gap: 8px 16px; align-items: start; min-height: 36px; margin-top: 8px; }
+  .active-gcode-progress { display: grid; grid-template-columns: minmax(152px, auto) repeat(2, minmax(76px, auto)); gap: 4px 16px; align-items: start; min-height: 0; margin-top: 4px; }
   .active-gcode-stat { display: grid; gap: 2px; min-width: 0; }
   .active-gcode-stat > span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .active-gcode-stat > strong { min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #active-gcode-run { white-space: nowrap; }
-  #gcode-preview-wrap { display: grid; grid-template-rows: minmax(0, 1fr) auto; position: relative; height: clamp(320px, 42vh, 560px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .active-gcode-workspace { --active-gcode-left-width: 32%; display: grid; grid-template-columns: minmax(260px, var(--active-gcode-left-width)) 16px minmax(320px, 1fr); gap: 0; height: clamp(320px, 42vh, 560px); min-height: 320px; }
+  #active-gcode-left { min-width: 0; min-height: 0; display: grid; grid-template-rows: 36px minmax(0, 1fr); background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .active-gcode-left-head { min-width: 0; border-bottom: 1px solid var(--border); background: rgba(25,31,37,.92); }
+  .active-gcode-left-tabs { min-width: 0; height: 100%; display: grid; grid-template-columns: minmax(168px, 2fr) minmax(84px, 1fr); }
+  .active-gcode-left-tab { min-width: 0; min-height: 35px; padding: 4px 8px; border: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
+  #active-job-left-tab-source { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; text-align: left; }
+  .active-gcode-left-tab + .active-gcode-left-tab { border-left: 1px solid var(--border); }
+  .active-gcode-left-tab:hover { background: rgba(87,166,214,.10); color: var(--text); }
+  .active-gcode-left-tab[aria-selected="true"] { background: rgba(87,166,214,.16); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+  #active-gcode-source-position { min-width: 0; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #active-gcode-source-position.is-hidden { visibility: hidden; }
+  #active-gcode-splitter { position: relative; min-width: 16px; min-height: 0; cursor: col-resize; touch-action: none; outline: none; }
+  #active-gcode-splitter::before { content: ""; position: absolute; inset: 0 7px; background: var(--border); transition: background-color .12s ease, box-shadow .12s ease; }
+  #active-gcode-splitter::after { content: ""; position: absolute; top: 50%; left: 6px; width: 4px; height: 32px; border-radius: 999px; background: var(--muted); opacity: .45; transform: translateY(-50%); transition: opacity .12s ease, background-color .12s ease; }
+  #active-gcode-splitter:hover::before, #active-gcode-splitter.dragging::before, #active-gcode-splitter:focus-visible::before { background: var(--accent); box-shadow: 0 0 0 1px rgba(87,166,214,.24); }
+  #active-gcode-splitter:hover::after, #active-gcode-splitter.dragging::after, #active-gcode-splitter:focus-visible::after { background: var(--accent); opacity: 1; }
+  .active-gcode-left-panel { min-width: 0; min-height: 0; height: 100%; }
+  #active-gcode-source { position: relative; }
+  #active-gcode-source-scroll { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; background: #151a1f; outline: none; }
+  #active-gcode-source-scroll:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+  #active-gcode-source-spacer { width: 1px; opacity: 0; pointer-events: none; }
+  #active-gcode-source-lines { position: absolute; inset: 0 auto auto 0; min-width: 100%; pointer-events: none; }
+  .active-gcode-source-line { position: absolute; left: 0; display: flex; width: max-content; min-width: 100%; height: 20px; align-items: center; color: #c9d1d9; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 20px; white-space: pre; }
+  .active-gcode-source-line.current { color: var(--text); background: rgba(87,166,214,.18); box-shadow: inset 3px 0 0 var(--accent); }
+  .active-gcode-source-number { position: sticky; left: 0; z-index: 1; flex: 0 0 52px; width: 52px; padding: 0 8px 0 4px; color: #7f8b96; background: #151a1f; text-align: right; user-select: none; }
+  .active-gcode-source-line.current .active-gcode-source-number { color: #b8ddf1; background: #1e303c; }
+  .active-gcode-source-code { flex: 0 0 auto; min-width: 0; padding-right: 12px; }
+  #active-gcode-source-empty { position: sticky; left: 0; width: 100%; min-height: 100%; display: grid; place-items: center; padding: 16px; color: var(--muted); text-align: center; }
+  #gcode-preview-wrap { display: grid; grid-template-rows: minmax(0, 1fr) auto; position: relative; min-width: 0; min-height: 0; height: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #gcode-preview { grid-area: 1 / 1; display: block; width: 100%; height: 100%; min-height: 0; touch-action: none; cursor: grab; }
   #gcode-preview:active { cursor: grabbing; }
   #gcode-preview.pan-mode { cursor: move; }
   #gcode-preview-empty { grid-area: 1 / 1; z-index: 1; display: grid; place-items: center; color: var(--muted); background: var(--panel-2); pointer-events: none; }
-  #gcode-view-tools { position: absolute; top: 8px; right: 8px; z-index: 2; width: 88px; display: grid; gap: 6px; }
-  #gcode-viewcube { display: block; width: 88px; height: 88px; cursor: pointer; touch-action: none; }
+  #gcode-view-tools { position: absolute; top: 8px; right: 8px; z-index: 2; width: 104px; display: grid; gap: 6px; }
+  #gcode-viewcube { display: block; width: 104px; height: 104px; cursor: default; touch-action: none; }
   #gcode-projection-toggle { display: grid; grid-template-columns: 1fr 1fr; background: rgba(18,23,28,.82); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; backdrop-filter: blur(6px); }
   #gcode-projection-toggle button { min-height: 24px; padding: 2px 4px; font-size: 11px; border: 0; border-radius: 0; background: transparent; color: var(--muted); }
   #gcode-projection-toggle button + button { border-left: 1px solid var(--border); }
   #gcode-projection-toggle button[aria-pressed="true"] { background: rgba(87,166,214,.18); color: var(--text); }
   #gcode-timeline-row { grid-area: 2 / 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: rgba(25,31,37,.92); }
   #gcode-timeline-label { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
-  #gcode-console-view { height: 100%; }
-  #gcode-console-view > .page-section { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
-  #console { min-height: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  #active-gcode-console { min-height: 0; height: 100%; }
+  #console { min-height: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--panel); overflow: hidden; }
   #machine-controls, #macro-toolbar, #log-tools, #macro-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 6px; align-items: center; min-width: 0; }
   #machine-controls { align-items: stretch; }
   #machine-controls button { width: 100%; }
@@ -241,6 +265,11 @@
   .log-left, .log-right { display: grid; gap: 6px; align-items: center; min-width: 0; }
   .log-left { grid-template-columns: minmax(96px, 140px) minmax(140px, 1fr) max-content max-content; }
   .log-right { grid-template-columns: repeat(3, max-content); }
+  #active-gcode-console #log-tools { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 6px; }
+  #active-gcode-console .log-left { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #active-gcode-console .log-right { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #active-gcode-console .log-right button { min-width: 0; padding-inline: 6px; justify-content: center; }
+  #active-gcode-console #gcode-form { padding: 6px; }
   #log-search { width: 100%; min-width: 0; }
   #gcode-log { min-height: 0; overflow-y: auto; padding: 10px 12px; margin: 0; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; background: #12171c; }
   #gcode-log .send { color: var(--accent); }
@@ -490,6 +519,10 @@
   @media (max-width: 880px) {
     .control-page-layout { grid-template-columns: 1fr; }
     .control-command-drawer { position: static; max-height: none; }
+    .active-gcode-workspace { grid-template-columns: 1fr; height: auto; min-height: 0; }
+    #active-gcode-splitter { display: none; }
+    #active-gcode-left { height: 320px; }
+    #gcode-preview-wrap { height: clamp(300px, 48vh, 460px); min-height: 300px; }
     #file-browser { grid-template-columns: 1fr; }
     .file-col-type, th:nth-child(2), td:nth-child(2) { display: none; }
     .file-col-actions { width: 34%; }
@@ -515,7 +548,7 @@
     .file-col-actions { width: 38%; }
     .file-col-status { width: 22%; }
     .jobs-head { display: none; }
-    .job, .run-row { grid-template-columns: 1fr; gap: 3px; }
+    .job { grid-template-columns: 1fr; gap: 3px; }
     #alarm-panel { grid-template-columns: 1fr; }
     #alarm-actions { justify-content: stretch; }
     .metric--wide { grid-column: auto; }
@@ -721,7 +754,6 @@
   </div>
   <nav class="tabs" role="tablist" aria-label="Views">
     <button type="button" id="tab-active-job" class="tab active" role="tab" aria-selected="true" aria-controls="active-job-view">Active job</button>
-    <button type="button" id="tab-gcode-console" class="tab" role="tab" aria-selected="false" aria-controls="gcode-console-view" tabindex="-1">Gcode console</button>
     <button type="button" id="tab-control" class="tab" role="tab" aria-selected="false" aria-controls="control-view" tabindex="-1">Control</button>
     <button type="button" id="tab-files" class="tab" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
   </nav>
@@ -755,67 +787,70 @@
             </div>
             <button type="button" id="active-gcode-run" class="primary">Run Active Gcode</button>
           </div>
-          <div id="gcode-preview-wrap">
-            <canvas id="gcode-preview" role="img" aria-label="Active gcode preview" tabindex="0" title="Drag to rotate; hold Shift or Space and drag to pan"></canvas>
-            <div id="gcode-view-tools" hidden>
-              <canvas id="gcode-viewcube" role="img" aria-label="View orientation cube; click a face, edge, or corner to align the view" title="Click a face, edge, or corner to align the view"></canvas>
-              <div id="gcode-projection-toggle" role="group" aria-label="Projection">
-                <button type="button" id="gcode-projection-persp" aria-pressed="true" title="Perspective projection">Persp</button>
-                <button type="button" id="gcode-projection-ortho" aria-pressed="false" title="Orthographic projection">Ortho</button>
+          <div class="active-gcode-workspace">
+            <div id="active-gcode-left">
+              <div class="active-gcode-left-head">
+                <div class="active-gcode-left-tabs" role="tablist" aria-label="Active job details">
+                  <button type="button" id="active-job-left-tab-source" class="active-gcode-left-tab" role="tab" aria-label="Job code" aria-selected="true" aria-controls="active-gcode-source"><span>Job code</span><span id="active-gcode-source-position" aria-hidden="true">-</span></button>
+                  <button type="button" id="active-job-left-tab-console" class="active-gcode-left-tab" role="tab" aria-selected="false" aria-controls="active-gcode-console" tabindex="-1">Console</button>
+                </div>
+              </div>
+              <div id="active-gcode-source" class="active-gcode-left-panel" role="tabpanel" aria-labelledby="active-job-left-tab-source">
+                <div id="active-gcode-source-scroll" tabindex="0" aria-label="Loaded gcode instructions">
+                  <div id="active-gcode-source-spacer" aria-hidden="true"></div>
+                  <div id="active-gcode-source-lines"></div>
+                  <div id="active-gcode-source-empty">No gcode loaded</div>
+                </div>
+              </div>
+              <div id="active-gcode-console" class="active-gcode-left-panel" role="tabpanel" aria-labelledby="active-job-left-tab-console" hidden>
+                <div id="console">
+                  <div id="log-tools">
+                    <div class="log-left">
+                      <select id="log-filter" aria-label="Log filter">
+                        <option value="all">All</option>
+                        <option value="send">Sent</option>
+                        <option value="recv">Received</option>
+                        <option value="api">API</option>
+                        <option value="controller">Controller</option>
+                        <option value="jog">Jog</option>
+                        <option value="error">Errors</option>
+                      </select>
+                      <input id="log-search" type="search" placeholder="Search log">
+                      <label><input type="checkbox" id="log-autoscroll"> Autoscroll</label>
+                      <label><input type="checkbox" id="log-pause"> Pause</label>
+                    </div>
+                    <div class="log-right">
+                      <button type="button" id="log-copy">Copy</button>
+                      <button type="button" id="log-export">Export</button>
+                      <button type="button" id="log-clear">Clear</button>
+                    </div>
+                  </div>
+                  <pre id="gcode-log"></pre>
+                  <form id="gcode-form">
+                    <input id="gcode-input" type="text" placeholder="Send gcode or console command" autocomplete="off" spellcheck="false">
+                    <button type="submit" class="primary">Send</button>
+                  </form>
+                </div>
               </div>
             </div>
-            <div id="gcode-preview-empty">No plotted moves</div>
-            <div id="gcode-timeline-row">
-              <input id="gcode-timeline" type="range" min="0" max="0" step="1" value="0" aria-label="Preview timeline" disabled>
-              <span id="gcode-timeline-label">0 / 0</span>
+            <div id="active-gcode-splitter" role="separator" aria-label="Resize job details and preview" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="100" aria-valuenow="32" tabindex="0"></div>
+            <div id="gcode-preview-wrap">
+              <canvas id="gcode-preview" role="img" aria-label="Active gcode preview" tabindex="0" title="Drag to rotate; hold Shift or Space and drag to pan"></canvas>
+              <div id="gcode-view-tools" hidden>
+                <canvas id="gcode-viewcube" role="img" aria-label="View orientation cube; drag to rotate, or click a face, edge, or corner to align the view" title="Drag to rotate; click a face, edge, or corner to align the view"></canvas>
+                <div id="gcode-projection-toggle" role="group" aria-label="Projection">
+                  <button type="button" id="gcode-projection-persp" aria-pressed="false" title="Perspective projection">Persp</button>
+                  <button type="button" id="gcode-projection-ortho" aria-pressed="true" title="Orthographic projection">Ortho</button>
+                </div>
+              </div>
+              <div id="gcode-preview-empty">No plotted moves</div>
+              <div id="gcode-timeline-row">
+                <input id="gcode-timeline" type="range" min="0" max="0" step="1" value="0" aria-label="Preview timeline" disabled>
+                <span id="gcode-timeline-label">0 / 0</span>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </section>
-
-    <section class="page-section">
-      <details id="run-history-panel">
-        <summary>Run History (<span id="run-count">0</span>)</summary>
-        <div class="detail-body">
-          <div class="run-history-actions">
-            <button type="button" id="run-history-clear">Clear</button>
-          </div>
-          <div id="run-history"></div>
-        </div>
-      </details>
-    </section>
-  </section>
-
-  <section id="gcode-console-view" class="view" role="tabpanel" aria-labelledby="tab-gcode-console" hidden>
-    <section class="page-section">
-      <div id="console">
-        <div id="log-tools">
-          <div class="log-left">
-            <select id="log-filter" aria-label="Log filter">
-              <option value="all">All</option>
-              <option value="send">Sent</option>
-              <option value="recv">Received</option>
-              <option value="api">API</option>
-              <option value="controller">Controller</option>
-              <option value="jog">Jog</option>
-              <option value="error">Errors</option>
-            </select>
-            <input id="log-search" type="search" placeholder="Search log">
-            <label><input type="checkbox" id="log-autoscroll"> Autoscroll</label>
-            <label><input type="checkbox" id="log-pause"> Pause</label>
-          </div>
-          <div class="log-right">
-            <button type="button" id="log-copy">Copy</button>
-            <button type="button" id="log-export">Export</button>
-            <button type="button" id="log-clear">Clear</button>
-          </div>
-        </div>
-        <pre id="gcode-log"></pre>
-        <form id="gcode-form">
-          <input id="gcode-input" type="text" placeholder="Send gcode or console command" autocomplete="off" spellcheck="false">
-          <button type="submit" class="primary">Send</button>
-        </form>
       </div>
     </section>
   </section>
@@ -1190,6 +1225,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=gcode-live-1"></script>
+<script type="module" src="/app.js?v=active-job-z-accuracy-1"></script>
 </body>
 </html>

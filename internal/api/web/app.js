@@ -20,6 +20,13 @@ const NOTICE_INFO_TIMEOUT_MS = 4500;
 const NOTICE_OK_TIMEOUT_MS = 3500;
 const NOTICE_ERROR_TIMEOUT_MS = 8000;
 const NOTICE_REPEAT_SUPPRESS_MS = 30000;
+const GCODE_SOURCE_ROW_HEIGHT = 20;
+const GCODE_SOURCE_OVERSCAN = 12;
+const ACTIVE_JOB_SPLIT_DEFAULT_PERCENT = 32;
+const ACTIVE_JOB_SPLIT_STEP_PERCENT = 2;
+const ACTIVE_JOB_SPLIT_MIN_LEFT_PX = 260;
+const ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX = 320;
+const ACTIVE_JOB_SPLITTER_PX = 16;
 const MACHINE_SETTING_IDS = [
   "machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max",
   "machine-origin-x", "machine-origin-y", "machine-feed-min", "machine-feed-max",
@@ -30,7 +37,6 @@ const MACRO_EDITOR_IDS = ["macro-name", "macro-description", "macro-color", "mac
 const state = {
   files: new Map(),
   jobs: new Map(),
-  runs: [],
   machine: { state: "", mode: "owner", age_ms: 0, connected: false },
   gcodeSeqs: new Set(),
   gcodeLines: [],
@@ -46,6 +52,8 @@ const state = {
   machineLearnPending: false,
   macroRunning: false,
   activeTab: "active-job",
+  activeJobLeftTab: "source",
+  activeJobSplitPercent: ACTIVE_JOB_SPLIT_DEFAULT_PERCENT,
 	filesLoaded: false,
 	fileActions: new Map(),
 	fileRenderTimer: null,
@@ -118,6 +126,7 @@ const state = {
 };
 
 let probeConfirmResolve = null;
+let outlineContextRevision = 1;
 
 const gcodeView = {
   key: "",
@@ -128,15 +137,19 @@ const gcodeView = {
   camera: null,
   perspCamera: null,
   orthoCamera: null,
-  projection: "perspective",
+  projection: "orthographic",
   cube: null,
   pathGroup: null,
+  contextGroup: null,
+  contextKey: "",
+  contextBounds: null,
+  contextVisible: false,
   progressLine: null,
   marker: null,
   live: null,
   followLive: false,
   target: new THREE.Vector3(),
-  orbit: { theta: -Math.PI / 4, phi: Math.PI / 3, radius: 120 },
+  orbit: { ...gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 }), radius: 120 },
   segments: [],
   cursor: 0,
   has4Axis: false,
@@ -152,6 +165,22 @@ const gcodeView = {
   resizeObserver: null,
   width: 0,
   height: 0,
+  pixelRatio: 0,
+};
+
+const activeGcodeSource = {
+  path: "",
+  signature: "",
+  requestedSignature: "",
+  failedSignature: "",
+  failedMachineState: "",
+  retryAfter: 0,
+  requestID: 0,
+  lines: [],
+  currentLine: 0,
+  userScrollingUntil: 0,
+  renderQueued: false,
+  resizeObserver: null,
 };
 
 const GCODE_KIND_COLORS = {
@@ -162,6 +191,9 @@ const GCODE_KIND_COLORS = {
 };
 
 const GCODE_FOV = 45;
+const GCODE_RENDER_PIXEL_BUDGET = 12_000_000;
+const GCODE_ORBIT_DRAG_RAD_PER_PX = 0.008;
+const GCODE_CUBE_DRAG_THRESHOLD_PX = 4;
 // Same axis palette as the Control tab work-area origin marker.
 const GCODE_AXIS_COLORS = { x: "#f05b5b", y: "#6fa3ff", z: "#44c27b" };
 
@@ -432,6 +464,7 @@ function defaultOutlineState() {
     fieldReferenceKind: "",
     fieldProbePreview: [],
     fieldProbeResults: [],
+    fieldProbeComplete: false,
     fieldProbePending: false,
     fieldProbeIndex: 0,
     fieldProbeTooDense: false,
@@ -1918,6 +1951,9 @@ function renderWorkArea() {
   const target = state.jog.target;
   setWorkAreaMarker("workarea-spindle", spindle);
   setWorkAreaMarker("workarea-target", target);
+  if (gcodeView.renderer && syncGcodeContextOverlay() && state.activeTab === "active-job") {
+    renderActiveGcode();
+  }
 }
 
 function renderWorkAreaBoundary() {
@@ -2008,6 +2044,10 @@ function cloneFloorProbe(probe) {
   };
 }
 
+function markGcodeContextOverlayDirty() {
+  outlineContextRevision++;
+}
+
 function outlineSnapshot() {
   const o = state.outline;
   return {
@@ -2082,6 +2122,7 @@ function startOutlineCapture() {
   const floorProbe = cloneFloorProbe(current.floorProbe);
   const pos = currentOutlineCapturePosition();
   state.outline = defaultOutlineState();
+  markGcodeContextOverlayDirty();
   state.outline.active = true;
   state.outline.curveFit = keepCurveFit;
   if (Number.isFinite(floorZ)) {
@@ -2106,6 +2147,7 @@ function endOutlineCapture() {
   const floorZ = finiteOr(current.floorMachineZ, NaN);
   const floorProbe = cloneFloorProbe(current.floorProbe);
   state.outline = defaultOutlineState();
+  markGcodeContextOverlayDirty();
   state.outline.curveFit = keepCurveFit;
   if (Number.isFinite(floorZ)) {
     state.outline.floorMachineZ = floorZ;
@@ -2570,7 +2612,9 @@ function workAreaMMRadius(mm) {
 
 function clearFieldProbeData(keepPreview = false) {
   const o = state.outline;
+  markGcodeContextOverlayDirty();
   o.fieldProbeResults = [];
+  o.fieldProbeComplete = false;
   o.fieldReferenceMachineZ = null;
   o.fieldReferenceKind = "";
   o.fieldProbeIndex = 0;
@@ -2581,6 +2625,7 @@ function clearFieldProbeData(keepPreview = false) {
 
 function updateFieldProbePreview() {
   const o = state.outline;
+  markGcodeContextOverlayDirty();
   if (!o.closed || o.points.length < 3) {
     o.fieldProbePreview = [];
     o.fieldProbeTooDense = false;
@@ -4284,6 +4329,7 @@ function rebaseOutlineToFloor(machineZ) {
     const z = Number(point.machine_z);
     if (Number.isFinite(z)) point.z = z - floorZ;
   }
+  markGcodeContextOverlayDirty();
 }
 
 async function probeFloor() {
@@ -4412,6 +4458,8 @@ async function runFieldProbe() {
   }
   o.fieldProbePending = true;
   o.fieldProbeResults = [];
+  o.fieldProbeComplete = false;
+  markGcodeContextOverlayDirty();
   o.fieldReferenceMachineZ = referenceZ;
   o.fieldReferenceKind = hasFloor ? "floor" : "work_origin";
   o.fieldProbeIndex = 0;
@@ -4446,6 +4494,7 @@ async function runFieldProbe() {
       });
       renderWorkArea();
     }
+    o.fieldProbeComplete = true;
     o.feedback = "Field Z probe completed with " + o.fieldProbeResults.length + " samples.";
     o.feedbackKind = "ok";
   } catch (e) {
@@ -4454,6 +4503,7 @@ async function runFieldProbe() {
   } finally {
     o.fieldProbePending = false;
     o.fieldProbeIndex = 0;
+    markGcodeContextOverlayDirty();
     renderOutlineCapture();
     renderWorkArea();
     pollMachine();
@@ -4656,6 +4706,7 @@ function outlineJSONDocument() {
       floor_probe: cloneFloorProbe(o.floorProbe),
       field_reference_machine_z: Number.isFinite(o.fieldReferenceMachineZ) ? o.fieldReferenceMachineZ : null,
       field_reference_kind: o.fieldReferenceKind || "",
+      field_probe_complete: !!o.fieldProbeComplete,
       field_probe_results: o.fieldProbeResults.map(cloneOutlinePoint),
     },
   };
@@ -4693,6 +4744,7 @@ async function loadOutlineFile(file) {
 
 function installLoadedOutlineState(next) {
   state.outline = next;
+  markGcodeContextOverlayDirty();
   if (next.closed) updateFieldProbePreview();
 }
 
@@ -4730,6 +4782,7 @@ function outlineStateFromJSON(doc) {
     throw new Error("field probe samples are invalid");
   }
   next.fieldProbeResults = samples.map((point, i) => outlinePointFromJSON(point, i + 1));
+  next.fieldProbeComplete = raw.field_probe_complete === true && next.fieldProbeResults.length >= 3;
   return next;
 }
 
@@ -6041,43 +6094,6 @@ function appendJobActions(box, job) {
   if (actions.children.length) box.appendChild(actions);
 }
 
-function renderRuns() {
-  const div = document.getElementById("run-history");
-  const runs = Array.isArray(state.runs) ? state.runs.slice(0, 8) : [];
-  document.getElementById("run-count").textContent = String(runs.length);
-  const clear = document.getElementById("run-history-clear");
-  if (clear) clear.disabled = runs.length === 0;
-  if (!runs.length) {
-    div.innerHTML = `<div class="empty">No observed runs yet.</div>`;
-    return;
-  }
-  div.innerHTML = "";
-  for (const run of runs) {
-    const row = document.createElement("div");
-    row.className = "run-row";
-    const states = (run.state_transitions || []).map((s) => s.state || "Unknown").filter(Boolean);
-    const alarms = (run.alarms || []).map((a) => a.halt_reason ? `H:${a.halt_reason.code} ${a.halt_reason.message}` : "Alarm");
-    const feed = lastOverride(run.feed_overrides);
-    const spindle = lastOverride(run.spindle_overrides);
-    const detail = [
-      states.length ? "states: " + states.join(" -> ") : "",
-      alarms.length ? "alarm: " + alarms.join(", ") : "",
-      feed ? `feed ${Math.round(feed.override)}%` : "",
-      spindle ? `spindle ${Math.round(spindle.override)}%` : "",
-    ].filter(Boolean).join("; ");
-    row.innerHTML = `
-      <div><div class="run-title">${escapeHtml(run.file || "Observed run")}</div><div class="muted">${escapeHtml(run.source || "unknown")}${run.active ? " · active" : ""}</div></div>
-      <div class="muted">${escapeHtml(fmtTime(run.started_at))}</div>
-      <div class="muted">${escapeHtml(fmtDuration(run.duration_ms || 0))}</div>
-      <div>${escapeHtml(detail || "No transitions recorded yet.")}</div>`;
-    div.appendChild(row);
-  }
-}
-
-function lastOverride(values) {
-  return Array.isArray(values) && values.length ? values[values.length - 1] : null;
-}
-
 function renderActiveGcode() {
   const active = state.activeGcode || {};
   const title = document.getElementById("active-gcode-title");
@@ -6090,6 +6106,7 @@ function renderActiveGcode() {
     meta.textContent = "-";
     run.disabled = false;
     setSoftDisabled(run, true);
+    ensureActiveGcodeSource(null);
     drawGcodePreview(null);
     renderActiveJobProgress(null);
     if (!state.activeGcodePending) clearNotice("active-gcode");
@@ -6097,6 +6114,7 @@ function renderActiveGcode() {
   }
 
   title.textContent = relPath(active.path);
+  ensureActiveGcodeSource(active);
   const preview = active.preview || {};
   const live = activeJobPreviewState(state.machine, preview, active.path);
   const tools = Array.isArray(preview.tools) && preview.tools.length ? " tools T" + preview.tools.join(", T") : "";
@@ -6128,6 +6146,512 @@ function renderActiveGcode() {
   }
   renderActiveJobProgress(live, preview);
   drawGcodePreview(preview, live);
+}
+
+function activeGcodeSourceSignature(active) {
+  if (!active?.path) return "";
+  const entry = active.entry || state.files.get(active.path) || {};
+  const preview = active.preview || {};
+  return JSON.stringify([
+    active.path,
+    entry.md5 || "",
+    Number(entry.size) || 0,
+    entry.mtime || "",
+    Number(preview.line_count) || 0,
+    active.updated_at || "",
+  ]);
+}
+
+function splitGcodeSourceLines(text) {
+  if (!text) return [];
+  const lines = String(text).split(/\r\n|\n|\r/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+async function ensureActiveGcodeSource(active) {
+  const path = String(active?.path || "");
+  if (!path) {
+    resetActiveGcodeSource();
+    return;
+  }
+  const signature = activeGcodeSourceSignature(active);
+  if (activeGcodeSource.signature === signature || activeGcodeSource.requestedSignature === signature) return;
+  if (
+    activeGcodeSource.failedSignature === signature &&
+    Date.now() < activeGcodeSource.retryAfter &&
+    !(activeGcodeSource.failedMachineState !== "Idle" && state.machine?.state === "Idle")
+  ) return;
+
+  const requestID = ++activeGcodeSource.requestID;
+  const pathChanged = activeGcodeSource.path !== path;
+  activeGcodeSource.path = path;
+  activeGcodeSource.requestedSignature = signature;
+  activeGcodeSource.failedSignature = "";
+  activeGcodeSource.failedMachineState = "";
+  if (pathChanged || (activeGcodeSource.signature && activeGcodeSource.signature !== signature)) {
+    activeGcodeSource.signature = "";
+    activeGcodeSource.lines = [];
+    activeGcodeSource.currentLine = 0;
+    const scroll = document.getElementById("active-gcode-source-scroll");
+    if (scroll) scroll.scrollTop = 0;
+    renderActiveGcodeSource();
+  }
+  const scroll = document.getElementById("active-gcode-source-scroll");
+  scroll?.setAttribute("aria-busy", "true");
+  try {
+    const response = await request(apiFileURL(path));
+    const text = await response.text();
+    if (requestID !== activeGcodeSource.requestID || activeGcodeSource.path !== path) return;
+    activeGcodeSource.lines = splitGcodeSourceLines(text);
+    activeGcodeSource.signature = signature;
+    activeGcodeSource.requestedSignature = "";
+    activeGcodeSource.failedSignature = "";
+    activeGcodeSource.failedMachineState = "";
+    activeGcodeSource.retryAfter = 0;
+    clearNotice("active-gcode-source");
+    renderActiveGcodeSource();
+    scrollActiveGcodeSourceToLine(activeGcodeSource.currentLine, true);
+  } catch (error) {
+    if (requestID !== activeGcodeSource.requestID || activeGcodeSource.path !== path) return;
+    activeGcodeSource.requestedSignature = "";
+    activeGcodeSource.failedSignature = signature;
+    activeGcodeSource.failedMachineState = String(state.machine?.state || "");
+    activeGcodeSource.retryAfter = Date.now() + 30000;
+    setNotice("Gcode source unavailable: " + error.message, "error", "active-gcode-source");
+    renderActiveGcodeSource();
+  } finally {
+    if (requestID === activeGcodeSource.requestID) {
+      document.getElementById("active-gcode-source-scroll")?.removeAttribute("aria-busy");
+    }
+  }
+}
+
+function resetActiveGcodeSource() {
+  if (!activeGcodeSource.path && !activeGcodeSource.lines.length && !activeGcodeSource.requestedSignature) {
+    renderActiveGcodeSource();
+    return;
+  }
+  activeGcodeSource.requestID++;
+  activeGcodeSource.path = "";
+  activeGcodeSource.signature = "";
+  activeGcodeSource.requestedSignature = "";
+  activeGcodeSource.failedSignature = "";
+  activeGcodeSource.failedMachineState = "";
+  activeGcodeSource.retryAfter = 0;
+  activeGcodeSource.lines = [];
+  activeGcodeSource.currentLine = 0;
+  clearNotice("active-gcode-source");
+  const scroll = document.getElementById("active-gcode-source-scroll");
+  if (scroll) {
+    scroll.scrollTop = 0;
+    scroll.removeAttribute("aria-busy");
+  }
+  renderActiveGcodeSource();
+}
+
+function gcodeSourceWindow(lineCount, scrollTop, viewportHeight, rowHeight = GCODE_SOURCE_ROW_HEIGHT, overscan = GCODE_SOURCE_OVERSCAN) {
+  if (lineCount <= 0 || rowHeight <= 0) return { start: 0, end: 0 };
+  const first = Math.max(0, Math.floor(Math.max(0, scrollTop) / rowHeight));
+  const visible = Math.max(1, Math.ceil(Math.max(0, viewportHeight) / rowHeight));
+  return {
+    start: Math.max(0, first - overscan),
+    end: Math.min(lineCount, first + visible + overscan),
+  };
+}
+
+function scheduleActiveGcodeSourceRender() {
+  if (activeGcodeSource.renderQueued) return;
+  activeGcodeSource.renderQueued = true;
+  requestAnimationFrame(() => {
+    activeGcodeSource.renderQueued = false;
+    renderActiveGcodeSource();
+  });
+}
+
+function renderActiveGcodeSource() {
+  const scroll = document.getElementById("active-gcode-source-scroll");
+  const spacer = document.getElementById("active-gcode-source-spacer");
+  const container = document.getElementById("active-gcode-source-lines");
+  const empty = document.getElementById("active-gcode-source-empty");
+  const position = document.getElementById("active-gcode-source-position");
+  if (!scroll || !spacer || !container || !empty || !position) return;
+
+  const lines = activeGcodeSource.lines;
+  spacer.style.height = `${lines.length * GCODE_SOURCE_ROW_HEIGHT}px`;
+  position.textContent = activeGcodeSource.currentLine > 0
+    ? `Ln ${activeGcodeSource.currentLine} / ${lines.length || "—"}`
+    : (lines.length ? `${lines.length} lines` : "-");
+  empty.textContent = activeGcodeSource.path ? "No gcode source loaded" : "No gcode loaded";
+  empty.hidden = lines.length > 0 || !!activeGcodeSource.requestedSignature;
+
+  const windowRange = gcodeSourceWindow(
+    lines.length,
+    scroll.scrollTop,
+    scroll.clientHeight,
+  );
+  const fragment = document.createDocumentFragment();
+  for (let index = windowRange.start; index < windowRange.end; index++) {
+    const lineNumber = index + 1;
+    const row = document.createElement("div");
+    row.id = `active-gcode-source-line-${lineNumber}`;
+    row.className = "active-gcode-source-line" + (lineNumber === activeGcodeSource.currentLine ? " current" : "");
+    row.style.transform = `translateY(${index * GCODE_SOURCE_ROW_HEIGHT}px)`;
+    if (lineNumber === activeGcodeSource.currentLine) row.setAttribute("aria-current", "step");
+
+    const number = document.createElement("span");
+    number.className = "active-gcode-source-number";
+    number.textContent = String(lineNumber);
+    number.setAttribute("aria-hidden", "true");
+    const code = document.createElement("span");
+    code.className = "active-gcode-source-code";
+    code.textContent = lines[index] || " ";
+    row.append(number, code);
+    fragment.appendChild(row);
+  }
+  container.replaceChildren(fragment);
+}
+
+function gcodeSourceLineForCursor(segments, cursor) {
+  if (!Array.isArray(segments) || !segments.length || cursor <= 0) return 0;
+  const index = Math.min(segments.length, Math.max(1, Math.trunc(cursor))) - 1;
+  return Math.max(0, Math.trunc(Number(segments[index]?.line) || 0));
+}
+
+function syncActiveGcodeSourceLine(live = null) {
+  const liveLine = gcodeView.followLive ? Math.trunc(Number(live?.playedLines) || 0) : 0;
+  const line = liveLine > 0
+    ? liveLine
+    : gcodeSourceLineForCursor(gcodeView.segments, gcodeView.cursor);
+  const changed = activeGcodeSource.currentLine !== line;
+  activeGcodeSource.currentLine = line;
+  if (changed) renderActiveGcodeSource();
+  const forceFollow = gcodeTimelineLocallyOwned();
+  if (line > 0 && (forceFollow || Date.now() >= activeGcodeSource.userScrollingUntil)) {
+    scrollActiveGcodeSourceToLine(line, forceFollow);
+  }
+}
+
+function scrollActiveGcodeSourceToLine(line, force = false) {
+  const scroll = document.getElementById("active-gcode-source-scroll");
+  const lineCount = activeGcodeSource.lines.length;
+  if (!scroll || line <= 0 || lineCount <= 0) return;
+  const targetLine = Math.min(lineCount, Math.max(1, Math.trunc(line)));
+  const top = (targetLine - 1) * GCODE_SOURCE_ROW_HEIGHT;
+  const margin = Math.min(80, Math.max(GCODE_SOURCE_ROW_HEIGHT, scroll.clientHeight * 0.2));
+  const visibleTop = scroll.scrollTop + margin;
+  const visibleBottom = scroll.scrollTop + scroll.clientHeight - margin;
+  if (!force && top >= visibleTop && top + GCODE_SOURCE_ROW_HEIGHT <= visibleBottom) return;
+  scroll.scrollTop = Math.max(0, top - Math.max(0, (scroll.clientHeight - GCODE_SOURCE_ROW_HEIGHT) / 2));
+  renderActiveGcodeSource();
+}
+
+function activeJobOverlayOriginFrom(liveOrigin, outline) {
+  const capturedOrigin = cloneOutlineOrigin(outline?.origin) || {};
+  const origin = {};
+  for (const axis of ["x", "y"]) {
+    const live = axisValue(liveOrigin, axis);
+    const captured = axisValue(capturedOrigin, axis);
+    const value = live === null ? captured : live;
+    if (value !== null) origin[axis] = value;
+  }
+  const liveZ = axisValue(liveOrigin, "z");
+  const fieldReferenceZ = outline?.fieldReferenceMachineZ === null || outline?.fieldReferenceMachineZ === ""
+    ? NaN
+    : Number(outline?.fieldReferenceMachineZ);
+  const floorZ = outline?.floorMachineZ === null || outline?.floorMachineZ === ""
+    ? NaN
+    : Number(outline?.floorMachineZ);
+  const capturedZ = axisValue(capturedOrigin, "z");
+  const fallbackZ = Number.isFinite(fieldReferenceZ)
+    ? fieldReferenceZ
+    : (Number.isFinite(floorZ) ? floorZ : capturedZ);
+  const z = liveZ === null ? fallbackZ : liveZ;
+  if (z !== null && Number.isFinite(z)) origin.z = z;
+  return Object.keys(origin).length ? origin : null;
+}
+
+function activeJobOverlayOrigin() {
+  return activeJobOverlayOriginFrom(currentWorkOrigin(), state.outline);
+}
+
+function activeJobOverlayPoint(point, origin) {
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  const oz = axisValue(origin, "z");
+  const machineX = Number(point?.machine_x);
+  const machineY = Number(point?.machine_y);
+  const machineZ = Number(point?.machine_z);
+  const storedX = Number(point?.x);
+  const storedY = Number(point?.y);
+  const storedZ = Number(point?.z);
+  const x = Number.isFinite(machineX) && ox !== null ? machineX - ox : storedX;
+  const y = Number.isFinite(machineY) && oy !== null ? machineY - oy : storedY;
+  const z = Number.isFinite(machineZ) && oz !== null ? machineZ - oz : storedZ;
+  return [x, y, z].every(Number.isFinite) ? { ...point, x, y, z } : null;
+}
+
+function probePlanMatchesResults(plan, results, tolerance = 0.05) {
+  if (!Array.isArray(plan) || !Array.isArray(results) || plan.length !== results.length || !plan.length) return false;
+  const cellSize = Math.max(0.000001, Number(tolerance) || 0.05);
+  const buckets = new Map();
+  const cellKey = (x, y) => `${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`;
+  for (let index = 0; index < results.length; index++) {
+    const x = Number(results[index]?.x);
+    const y = Number(results[index]?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    const key = cellKey(x, y);
+    const bucket = buckets.get(key) || [];
+    bucket.push(index);
+    buckets.set(key, bucket);
+  }
+  const used = new Set();
+  for (const point of plan) {
+    const x = Number(point?.x);
+    const y = Number(point?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    const cx = Math.floor(x / cellSize);
+    const cy = Math.floor(y / cellSize);
+    let best = -1;
+    let bestDistance = Infinity;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (const candidate of buckets.get(`${cx + dx},${cy + dy}`) || []) {
+          if (used.has(candidate)) continue;
+          const result = results[candidate];
+          const distance = Math.hypot(x - Number(result.x), y - Number(result.y));
+          if (distance <= cellSize && distance < bestDistance) {
+            best = candidate;
+            bestDistance = distance;
+          }
+        }
+      }
+    }
+    if (best < 0) return false;
+    used.add(best);
+  }
+  return used.size === results.length;
+}
+
+function activeJobFieldProbeComplete(outline) {
+  const plan = outline?.fieldProbePreview || [];
+  const results = outline?.fieldProbeResults || [];
+  return !!outline?.active &&
+    !!outline?.closed &&
+    !outline?.fieldProbePending &&
+    results.length >= 3 &&
+    (outline?.fieldProbeComplete === true || (plan.length >= 3 && probePlanMatchesResults(plan, results)));
+}
+
+function interpolateOutlinePathZ(point, source, closed) {
+  if (!Array.isArray(source) || !source.length) return 0;
+  if (source.length === 1) return Number(source[0]?.z) || 0;
+  const x = Number(point?.x);
+  const y = Number(point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return Number(source[0]?.z) || 0;
+  const segmentCount = closed ? source.length : source.length - 1;
+  let bestDistanceSq = Infinity;
+  let bestZ = Number(source[0]?.z) || 0;
+  for (let index = 0; index < segmentCount; index++) {
+    const a = source[index];
+    const b = source[(index + 1) % source.length];
+    const ax = Number(a?.x);
+    const ay = Number(a?.y);
+    const bx = Number(b?.x);
+    const by = Number(b?.y);
+    if (![ax, ay, bx, by].every(Number.isFinite)) continue;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lengthSq = dx * dx + dy * dy;
+    const t = lengthSq > 0
+      ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / lengthSq))
+      : 0;
+    const projectedX = ax + dx * t;
+    const projectedY = ay + dy * t;
+    const distanceSq = (x - projectedX) ** 2 + (y - projectedY) ** 2;
+    if (distanceSq >= bestDistanceSq) continue;
+    const az = Number(a?.z);
+    const bz = Number(b?.z);
+    if (Number.isFinite(az) && Number.isFinite(bz)) bestZ = az + (bz - az) * t;
+    else if (Number.isFinite(az)) bestZ = az;
+    else if (Number.isFinite(bz)) bestZ = bz;
+    bestDistanceSq = distanceSq;
+  }
+  return bestZ;
+}
+
+function activeJobContextOverlayData(outline, origin) {
+  if (!outline?.active || !Array.isArray(outline.points) || !outline.points.length) {
+    return { outline: [], markers: [], surface: null, bounds: null, closed: false };
+  }
+  const source = outline.points.map((point) => activeJobOverlayPoint(point, origin)).filter(Boolean);
+  const effective = effectiveOutlineGeometry(source, !!outline.closed, !!outline.curveFit);
+  let outlinePoints = effective.points.map((point) => ({
+    x: point.x,
+    y: point.y,
+    z: interpolateOutlinePathZ(point, source, !!outline.closed),
+  }));
+  let markers = source.map((point) => ({ x: point.x, y: point.y, z: point.z }));
+  let surface = null;
+
+  if (!effective.limited && activeJobFieldProbeComplete(outline)) {
+    const samples = outline.fieldProbeResults
+      .map((point) => activeJobOverlayPoint(point, origin))
+      .filter((point) => point && [point.x, point.y, point.z].every(Number.isFinite));
+    let polygon = effective.points.map((point) => ({ x: point.x, y: point.y }));
+    if (
+      polygon.length > 2 &&
+      Math.hypot(polygon[0].x - polygon.at(-1).x, polygon[0].y - polygon.at(-1).y) <= 0.00005
+    ) {
+      polygon = polygon.slice(0, -1);
+    }
+    try {
+      const meshVertices = buildHeightMeshVertices(samples, polygon);
+      const points = [];
+      for (const point of meshVertices) {
+        if (points.some((seen) => Math.hypot(seen.x - point.x, seen.y - point.y) <= 0.000001)) continue;
+        points.push(point);
+      }
+      const faces = points.length >= 3 ? constrainedOutlineTriangles(points, polygon) : [];
+      if (faces.length) {
+        surface = { points, faces };
+        outlinePoints = outlinePoints.map((point) => ({
+          ...point,
+          z: interpolateZ(point.x, point.y, samples),
+        }));
+        markers = markers.map((point) => ({
+          ...point,
+          z: interpolateZ(point.x, point.y, samples),
+        }));
+      }
+    } catch {
+      surface = null;
+    }
+  }
+
+  const bounds = activeJobOverlayBounds([
+    ...outlinePoints,
+    ...markers,
+    ...(surface?.points || []),
+  ]);
+  return { outline: outlinePoints, markers, surface, bounds, closed: !!outline.closed };
+}
+
+function activeJobOverlayBounds(points) {
+  const valid = (points || []).filter((point) => [point?.x, point?.y, point?.z].every(Number.isFinite));
+  if (!valid.length) return null;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const point of valid) {
+    for (const [index, value] of [point.x, point.y, point.z].entries()) {
+      min[index] = Math.min(min[index], value);
+      max[index] = Math.max(max[index], value);
+    }
+  }
+  return { min, max };
+}
+
+function combineGcodeBounds(a, b) {
+  const valid = (bounds) =>
+    bounds && [0, 1, 2].every((index) => Number.isFinite(Number(bounds.min?.[index])) && Number.isFinite(Number(bounds.max?.[index])));
+  if (!valid(a)) return valid(b) ? { min: b.min.slice(0, 3), max: b.max.slice(0, 3) } : null;
+  if (!valid(b)) return { min: a.min.slice(0, 3), max: a.max.slice(0, 3) };
+  return {
+    min: [0, 1, 2].map((index) => Math.min(Number(a.min[index]), Number(b.min[index]))),
+    max: [0, 1, 2].map((index) => Math.max(Number(a.max[index]), Number(b.max[index]))),
+  };
+}
+
+function activeJobContextOverlayKey(origin) {
+  const coord = (axis) => {
+    const value = axisValue(origin, axis);
+    return value === null ? "-" : Number(value).toFixed(4);
+  };
+  return `${outlineContextRevision}:${coord("x")}:${coord("y")}:${coord("z")}`;
+}
+
+function syncGcodeContextOverlay() {
+  if (!gcodeView.contextGroup) return false;
+  const origin = activeJobOverlayOrigin();
+  const key = activeJobContextOverlayKey(origin);
+  if (gcodeView.contextKey === key) return false;
+  const data = activeJobContextOverlayData(state.outline, origin);
+  clearThreeGroup(gcodeView.contextGroup);
+  rebuildGcodeContextOverlay(data);
+  gcodeView.contextKey = key;
+  gcodeView.contextBounds = data.bounds;
+  gcodeView.contextVisible = !!data.bounds;
+  scheduleGcodeRender();
+  return true;
+}
+
+function rebuildGcodeContextOverlay(data) {
+  const group = gcodeView.contextGroup;
+  if (!group) return;
+  const outlineColor = data.closed ? 0x44c27b : 0x57a6d6;
+  if (data.surface?.points?.length && data.surface.faces?.length) {
+    const geometry = new THREE.BufferGeometry();
+    const positions = [];
+    for (const point of data.surface.points) {
+      const world = gcodeWorldPoint([point.x, point.y, point.z, 0], false);
+      positions.push(world.x, world.y, world.z);
+    }
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(data.surface.faces.flat());
+    const mesh = new THREE.Mesh(
+      geometry,
+      new THREE.MeshBasicMaterial({
+        color: 0x44c27b,
+        transparent: true,
+        opacity: 0.16,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    mesh.renderOrder = -10;
+    group.add(mesh);
+    const wire = new THREE.LineSegments(
+      new THREE.WireframeGeometry(geometry),
+      new THREE.LineBasicMaterial({
+        color: 0x72d69e,
+        transparent: true,
+        opacity: 0.2,
+        depthWrite: false,
+      }),
+    );
+    wire.renderOrder = -9;
+    group.add(wire);
+  }
+  if (data.outline.length >= 2) {
+    const points = data.outline.map((point) => gcodeWorldPoint([point.x, point.y, point.z, 0], false));
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({
+        color: outlineColor,
+        transparent: true,
+        opacity: 0.92,
+        depthTest: false,
+      }),
+    );
+    line.renderOrder = -8;
+    group.add(line);
+  }
+  if (data.markers.length) {
+    const points = data.markers.map((point) => gcodeWorldPoint([point.x, point.y, point.z, 0], false));
+    const markers = new THREE.Points(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.PointsMaterial({
+        color: outlineColor,
+        size: 4,
+        sizeAttenuation: false,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+      }),
+    );
+    markers.renderOrder = -7;
+    group.add(markers);
+  }
 }
 
 function renderActiveJobProgress(live, preview = {}) {
@@ -6206,27 +6730,57 @@ function previewBoundsText(bounds) {
 
 function drawGcodePreview(preview, live = null) {
   const segments = Array.isArray(preview?.segments) ? preview.segments : [];
-  if (!segments.length || !preview?.bounds) {
+  const hasToolpath = segments.length > 0 && !!preview?.bounds;
+  const hasContextCandidate = !!state.outline?.active && !!state.outline?.points?.length;
+  if (!hasToolpath && !hasContextCandidate) {
+    clearGcodeScene();
+    gcodeView.live = live;
+    gcodeView.followLive = !!live;
+    setGcodePreviewEmpty("No plotted moves");
+    updateGcodeTimeline(0);
+    syncActiveGcodeSourceLine(live);
+    return;
+  }
+  if (!ensureGcodeViewer()) {
+    gcodeView.segments = hasToolpath ? segments : [];
+    gcodeView.live = live;
+    if (live && !gcodeTimelineLocallyOwned()) {
+      gcodeView.cursor = live.cursor;
+      gcodeView.followLive = true;
+    } else {
+      if (!gcodeTimelineLocallyOwned()) gcodeView.cursor = gcodeView.segments.length;
+      gcodeView.cursor = Math.max(0, Math.min(gcodeView.segments.length, gcodeView.cursor));
+      if (!live) gcodeView.followLive = false;
+    }
+    updateGcodeTimeline(gcodeView.segments.length);
+    syncActiveGcodeSourceLine(live);
+    return;
+  }
+  syncGcodeContextOverlay();
+  if (!hasToolpath && !gcodeView.contextVisible) {
     clearGcodeScene();
     setGcodePreviewEmpty("No plotted moves");
     updateGcodeTimeline(0);
+    syncActiveGcodeSourceLine(live);
     return;
   }
-  if (!ensureGcodeViewer()) return;
-  const key = [
+  const pathKey = hasToolpath ? [
     state.activeGcode?.path || "",
     preview.line_count || 0,
     preview.plotted_segments || segments.length,
     preview.total_distance || 0,
     preview.has_4axis ? "4" : "3",
-  ].join(":");
+  ].join(":") : "context-only";
+  const key = `${pathKey}|${gcodeView.contextKey}`;
+  const sceneBounds = combineGcodeBounds(hasToolpath ? preview.bounds : null, gcodeView.contextBounds);
   if (gcodeView.key !== key) {
+    const renderedSegments = hasToolpath ? segments : [];
     gcodeView.key = key;
-    gcodeView.segments = segments;
-    gcodeView.has4Axis = !!preview.has_4axis;
-    gcodeView.cursor = live ? live.cursor : segments.length;
-    rebuildGcodeScene(preview, segments);
-    fitGcodeCamera(preview.bounds);
+    gcodeView.segments = renderedSegments;
+    gcodeView.has4Axis = hasToolpath && !!preview.has_4axis;
+    gcodeView.cursor = live ? live.cursor : renderedSegments.length;
+    rebuildGcodeScene({ ...preview, bounds: sceneBounds }, renderedSegments);
+    if (sceneBounds) fitGcodeCamera(sceneBounds);
   }
   gcodeView.live = live;
   if (live && !gcodeTimelineLocallyOwned()) {
@@ -6236,9 +6790,16 @@ function drawGcodePreview(preview, live = null) {
     gcodeView.followLive = false;
   }
   setGcodePreviewEmpty("");
-  updateGcodeTimeline(segments.length);
+  updateGcodeTimeline(gcodeView.segments.length);
   updateGcodeProgress();
   scheduleGcodeRender();
+}
+
+function gcodeRenderPixelRatio(width = 0, height = 0, pixelBudget = GCODE_RENDER_PIXEL_BUDGET) {
+  const deviceRatio = Math.max(1, Number(globalThis.devicePixelRatio) || 1);
+  if (!(width > 0 && height > 0 && pixelBudget > 0)) return deviceRatio;
+  const budgetRatio = Math.sqrt(pixelBudget / (width * height));
+  return Math.max(1, Math.min(deviceRatio, budgetRatio));
 }
 
 function ensureGcodeViewer() {
@@ -6253,7 +6814,8 @@ function ensureGcodeViewer() {
     setGcodePreviewEmpty("3D preview unavailable");
     return false;
   }
-  gcodeView.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
+  gcodeView.pixelRatio = gcodeRenderPixelRatio();
+  gcodeView.renderer.setPixelRatio(gcodeView.pixelRatio);
   gcodeView.renderer.setClearColor(0x202832, 1);
   gcodeView.scene = new THREE.Scene();
   gcodeView.perspCamera = new THREE.PerspectiveCamera(GCODE_FOV, 1, 0.1, 100000);
@@ -6261,6 +6823,8 @@ function ensureGcodeViewer() {
   gcodeView.camera = gcodeView.projection === "orthographic" ? gcodeView.orthoCamera : gcodeView.perspCamera;
   gcodeView.pathGroup = new THREE.Group();
   gcodeView.scene.add(gcodeView.pathGroup);
+  gcodeView.contextGroup = new THREE.Group();
+  gcodeView.scene.add(gcodeView.contextGroup);
   const markerGeometry = new THREE.SphereGeometry(1, 16, 12);
   const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xd99a3a });
   gcodeView.marker = new THREE.Mesh(markerGeometry, markerMaterial);
@@ -6304,8 +6868,7 @@ function bindGcodeOrbitControls(canvas) {
       canvas.classList.add("pan-mode");
       panGcodeCamera(dx, dy);
     } else {
-      gcodeView.orbit.theta -= dx * 0.008;
-      gcodeView.orbit.phi = Math.max(0.08, Math.min(Math.PI - 0.08, gcodeView.orbit.phi - dy * 0.008));
+      rotateGcodeOrbitByDrag(gcodeView.orbit, dx, dy);
       updateGcodeCamera();
     }
   });
@@ -6348,6 +6911,15 @@ function bindGcodeOrbitControls(canvas) {
   });
 }
 
+function rotateGcodeOrbitByDrag(orbit, dx, dy) {
+  orbit.theta -= dx * GCODE_ORBIT_DRAG_RAD_PER_PX;
+  orbit.phi = Math.max(
+    0.08,
+    Math.min(Math.PI - 0.08, orbit.phi - dy * GCODE_ORBIT_DRAG_RAD_PER_PX),
+  );
+  return orbit;
+}
+
 function isTypingTarget(el) {
   if (!el) return false;
   const tag = String(el.tagName || "").toLowerCase();
@@ -6355,6 +6927,8 @@ function isTypingTarget(el) {
 }
 
 function rebuildGcodeScene(preview, segments) {
+  // Toolpath and outline/probe context have separate cache keys and lifecycles.
+  // Context is rebuilt by syncGcodeContextOverlay and must survive path rebuilds.
   clearThreeGroup(gcodeView.pathGroup);
   disposeObject(gcodeView.progressLine);
   gcodeView.progressLine = null;
@@ -6403,9 +6977,13 @@ function addGcodeGrid(bounds) {
   const size = Math.max(spanX, spanY, 20) * 1.15;
   const divisions = Math.max(4, Math.min(80, Math.round(size / 10)));
   const grid = new THREE.GridHelper(size, divisions, 0x5f6c78, 0x303946);
-  grid.position.x = (Number(min[0]) + Number(max[0])) / 2;
-  grid.position.y = Number(min[2]) || 0;
-  grid.position.z = -(Number(min[1]) + Number(max[1])) / 2;
+  const center = gcodeWorldCoordinates([
+    (Number(min[0]) + Number(max[0])) / 2,
+    (Number(min[1]) + Number(max[1])) / 2,
+    Number(min[2]) || 0,
+    0,
+  ], false);
+  grid.position.set(...center);
   gcodeView.pathGroup.add(grid);
   // Origin marker with axis legends sits at the work origin (machine 0,0,0).
   gcodeView.pathGroup.add(buildGcodeOriginAxes(Math.max(5, size * 0.12)));
@@ -6446,21 +7024,23 @@ function buildGcodeOriginAxes(len) {
 }
 
 function makeGcodeAxisLabel(text, color) {
+  const size = 256;
   const c = document.createElement("canvas");
-  c.width = 128;
-  c.height = 128;
+  c.width = size;
+  c.height = size;
   const ctx = c.getContext("2d");
-  ctx.font = "700 58px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.font = "700 116px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.lineJoin = "round";
-  ctx.lineWidth = 12;
+  ctx.lineWidth = 24;
   ctx.strokeStyle = "#12171c";
-  ctx.strokeText(text, 64, 64);
+  ctx.strokeText(text, size / 2, size / 2);
   ctx.fillStyle = color;
-  ctx.fillText(text, 64, 64);
+  ctx.fillText(text, size / 2, size / 2);
   const texture = new THREE.CanvasTexture(c);
   texture.colorSpace = THREE.SRGBColorSpace;
+  if (gcodeView.renderer) texture.anisotropy = gcodeView.renderer.capabilities.getMaxAnisotropy();
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
   sprite.renderOrder = 10;
   return sprite;
@@ -6472,10 +7052,14 @@ function clearGcodeScene() {
   if (gcodeView.canvas) gcodeView.canvas.setAttribute("aria-label", "Active gcode preview");
   if (!gcodeView.renderer) return;
   clearThreeGroup(gcodeView.pathGroup);
+  clearThreeGroup(gcodeView.contextGroup);
   disposeObject(gcodeView.progressLine);
   gcodeView.progressLine = null;
   gcodeView.marker.visible = false;
   gcodeView.key = "";
+  gcodeView.contextKey = "";
+  gcodeView.contextBounds = null;
+  gcodeView.contextVisible = false;
   gcodeView.segments = [];
   gcodeView.cursor = 0;
   scheduleGcodeRender();
@@ -6508,7 +7092,7 @@ function fitGcodeCamera(bounds) {
   const cx = (Number(min[0]) + Number(max[0])) / 2;
   const cy = (Number(min[1]) + Number(max[1])) / 2;
   const cz = (Number(min[2]) + Number(max[2])) / 2;
-  gcodeView.target.set(cx || 0, cz || 0, -(cy || 0));
+  gcodeView.target.set(...gcodeWorldCoordinates([cx, cy, cz, 0], false));
   const spanX = Math.abs(Number(max[0]) - Number(min[0]));
   const spanY = Math.abs(Number(max[1]) - Number(min[1]));
   const spanZ = Math.abs(Number(max[2]) - Number(min[2]));
@@ -6623,15 +7207,16 @@ function initGcodeViewCube() {
   } catch (e) {
     return;
   }
-  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
-  renderer.setSize(88, 88, false); // matches the fixed CSS size; the widget may be hidden (0x0) at init
+  const pixelRatio = gcodeRenderPixelRatio();
+  renderer.setPixelRatio(pixelRatio);
+  renderer.setSize(104, 104, false); // matches the fixed CSS size; the widget may be hidden (0x0) at init
   renderer.setClearColor(0x000000, 0);
   const scene = new THREE.Scene();
   const camera = new THREE.OrthographicCamera(-1.75, 1.75, 1.75, -1.75, 0.1, 10);
   camera.position.set(0, 0, 5);
   camera.lookAt(0, 0, 0);
   const materials = VIEWCUBE_FACES.map((face) => new THREE.MeshBasicMaterial({
-    map: makeViewCubeFaceTexture(face.label, face.rotation),
+    map: makeViewCubeFaceTexture(face.label, face.rotation, renderer),
   }));
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), materials);
   const edges = new THREE.LineSegments(
@@ -6640,13 +7225,53 @@ function initGcodeViewCube() {
   );
   edges.scale.setScalar(1.001);
   mesh.add(edges);
+  const hover = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshBasicMaterial({
+      color: 0x57a6d6,
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+    }),
+  );
+  hover.add(new THREE.LineSegments(
+    new THREE.EdgesGeometry(hover.geometry),
+    new THREE.LineBasicMaterial({ color: 0xa9ddff, transparent: true, opacity: 0.95 }),
+  ));
+  hover.visible = false;
+  hover.renderOrder = 3;
+  mesh.add(hover);
   scene.add(mesh);
-  gcodeView.cube = { renderer, scene, camera, mesh, canvas, raycaster: new THREE.Raycaster() };
+  gcodeView.cube = {
+    renderer,
+    scene,
+    camera,
+    mesh,
+    hover,
+    hoverKey: "",
+    canvas,
+    raycaster: new THREE.Raycaster(),
+    width: 104,
+    height: 104,
+    pixelRatio,
+    dragPointerId: null,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragX: 0,
+    dragY: 0,
+    dragging: false,
+    suppressClick: false,
+  };
+  canvas.addEventListener("pointerdown", onGcodeViewCubePointerDown);
+  canvas.addEventListener("pointermove", onGcodeViewCubePointerMove);
+  canvas.addEventListener("pointerup", onGcodeViewCubePointerUp);
+  canvas.addEventListener("pointercancel", onGcodeViewCubePointerCancel);
+  canvas.addEventListener("pointerleave", clearGcodeViewCubeHover);
   canvas.addEventListener("click", onGcodeViewCubeClick);
 }
 
-function makeViewCubeFaceTexture(label, rotation) {
-  const size = 128;
+function makeViewCubeFaceTexture(label, rotation, renderer) {
+  const size = 512;
   const c = document.createElement("canvas");
   c.width = size;
   c.height = size;
@@ -6654,55 +7279,228 @@ function makeViewCubeFaceTexture(label, rotation) {
   ctx.fillStyle = "#232b31";
   ctx.fillRect(0, 0, size, size);
   ctx.strokeStyle = "#3a444d";
-  ctx.lineWidth = 5;
-  ctx.strokeRect(3, 3, size - 6, size - 6);
+  ctx.lineWidth = 16;
+  ctx.strokeRect(8, 8, size - 16, size - 16);
   ctx.translate(size / 2, size / 2);
   ctx.rotate(rotation || 0);
-  ctx.font = "700 22px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.font = "700 96px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 16;
+  ctx.strokeStyle = "#12171c";
+  ctx.strokeText(label, 0, 0);
   ctx.fillStyle = "#b7c0ca";
   ctx.fillText(label, 0, 0);
   const texture = new THREE.CanvasTexture(c);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
   return texture;
 }
 
 function renderGcodeViewCube() {
   const cube = gcodeView.cube;
   if (!cube || !gcodeView.camera) return;
+  syncGcodeViewCubeResolution(cube);
   cube.mesh.quaternion.copy(gcodeView.camera.quaternion).invert();
   cube.renderer.render(cube.scene, cube.camera);
 }
 
-function onGcodeViewCubeClick(e) {
+function syncGcodeViewCubeResolution(cube) {
+  const rect = cube.canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width || 104));
+  const height = Math.max(1, Math.round(rect.height || 104));
+  const pixelRatio = gcodeRenderPixelRatio(width, height);
+  const ratioChanged = Math.abs(cube.pixelRatio - pixelRatio) > 0.001;
+  if (ratioChanged) {
+    cube.pixelRatio = pixelRatio;
+    cube.renderer.setPixelRatio(pixelRatio);
+  }
+  if (cube.width !== width || cube.height !== height || ratioChanged) {
+    cube.width = width;
+    cube.height = height;
+    cube.renderer.setSize(width, height, false);
+  }
+}
+
+function viewCubeTargetComponents(point, faceNormal = null) {
+  const band = 0.55;
+  const target = {
+    x: Math.abs(Number(point?.x) || 0) > band ? Math.sign(Number(point.x)) : 0,
+    y: Math.abs(Number(point?.y) || 0) > band ? Math.sign(Number(point.y)) : 0,
+    z: Math.abs(Number(point?.z) || 0) > band ? Math.sign(Number(point.z)) : 0,
+  };
+  if (target.x === 0 && target.y === 0 && target.z === 0 && faceNormal) {
+    target.x = Math.sign(Number(faceNormal.x) || 0);
+    target.y = Math.sign(Number(faceNormal.y) || 0);
+    target.z = Math.sign(Number(faceNormal.z) || 0);
+  }
+  return target.x === 0 && target.y === 0 && target.z === 0 ? null : target;
+}
+
+function gcodeViewCubeTarget(e) {
   const cube = gcodeView.cube;
-  if (!cube || !gcodeView.camera) return;
+  if (!cube || !gcodeView.camera) return null;
   const rect = cube.canvas.getBoundingClientRect();
   const ndc = {
     x: ((e.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1,
     y: -((e.clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1,
   };
+  cube.mesh.updateMatrixWorld(true);
   cube.raycaster.setFromCamera(ndc, cube.camera);
   const hits = cube.raycaster.intersectObject(cube.mesh, false);
-  if (!hits.length) return;
+  if (!hits.length) return null;
   const p = cube.mesh.worldToLocal(hits[0].point.clone());
-  // Quantize the hit into face/edge/corner zones (cube half-size is 1).
-  const band = 0.55;
-  const dir = new THREE.Vector3(
-    Math.abs(p.x) > band ? Math.sign(p.x) : 0,
-    Math.abs(p.y) > band ? Math.sign(p.y) : 0,
-    Math.abs(p.z) > band ? Math.sign(p.z) : 0,
+  const target = viewCubeTargetComponents(p, hits[0].face?.normal);
+  return target ? new THREE.Vector3(target.x, target.y, target.z) : null;
+}
+
+function setGcodeViewCubeHover(dir) {
+  const cube = gcodeView.cube;
+  if (!cube) return;
+  if (!dir) {
+    clearGcodeViewCubeHover();
+    return;
+  }
+  const key = `${dir.x},${dir.y},${dir.z}`;
+  if (cube.hoverKey === key) return;
+  cube.hoverKey = key;
+  const { dimensions, position } = viewCubeHoverGeometry(dir);
+  cube.hover.scale.set(dimensions[0], dimensions[1], dimensions[2]);
+  cube.hover.position.set(position[0], position[1], position[2]);
+  cube.hover.visible = true;
+  scheduleGcodeRender();
+}
+
+function viewCubeHoverGeometry(dir) {
+  const axes = [Number(dir?.x) || 0, Number(dir?.y) || 0, Number(dir?.z) || 0];
+  const targetAxes = axes.filter((value) => value !== 0).length;
+  const thickness = targetAxes === 1 ? 0.05 : targetAxes === 2 ? 0.12 : 0.18;
+  const dimensions = axes.map((value) => value === 0 ? 1.05 : thickness);
+  const position = axes.map((value, index) =>
+    value === 0 ? 0 : Math.sign(value) * (1 + dimensions[index] / 2 + 0.008)
   );
-  if (dir.lengthSq() === 0 && hits[0].face) dir.copy(hits[0].face.normal);
-  if (dir.lengthSq() === 0) return;
+  return { dimensions, position };
+}
+
+function clearGcodeViewCubeHover() {
+  const cube = gcodeView.cube;
+  if (!cube || (!cube.hover.visible && !cube.hoverKey)) return;
+  cube.hover.visible = false;
+  cube.hoverKey = "";
+  cube.canvas.style.cursor = cube.dragPointerId !== null ? "grabbing" : "default";
+  scheduleGcodeRender();
+}
+
+function onGcodeViewCubePointerDown(e) {
+  const cube = gcodeView.cube;
+  if (!cube || (typeof e.button === "number" && e.button !== 0)) return;
+  if (!gcodeViewCubeTarget(e)) return;
+  cube.dragPointerId = e.pointerId;
+  cube.dragStartX = e.clientX;
+  cube.dragStartY = e.clientY;
+  cube.dragX = e.clientX;
+  cube.dragY = e.clientY;
+  cube.dragging = false;
+  clearGcodeViewCubeHover();
+  cube.canvas.style.cursor = "grabbing";
+  try {
+    cube.canvas.setPointerCapture?.(e.pointerId);
+  } catch {
+    // Pointer capture is best-effort; in-canvas dragging still works without it.
+  }
+}
+
+function onGcodeViewCubePointerMove(e) {
+  const cube = gcodeView.cube;
+  if (!cube) return;
+  if (cube.dragPointerId === e.pointerId) {
+    const step = gcodeCubeDragStep(cube, e.clientX, e.clientY);
+    if (!step) return;
+    rotateGcodeOrbitByDrag(gcodeView.orbit, step.dx, step.dy);
+    clearGcodeViewCubeHover();
+    cube.canvas.style.cursor = "grabbing";
+    updateGcodeCamera();
+    e.preventDefault();
+    return;
+  }
+  const target = gcodeViewCubeTarget(e);
+  cube.canvas.style.cursor = target ? "pointer" : "default";
+  setGcodeViewCubeHover(target);
+}
+
+function gcodeCubeDragStep(drag, clientX, clientY) {
+  const totalX = clientX - drag.dragStartX;
+  const totalY = clientY - drag.dragStartY;
+  if (!drag.dragging && Math.hypot(totalX, totalY) < GCODE_CUBE_DRAG_THRESHOLD_PX) return null;
+  let dx = clientX - drag.dragX;
+  let dy = clientY - drag.dragY;
+  if (!drag.dragging) {
+    drag.dragging = true;
+    dx = totalX;
+    dy = totalY;
+  }
+  drag.dragX = clientX;
+  drag.dragY = clientY;
+  return { dx, dy };
+}
+
+function finishGcodeViewCubeDrag(e, cancelled = false) {
+  const cube = gcodeView.cube;
+  if (!cube || cube.dragPointerId !== e.pointerId) return;
+  const wasDragging = cube.dragging;
+  cube.dragPointerId = null;
+  cube.dragging = false;
+  try {
+    cube.canvas.releasePointerCapture?.(e.pointerId);
+  } catch {
+    // Capture may already be gone after cancellation or window focus changes.
+  }
+  cube.canvas.style.cursor = "default";
+  if (wasDragging) {
+    cube.suppressClick = true;
+    setTimeout(() => {
+      if (gcodeView.cube === cube) cube.suppressClick = false;
+    }, 0);
+  } else if (!cancelled) {
+    const target = gcodeViewCubeTarget(e);
+    cube.canvas.style.cursor = target ? "pointer" : "default";
+    setGcodeViewCubeHover(target);
+  }
+}
+
+function onGcodeViewCubePointerUp(e) {
+  finishGcodeViewCubeDrag(e);
+}
+
+function onGcodeViewCubePointerCancel(e) {
+  finishGcodeViewCubeDrag(e, true);
+}
+
+function onGcodeViewCubeClick(e) {
+  const cube = gcodeView.cube;
+  if (cube?.suppressClick) return;
+  const dir = gcodeViewCubeTarget(e);
+  if (!dir) return;
   snapGcodeViewTo(dir.normalize());
 }
 
 function snapGcodeViewTo(dir) {
-  gcodeView.orbit.phi = Math.acos(Math.max(-1, Math.min(1, dir.y)));
-  gcodeView.orbit.theta = Math.atan2(dir.x, dir.z);
+  const angles = gcodeOrbitAnglesForDirection(dir);
+  gcodeView.orbit.phi = angles.phi;
+  gcodeView.orbit.theta = angles.theta;
   updateGcodeCamera();
+}
+
+function gcodeOrbitAnglesForDirection(direction) {
+  const x = Number(direction?.x) || 0;
+  const y = Number(direction?.y) || 0;
+  const z = Number(direction?.z) || 0;
+  const length = Math.hypot(x, y, z) || 1;
+  return {
+    theta: Math.atan2(x, z),
+    phi: Math.acos(Math.max(-1, Math.min(1, y / length))),
+  };
 }
 
 function gcodeTimelineLocallyOwned() {
@@ -6756,10 +7554,11 @@ function updateGcodeProgress() {
     gcodeView.canvas.setAttribute("aria-label", label);
   }
   updateGcodeTimeline(total);
+  syncActiveGcodeSourceLine(gcodeView.live);
   scheduleGcodeRender();
 }
 
-function gcodeWorldPoint(pos, has4Axis) {
+function gcodeWorldCoordinates(pos, has4Axis) {
   let x = Number(pos[0]) || 0;
   let y = Number(pos[1]) || 0;
   let z = Number(pos[2]) || 0;
@@ -6773,7 +7572,11 @@ function gcodeWorldPoint(pos, has4Axis) {
     y = ry;
     z = rz;
   }
-  return new THREE.Vector3(x, z, -y);
+  return [x, z, -y];
+}
+
+function gcodeWorldPoint(pos, has4Axis) {
+  return new THREE.Vector3(...gcodeWorldCoordinates(pos, has4Axis));
 }
 
 function setGcodePreviewEmpty(text) {
@@ -6797,9 +7600,16 @@ function scheduleGcodeRender() {
 function renderGcodeScene() {
   if (!gcodeView.renderer || !gcodeView.camera || !gcodeView.canvas) return;
   const rect = gcodeView.canvas.getBoundingClientRect();
-  const width = Math.max(1, Math.floor(rect.width));
-  const height = Math.max(1, Math.floor(rect.height));
-  if (gcodeView.width !== width || gcodeView.height !== height) {
+  const width = Math.max(1, Math.round(rect.width));
+  const height = Math.max(1, Math.round(rect.height));
+  const pixelRatio = gcodeRenderPixelRatio(width, height);
+  const sizeChanged = gcodeView.width !== width || gcodeView.height !== height;
+  const ratioChanged = Math.abs(gcodeView.pixelRatio - pixelRatio) > 0.001;
+  if (ratioChanged) {
+    gcodeView.pixelRatio = pixelRatio;
+    gcodeView.renderer.setPixelRatio(pixelRatio);
+  }
+  if (sizeChanged || ratioChanged) {
     gcodeView.width = width;
     gcodeView.height = height;
     gcodeView.renderer.setSize(width, height, false);
@@ -6878,7 +7688,6 @@ async function runActiveGcode() {
     clearNotice("active-gcode-run");
     pollMachine();
     setTimeout(pollMachine, 1200);
-    setTimeout(loadRuns, 1600);
   } catch (e) {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setActiveFeedback("Run failed: " + e.message, "error");
@@ -9186,11 +9995,9 @@ function applySnapshot(snap) {
   }
   if (Array.isArray(snap.jobs)) state.jobs = new Map(snap.jobs.map((j) => [j.id, j]));
   if (Array.isArray(snap.jobs)) state.machine.pending_jobs = queuePendingCount();
-  if (Array.isArray(snap.runs)) state.runs = snap.runs;
   renderMachine();
   renderFiles();
   renderJobs();
-  renderRuns();
   if (Array.isArray(snap.gcode)) {
     state.gcodeSeqs.clear();
     state.gcodeLines = [];
@@ -9248,7 +10055,7 @@ function connectFilesSSE() {
 }
 
 function showTab(name) {
-  const tabs = ["active-job", "gcode-console", "control", "files"];
+  const tabs = ["active-job", "control", "files"];
   if (!tabs.includes(name)) name = "active-job";
   state.activeTab = name;
   document.body.dataset.activeTab = name;
@@ -9262,9 +10069,94 @@ function showTab(name) {
     if (button) button.tabIndex = active ? 0 : -1;
   }
   if (name === "files") connectFilesSSE();
-  if (name === "active-job") scheduleGcodeRender();
+  if (name === "active-job") renderActiveGcode();
   if (name === "control") renderJog();
   else clearNotice("jog-availability");
+}
+
+function showActiveJobLeftTab(name) {
+  const tabs = ["source", "console"];
+  if (!tabs.includes(name)) name = "source";
+  state.activeJobLeftTab = name;
+  for (const tab of tabs) {
+    const button = document.getElementById("active-job-left-tab-" + tab);
+    const panel = document.getElementById(tab === "source" ? "active-gcode-source" : "active-gcode-console");
+    const active = tab === name;
+    if (panel) panel.hidden = !active;
+    button?.setAttribute("aria-selected", String(active));
+    if (button) button.tabIndex = active ? 0 : -1;
+  }
+  document.getElementById("active-gcode-source-position")?.classList.toggle("is-hidden", name !== "source");
+  if (name === "source") scheduleActiveGcodeSourceRender();
+  else renderGcodeLog();
+}
+
+function activeJobSplitBounds(width) {
+  const available = Number(width);
+  if (!(available > 0)) return { min: 0, max: 100 };
+  const min = Math.min(50, (ACTIVE_JOB_SPLIT_MIN_LEFT_PX / available) * 100);
+  const previewMax = ((available - ACTIVE_JOB_SPLITTER_PX - ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX) / available) * 100;
+  return {
+    min,
+    max: Math.max(min, Math.min(100, previewMax)),
+  };
+}
+
+function setActiveJobSplitPercent(percent) {
+  const workspace = document.querySelector(".active-gcode-workspace");
+  const splitter = document.getElementById("active-gcode-splitter");
+  if (!workspace || !splitter) return;
+  const bounds = activeJobSplitBounds(workspace.clientWidth);
+  const next = Math.max(bounds.min, Math.min(bounds.max, Number(percent) || ACTIVE_JOB_SPLIT_DEFAULT_PERCENT));
+  state.activeJobSplitPercent = next;
+  workspace.style.setProperty("--active-gcode-left-width", `${next}%`);
+  splitter.setAttribute("aria-valuemin", String(Math.round(bounds.min)));
+  splitter.setAttribute("aria-valuemax", String(Math.round(bounds.max)));
+  splitter.setAttribute("aria-valuenow", String(Math.round(next)));
+  splitter.setAttribute("aria-valuetext", `Job details ${Math.round(next)} percent`);
+  scheduleActiveGcodeSourceRender();
+  scheduleGcodeRender();
+}
+
+function bindActiveJobSplitter() {
+  const workspace = document.querySelector(".active-gcode-workspace");
+  const splitter = document.getElementById("active-gcode-splitter");
+  if (!workspace || !splitter) return;
+  const setFromClientX = (clientX) => {
+    const rect = workspace.getBoundingClientRect();
+    if (!(rect.width > 0)) return;
+    setActiveJobSplitPercent(((clientX - rect.left) / rect.width) * 100);
+  };
+  splitter.onpointerdown = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    splitter.classList.add("dragging");
+    splitter.setPointerCapture(e.pointerId);
+    setFromClientX(e.clientX);
+  };
+  splitter.onpointermove = (e) => {
+    if (!splitter.hasPointerCapture(e.pointerId)) return;
+    setFromClientX(e.clientX);
+  };
+  const release = (e) => {
+    if (splitter.hasPointerCapture(e.pointerId)) splitter.releasePointerCapture(e.pointerId);
+    splitter.classList.remove("dragging");
+  };
+  splitter.onpointerup = release;
+  splitter.onpointercancel = release;
+  splitter.onlostpointercapture = () => splitter.classList.remove("dragging");
+  splitter.onkeydown = (e) => {
+    const bounds = activeJobSplitBounds(workspace.clientWidth);
+    let next = state.activeJobSplitPercent;
+    if (e.key === "ArrowLeft") next -= ACTIVE_JOB_SPLIT_STEP_PERCENT;
+    else if (e.key === "ArrowRight") next += ACTIVE_JOB_SPLIT_STEP_PERCENT;
+    else if (e.key === "Home") next = bounds.min;
+    else if (e.key === "End") next = bounds.max;
+    else return;
+    e.preventDefault();
+    setActiveJobSplitPercent(next);
+  };
+  setActiveJobSplitPercent(state.activeJobSplitPercent);
 }
 
 async function pollMachine() {
@@ -9296,35 +10188,11 @@ function mergeMachineStatusForDisplay(next) {
   };
 }
 
-async function loadRuns() {
-  try {
-    const r = await request("/api/runs");
-    state.runs = await r.json();
-    renderRuns();
-  } catch {
-    // Run history is operational context; status polling remains primary.
-  }
-}
-
-async function clearRunHistory() {
-  const btn = document.getElementById("run-history-clear");
-  if (btn) btn.disabled = true;
-  try {
-    await request("/api/runs", { method: "DELETE" });
-    state.runs = [];
-    renderRuns();
-    clearNotice("run-history");
-  } catch (e) {
-    setNotice("Clear run history failed: " + e.message, "error", "run-history");
-    renderRuns();
-  }
-}
-
 function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("notice-clear").onclick = () => clearNotice();
-  const viewTabs = ["active-job", "gcode-console", "control", "files"];
+  const viewTabs = ["active-job", "control", "files"];
   for (const [index, name] of viewTabs.entries()) {
     const tab = document.getElementById("tab-" + name);
     tab.onclick = () => showTab(name);
@@ -9341,6 +10209,25 @@ function init() {
       nextTab.focus();
     };
   }
+  const activeJobLeftTabs = ["source", "console"];
+  for (const [index, name] of activeJobLeftTabs.entries()) {
+    const tab = document.getElementById("active-job-left-tab-" + name);
+    tab.onclick = () => showActiveJobLeftTab(name);
+    tab.onkeydown = (e) => {
+      let next = index;
+      if (e.key === "ArrowRight") next = (index + 1) % activeJobLeftTabs.length;
+      else if (e.key === "ArrowLeft") next = (index - 1 + activeJobLeftTabs.length) % activeJobLeftTabs.length;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = activeJobLeftTabs.length - 1;
+      else return;
+      e.preventDefault();
+      const nextTab = document.getElementById("active-job-left-tab-" + activeJobLeftTabs[next]);
+      showActiveJobLeftTab(activeJobLeftTabs[next]);
+      nextTab.focus();
+    };
+  }
+  showActiveJobLeftTab(state.activeJobLeftTab);
+  bindActiveJobSplitter();
   drop.onclick = () => input.click();
   input.onchange = () => { uploadFiles(input.files); input.value = ""; };
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
@@ -9399,7 +10286,6 @@ function init() {
   document.getElementById("log-copy").onclick = copyVisibleLog;
   document.getElementById("log-export").onclick = exportVisibleLog;
   document.getElementById("log-clear").onclick = clearGcodeLog;
-  document.getElementById("run-history-clear").onclick = clearRunHistory;
   document.getElementById("backup-export").onclick = exportBackup;
   document.getElementById("backup-import").onclick = () => document.getElementById("backup-file").click();
   document.getElementById("backup-file").onchange = (e) => {
@@ -9546,6 +10432,24 @@ function init() {
   document.getElementById("tool-set-select").onchange = (e) => handleToolSelect("set", e.target.value);
   document.getElementById("tool-change-select").onchange = (e) => handleToolSelect("change", e.target.value);
   bindButtonAction(document.getElementById("active-gcode-run"), runActiveGcode);
+  const gcodeSourceScroll = document.getElementById("active-gcode-source-scroll");
+  const markGcodeSourceInteraction = () => {
+    activeGcodeSource.userScrollingUntil = Date.now() + 2000;
+  };
+  gcodeSourceScroll.onscroll = scheduleActiveGcodeSourceRender;
+  gcodeSourceScroll.onwheel = markGcodeSourceInteraction;
+  gcodeSourceScroll.onpointerdown = markGcodeSourceInteraction;
+  gcodeSourceScroll.ontouchstart = markGcodeSourceInteraction;
+  gcodeSourceScroll.onkeydown = (e) => {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(e.key)) {
+      markGcodeSourceInteraction();
+    }
+  };
+  if (globalThis.ResizeObserver) {
+    activeGcodeSource.resizeObserver = new ResizeObserver(scheduleActiveGcodeSourceRender);
+    activeGcodeSource.resizeObserver.observe(gcodeSourceScroll);
+  }
+  window.addEventListener("resize", () => setActiveJobSplitPercent(state.activeJobSplitPercent));
   const gcodeTimeline = document.getElementById("gcode-timeline");
   gcodeTimeline.onpointerdown = () => {
     gcodeView.timelineDragging = true;
@@ -9556,7 +10460,7 @@ function init() {
     gcodeView.cursor = Math.max(0, Math.min(gcodeView.segments.length, Number(gcodeTimeline.value) || 0));
     gcodeView.timelineDragging = false;
     clearControlDrafts(gcodeTimeline);
-    updateGcodeTimeline(gcodeView.segments.length);
+    updateGcodeProgress();
   };
   gcodeTimeline.onpointerup = releaseGcodeTimeline;
   gcodeTimeline.onpointercancel = releaseGcodeTimeline;
@@ -9604,12 +10508,9 @@ function init() {
   scheduleJogSample();
   renderFiles();
   renderJobs();
-  renderRuns();
   connectControlSSE();
   pollMachine();
-  loadRuns();
   setInterval(pollMachine, 3000);
-  setInterval(loadRuns, 10000);
 }
 
 document.addEventListener("DOMContentLoaded", init);

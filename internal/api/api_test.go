@@ -748,13 +748,13 @@ func TestWebUIServed(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<!DOCTYPE html>") {
 		t.Errorf("index status=%d body-start=%.30q", resp.StatusCode, body)
 	}
-	if !strings.Contains(string(body), `id="tab-active-job"`) || !strings.Contains(string(body), `id="tab-gcode-console"`) || !strings.Contains(string(body), `id="tab-files"`) || !strings.Contains(string(body), `id="control-view"`) {
+	if !strings.Contains(string(body), `id="tab-active-job"`) || !strings.Contains(string(body), `id="tab-control"`) || !strings.Contains(string(body), `id="tab-files"`) || !strings.Contains(string(body), `id="control-view"`) {
 		t.Errorf("index missing lazy tab markup")
 	}
 	if !strings.Contains(string(body), `id="workarea-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing work area visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `id="gcode-console-view"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="gcode-preview"`, `id="gcode-timeline"`, `type="module"`, `/app.js?v=gcode-live-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `type="module"`, `/app.js?v=active-job-z-accuracy-1`} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -783,17 +783,21 @@ func TestWebUIServed(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`grid-template-columns: repeat(4, minmax(112px, 1fr))`,
+		`grid-template-columns: repeat(3, minmax(112px, 1fr))`,
 		`main > *, .view > .page-section { width: 100%; min-width: 0; }`,
 		`role="tablist"`,
 		`role="tab" aria-selected="true" aria-controls="active-job-view"`,
 		`role="tabpanel" aria-labelledby="tab-active-job"`,
+		`#active-job-view { grid-template-rows: max-content; align-content: start; }`,
+		`#active-gcode-panel { align-content: start; padding: 8px; gap: 0; }`,
+		`.active-gcode-body { min-width: 0; display: grid; grid-template-rows: auto auto; align-content: start; gap: 4px; }`,
+		`align-items: start; min-height: 0; margin-top: 4px;`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing full-width responsive tab marker %s", want)
 		}
 	}
-	for _, gone := range []string{`max-width: 1440px`, `body[data-active-tab="gcode-console"] main`} {
+	for _, gone := range []string{`max-width: 1440px`, `body[data-active-tab="gcode-console"] main`, `id="tab-gcode-console"`, `id="gcode-console-view"`} {
 		if strings.Contains(string(body), gone) {
 			t.Errorf("index still contains tab-specific width constraint %s", gone)
 		}
@@ -891,7 +895,7 @@ func TestWebUIServed(t *testing.T) {
 	if strings.Contains(bodyText, `class="machine-settings-grid"`) || strings.Contains(bodyText, `.machine-settings-grid`) {
 		t.Error("Machine settings must not use the old auto-fit grid or Jog-scoped sizing contract")
 	}
-	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `<summary><h2>Gamepad</h2></summary>`, `class="tap-control-title">Jog Settings</div>`, `class="tap-control-title">Move To Work</div>`, `class="origin-group-title">Work Zero</div>`, `<span>Saved Zero</span><select id="saved-origin-select"`, `id="run-history-panel" open`, `id="jog-step-distance"`, `data-jog-step-axis=`, `id="jog-step-feedback"`, `id="jog-plot"`, `id="jog-axes"`, `id="jog-mpos"`, `id="jog-wpos"`, `id="jog-target-pos"`, `id="tap-mpos-x"`, `id="tap-mpos-y"`, `id="tap-wpos-x"`, `id="tap-wpos-y"`, `id="workarea-axis-overlay"`, `class="tap-position-readout"`, `class="outline-toolbar"`, `id="outline-probe-point"`, `probe_each_point`, `Arm Tap Move`, `class="tap-arm-panel"`, `id="alarm-feedback"`, `id="tool-feedback"`, `id="tool-action-status"`, `id="active-gcode-feedback"`, `id="tap-move-feedback"`, `id="outline-feedback"`, `id="outline-action-status"`, `id="machine-learn-status"`, `id="jog-error"`, `id="backup-status"`, `class="action-feedback"`, `class="tool-action-status"`, `class="outline-action-status"`, `class="origin-action-status"`, `data-origin-feedback`, `button:not(#jog-arm)`, `min-height: 64px`, `>X</button>`} {
+	for _, gone := range []string{`id="status-detail"`, `id="status-fields"`, `id="status-raw"`, `<summary>Gcode</summary>`, `id="quick-commands"`, `id="gcode-history"`, `data-gcode=`, `<h2>Gamepad Jog</h2>`, `<h2>Jog</h2>`, `<summary><h2>Gamepad</h2></summary>`, `class="tap-control-title">Jog Settings</div>`, `class="tap-control-title">Move To Work</div>`, `class="origin-group-title">Work Zero</div>`, `<span>Saved Zero</span><select id="saved-origin-select"`, `id="run-history-panel"`, `id="run-history-clear"`, `id="run-history"`, `Run History`, `id="jog-step-distance"`, `data-jog-step-axis=`, `id="jog-step-feedback"`, `id="jog-plot"`, `id="jog-axes"`, `id="jog-mpos"`, `id="jog-wpos"`, `id="jog-target-pos"`, `id="tap-mpos-x"`, `id="tap-mpos-y"`, `id="tap-wpos-x"`, `id="tap-wpos-y"`, `id="workarea-axis-overlay"`, `class="tap-position-readout"`, `class="outline-toolbar"`, `id="outline-probe-point"`, `probe_each_point`, `Arm Tap Move`, `class="tap-arm-panel"`, `id="alarm-feedback"`, `id="tool-feedback"`, `id="tool-action-status"`, `id="active-gcode-feedback"`, `id="tap-move-feedback"`, `id="outline-feedback"`, `id="outline-action-status"`, `id="machine-learn-status"`, `id="jog-error"`, `id="backup-status"`, `class="action-feedback"`, `class="tool-action-status"`, `class="outline-action-status"`, `class="origin-action-status"`, `data-origin-feedback`, `button:not(#jog-arm)`, `min-height: 64px`, `>X</button>`} {
 		if strings.Contains(string(body), gone) {
 			t.Errorf("index still contains removed status details marker %s", gone)
 		}
@@ -976,7 +980,7 @@ func TestWebUIServed(t *testing.T) {
 	if got := three.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("three.module.min.js Cache-Control = %q, want no-store", got)
 	}
-	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "activeJobPreviewState", "gcodeCursorForPlayedLine", "syncActiveGcodeFromMachine", "THREE.WebGLRenderer", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active", "/api/tool/current", "/api/tool/change", "/api/tool/continue", "/api/tool/calibrate"} {
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "activeJobPreviewState", "gcodeCursorForPlayedLine", "syncActiveGcodeFromMachine", "ensureActiveGcodeSource", "renderActiveGcodeSource", "gcodeSourceLineForCursor", "gcodeSourceWindow", "syncActiveGcodeSourceLine", "showActiveJobLeftTab", "activeJobLeftTabs", "activeJobSplitBounds", "setActiveJobSplitPercent", "bindActiveJobSplitter", "activeJobOverlayOriginFrom", "activeJobContextOverlayData", "interpolateOutlinePathZ", "activeJobFieldProbeComplete", "field_probe_complete", "syncGcodeContextOverlay", "rebuildGcodeContextOverlay", "combineGcodeBounds", "gcodeRenderPixelRatio", "viewCubeTargetComponents", "gcodeOrbitAnglesForDirection", `projection: "orthographic"`, `gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 })`, "onGcodeViewCubePointerMove", "rotateGcodeOrbitByDrag", "gcodeCubeDragStep", "THREE.WebGLRenderer", "gcodeWorldCoordinates", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active", "/api/files/", "/api/tool/current", "/api/tool/change", "/api/tool/continue", "/api/tool/calibrate"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
