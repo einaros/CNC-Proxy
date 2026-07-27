@@ -236,6 +236,74 @@ const fieldProbeConsts = [
   "MAX_FIELD_PROBE_POINTS",
 ];
 
+test("active job preview follows firmware line progress and the reported work position", () => {
+  const ctx = buildContext(["gcodeCursorForPlayedLine", "activeJobPreviewState"]);
+  const machine = {
+    active_job: {
+      path: "/sd/gcodes/part.nc",
+      played_lines: 4,
+      percent: 40,
+      elapsed_ms: 60000,
+      remaining_ms: 90000,
+    },
+    wpos: { x: 12.5, y: -3.25, z: 1.5, a: 30 },
+  };
+  const preview = {
+    segments: [
+      { line: 3 },
+      { line: 4 },
+      { line: 4 },
+      { line: 10 },
+    ],
+  };
+  const live = JSON.parse(vm.runInContext(
+    `JSON.stringify(activeJobPreviewState(${JSON.stringify(machine)}, ${JSON.stringify(preview)}, "/sd/gcodes/part.nc"))`,
+    ctx,
+  ));
+  assert.deepEqual(live, {
+    playedLines: 4,
+    percent: 40,
+    elapsedMs: 60000,
+    remainingMs: 90000,
+    cursor: 1,
+    position: [12.5, -3.25, 1.5, -30],
+  });
+});
+
+test("active job progress never drives a preview for a different file", () => {
+  const ctx = buildContext(["gcodeCursorForPlayedLine", "activeJobPreviewState"]);
+  const live = vm.runInContext(
+    `activeJobPreviewState(
+      { active_job: { path: "/sd/gcodes/other.nc", played_lines: 8 }, wpos: { x: 1, y: 2, z: 3 } },
+      { segments: [{ line: 2 }] },
+      "/sd/gcodes/part.nc"
+    )`,
+    ctx,
+  );
+  assert.equal(live, null);
+});
+
+test("machine-reported active files reload the matching preview exactly once", () => {
+  let loads = 0;
+  const state = {
+    activeGcode: { path: "/sd/gcodes/old.nc" },
+    activeGcodeLoading: false,
+  };
+  const ctx = buildContext(["syncActiveGcodeFromMachine"], [], {
+    state,
+    loadActiveGcode: () => { loads++; },
+  });
+  vm.runInContext(`syncActiveGcodeFromMachine({ active_job: { path: "/sd/gcodes/running.nc" } })`, ctx);
+  assert.equal(loads, 1);
+  state.activeGcode.path = "/sd/gcodes/running.nc";
+  vm.runInContext(`syncActiveGcodeFromMachine({ active_job: { path: "/sd/gcodes/running.nc" } })`, ctx);
+  assert.equal(loads, 1);
+  state.activeGcode.path = "/sd/gcodes/old.nc";
+  state.activeGcodeLoading = true;
+  vm.runInContext(`syncActiveGcodeFromMachine({ active_job: { path: "/sd/gcodes/running.nc" } })`, ctx);
+  assert.equal(loads, 1);
+});
+
 test("field probes form one evenly spaced boundary-to-interior distribution", () => {
   const ctx = buildContext(fieldProbeFunctions, fieldProbeConsts);
   const outline = [

@@ -54,6 +54,7 @@ const state = {
   lastControlResult: null,
   activeGcode: { path: "", runnable: false, message: "" },
   activeGcodePending: "",
+  activeGcodeLoading: false,
   activeSelectPendingPath: "",
   toolPending: "",
   gamepadMacroBindingDirty: false,
@@ -132,6 +133,8 @@ const gcodeView = {
   pathGroup: null,
   progressLine: null,
   marker: null,
+  live: null,
+  followLive: false,
   target: new THREE.Vector3(),
   orbit: { theta: -Math.PI / 4, phi: Math.PI / 3, radius: 120 },
   segments: [],
@@ -6088,12 +6091,14 @@ function renderActiveGcode() {
     run.disabled = false;
     setSoftDisabled(run, true);
     drawGcodePreview(null);
+    renderActiveJobProgress(null);
     if (!state.activeGcodePending) clearNotice("active-gcode");
     return;
   }
 
   title.textContent = relPath(active.path);
   const preview = active.preview || {};
+  const live = activeJobPreviewState(state.machine, preview, active.path);
   const tools = Array.isArray(preview.tools) && preview.tools.length ? " tools T" + preview.tools.join(", T") : "";
   const entry = active.entry || state.files.get(active.path) || {};
   const sync = SYNC_LABEL[entry.sync] || entry.sync || "";
@@ -6121,7 +6126,69 @@ function renderActiveGcode() {
   } else if (!state.activeGcodePending && machineReady && state.notices.get("active-gcode")?.text === idleRequiredText) {
     clearNotice("active-gcode");
   }
-  drawGcodePreview(preview);
+  renderActiveJobProgress(live, preview);
+  drawGcodePreview(preview, live);
+}
+
+function renderActiveJobProgress(live, preview = {}) {
+  const progress = document.getElementById("active-gcode-progress");
+  const elapsed = document.getElementById("active-gcode-elapsed");
+  const remaining = document.getElementById("active-gcode-remaining");
+  if (!progress || !elapsed || !remaining) return;
+  if (!live) {
+    progress.textContent = "-";
+    elapsed.textContent = "-";
+    remaining.textContent = "-";
+    return;
+  }
+  const totalLines = Math.max(0, Number(preview.line_count) || 0);
+  const lineText = totalLines ? `line ${live.playedLines} / ${totalLines}` : `line ${live.playedLines}`;
+  progress.textContent = `${live.percent}% · ${lineText}`;
+  elapsed.textContent = fmtDuration(live.elapsedMs);
+  remaining.textContent = Number.isFinite(live.remainingMs) ? fmtDuration(live.remainingMs) : "-";
+}
+
+function activeJobPreviewState(machine, preview, activePath) {
+  const job = machine?.active_job;
+  const segments = Array.isArray(preview?.segments) ? preview.segments : [];
+  if (!job) return null;
+  if (job.path && activePath && job.path !== activePath) return null;
+  const playedLines = Math.max(0, Math.trunc(Number(job.played_lines) || 0));
+  if (playedLines <= 0) return null;
+  const percent = Math.max(0, Math.min(100, Math.trunc(Number(job.percent) || 0)));
+  const elapsedMs = Math.max(0, Number(job.elapsed_ms) || 0);
+  const remainingValue = Number(job.remaining_ms);
+  const remainingMs = Number.isFinite(remainingValue) && remainingValue >= 0 ? remainingValue : null;
+  const wpos = machine?.wpos || {};
+  let position = null;
+  if ([wpos.x, wpos.y, wpos.z].every((value) => Number.isFinite(Number(value)))) {
+    position = [
+      Number(wpos.x),
+      Number(wpos.y),
+      Number(wpos.z),
+      Number.isFinite(Number(wpos.a)) ? -Number(wpos.a) : 0,
+    ];
+  }
+  return {
+    playedLines,
+    percent,
+    elapsedMs,
+    remainingMs,
+    cursor: gcodeCursorForPlayedLine(segments, playedLines),
+    position,
+  };
+}
+
+function gcodeCursorForPlayedLine(segments, playedLine) {
+  let low = 0;
+  let high = Array.isArray(segments) ? segments.length : 0;
+  while (low < high) {
+    const mid = low + Math.floor((high - low) / 2);
+    const line = Number(segments[mid]?.line) || 0;
+    if (line < playedLine) low = mid + 1;
+    else high = mid;
+  }
+  return low;
 }
 
 function previewBoundsText(bounds) {
@@ -6137,7 +6204,7 @@ function previewBoundsText(bounds) {
   return xyz;
 }
 
-function drawGcodePreview(preview) {
+function drawGcodePreview(preview, live = null) {
   const segments = Array.isArray(preview?.segments) ? preview.segments : [];
   if (!segments.length || !preview?.bounds) {
     clearGcodeScene();
@@ -6157,9 +6224,16 @@ function drawGcodePreview(preview) {
     gcodeView.key = key;
     gcodeView.segments = segments;
     gcodeView.has4Axis = !!preview.has_4axis;
-    gcodeView.cursor = segments.length;
+    gcodeView.cursor = live ? live.cursor : segments.length;
     rebuildGcodeScene(preview, segments);
     fitGcodeCamera(preview.bounds);
+  }
+  gcodeView.live = live;
+  if (live && !gcodeTimelineLocallyOwned()) {
+    gcodeView.cursor = live.cursor;
+    gcodeView.followLive = true;
+  } else if (!live) {
+    gcodeView.followLive = false;
   }
   setGcodePreviewEmpty("");
   updateGcodeTimeline(segments.length);
@@ -6393,6 +6467,9 @@ function makeGcodeAxisLabel(text, color) {
 }
 
 function clearGcodeScene() {
+  gcodeView.live = null;
+  gcodeView.followLive = false;
+  if (gcodeView.canvas) gcodeView.canvas.setAttribute("aria-label", "Active gcode preview");
   if (!gcodeView.renderer) return;
   clearThreeGroup(gcodeView.pathGroup);
   disposeObject(gcodeView.progressLine);
@@ -6628,6 +6705,15 @@ function snapGcodeViewTo(dir) {
   updateGcodeCamera();
 }
 
+function gcodeTimelineLocallyOwned() {
+  const slider = document.getElementById("gcode-timeline");
+  return !!slider && (
+    gcodeView.timelineDragging ||
+    slider === document.activeElement ||
+    slider.dataset.dragging === "1"
+  );
+}
+
 function updateGcodeTimeline(total) {
   const slider = document.getElementById("gcode-timeline");
   const label = document.getElementById("gcode-timeline-label");
@@ -6635,7 +6721,7 @@ function updateGcodeTimeline(total) {
   slider.max = String(total);
   slider.disabled = total <= 0;
   gcodeView.cursor = Math.max(0, Math.min(total, gcodeView.cursor));
-  const owned = gcodeView.timelineDragging || slider === document.activeElement || slider.dataset.dragging === "1";
+  const owned = gcodeTimelineLocallyOwned();
   if (owned) {
     const draft = Math.max(0, Math.min(total, Number(slider.value) || 0));
     label.textContent = `${draft} / ${total}`;
@@ -6643,6 +6729,7 @@ function updateGcodeTimeline(total) {
   }
   slider.value = String(gcodeView.cursor);
   label.textContent = `${gcodeView.cursor} / ${total}`;
+  slider.setAttribute("aria-valuetext", `${gcodeView.cursor} of ${total} plotted segments`);
 }
 
 function updateGcodeProgress() {
@@ -6652,13 +6739,21 @@ function updateGcodeProgress() {
     gcodeView.progressLine.geometry.setDrawRange(0, gcodeView.cursor * 2);
   }
   const seg = gcodeView.segments[Math.max(0, gcodeView.cursor - 1)];
-  if (seg) {
-    const p = gcodeWorldPoint(seg.to || [0, 0, 0, 0], gcodeView.has4Axis);
+  const livePosition = gcodeView.followLive ? gcodeView.live?.position : null;
+  const markerPosition = livePosition || seg?.to;
+  if (markerPosition) {
+    const p = gcodeWorldPoint(markerPosition, gcodeView.has4Axis);
     gcodeView.marker.position.copy(p);
     gcodeView.marker.scale.setScalar(Math.max(0.8, gcodeView.orbit.radius * 0.008));
     gcodeView.marker.visible = true;
   } else {
     gcodeView.marker.visible = false;
+  }
+  if (gcodeView.canvas) {
+    const label = livePosition
+      ? `Active gcode preview; live spindle at X ${fmtCoord(livePosition[0])}, Y ${fmtCoord(livePosition[1])}, Z ${fmtCoord(livePosition[2])}`
+      : "Active gcode preview";
+    gcodeView.canvas.setAttribute("aria-label", label);
   }
   updateGcodeTimeline(total);
   scheduleGcodeRender();
@@ -6715,13 +6810,23 @@ function renderGcodeScene() {
 }
 
 async function loadActiveGcode() {
+  if (state.activeGcodeLoading) return;
+  state.activeGcodeLoading = true;
   try {
     const r = await request("/api/gcode/active");
     state.activeGcode = await r.json();
     renderActiveGcode();
   } catch (e) {
     setNotice("Active gcode unavailable: " + e.message, "error", "active-gcode");
+  } finally {
+    state.activeGcodeLoading = false;
   }
+}
+
+function syncActiveGcodeFromMachine(machine) {
+  const path = String(machine?.active_job?.path || "");
+  if (!path || path === state.activeGcode?.path || state.activeGcodeLoading) return;
+  loadActiveGcode();
 }
 
 async function selectActiveGcode(path) {
@@ -9072,6 +9177,7 @@ function applySnapshot(snap) {
   if (snap.machine) {
     state.jog.observed = snap.machine.mpos || state.jog.observed;
     state.machine = mergeMachineStatusForDisplay(snap.machine);
+    syncActiveGcodeFromMachine(snap.machine);
     clearNotice("machine-status");
   }
   if (Array.isArray(snap.files)) {
@@ -9167,6 +9273,7 @@ async function pollMachine() {
     const next = await r.json();
     state.jog.observed = next.mpos || state.jog.observed;
     state.machine = mergeMachineStatusForDisplay(next);
+    syncActiveGcodeFromMachine(next);
     clearNotice("machine-status");
     renderMachine();
   } catch (e) {
@@ -9442,6 +9549,7 @@ function init() {
   const gcodeTimeline = document.getElementById("gcode-timeline");
   gcodeTimeline.onpointerdown = () => {
     gcodeView.timelineDragging = true;
+    gcodeView.followLive = false;
     gcodeTimeline.dataset.dragging = "1";
   };
   const releaseGcodeTimeline = () => {
@@ -9455,6 +9563,7 @@ function init() {
   gcodeTimeline.onblur = releaseGcodeTimeline;
   gcodeTimeline.onchange = releaseGcodeTimeline;
   gcodeTimeline.oninput = (e) => {
+    gcodeView.followLive = false;
     gcodeView.cursor = Number(e.target.value) || 0;
     updateGcodeProgress();
   };

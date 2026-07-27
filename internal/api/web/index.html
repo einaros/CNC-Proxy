@@ -198,6 +198,10 @@
   .active-gcode-summary { min-width: 0; }
   #active-gcode-title { font-weight: 650; overflow-wrap: anywhere; }
   #active-gcode-meta { color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+  .active-gcode-progress { display: grid; grid-template-columns: minmax(152px, auto) repeat(2, minmax(76px, auto)); gap: 8px 16px; align-items: start; min-height: 36px; margin-top: 8px; }
+  .active-gcode-stat { display: grid; gap: 2px; min-width: 0; }
+  .active-gcode-stat > span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .active-gcode-stat > strong { min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #active-gcode-run { white-space: nowrap; }
   #gcode-preview-wrap { display: grid; grid-template-rows: minmax(0, 1fr) auto; position: relative; height: clamp(320px, 42vh, 560px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #gcode-preview { grid-area: 1 / 1; display: block; width: 100%; height: 100%; min-height: 0; touch-action: none; cursor: grab; }
@@ -743,6 +747,11 @@
             <div class="active-gcode-summary">
               <div id="active-gcode-title">No active gcode selected.</div>
               <div id="active-gcode-meta">-</div>
+              <div class="active-gcode-progress" aria-label="Active job progress">
+                <span class="active-gcode-stat"><span>Progress</span><strong id="active-gcode-progress">-</strong></span>
+                <span class="active-gcode-stat"><span>Elapsed</span><strong id="active-gcode-elapsed">-</strong></span>
+                <span class="active-gcode-stat"><span>Remaining</span><strong id="active-gcode-remaining">-</strong></span>
+              </div>
             </div>
             <button type="button" id="active-gcode-run" class="primary">Run Active Gcode</button>
           </div>
@@ -757,7 +766,7 @@
             </div>
             <div id="gcode-preview-empty">No plotted moves</div>
             <div id="gcode-timeline-row">
-              <input id="gcode-timeline" type="range" min="0" max="0" step="1" value="0" disabled>
+              <input id="gcode-timeline" type="range" min="0" max="0" step="1" value="0" aria-label="Preview timeline" disabled>
               <span id="gcode-timeline-label">0 / 0</span>
             </div>
           </div>
@@ -1181,6 +1190,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=gcode-3d-1"></script>
+<script type="module" src="/app.js?v=gcode-live-1"></script>
 </body>
 </html>

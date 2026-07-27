@@ -1218,6 +1218,37 @@ func TestSelectActiveGcodeParsesPreview(t *testing.T) {
 	}
 }
 
+func TestMachineStatusNormalizesActiveJobProgress(t *testing.T) {
+	svc, st := newService(t)
+	if err := st.SetActiveGcodePath("/sd/gcodes/part.nc"); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.arb.Tracker().ObserveStatusPayload("<Run|MPos:1,2,3|WPos:4,5,6|P:42,40,60>") {
+		t.Fatal("status payload was not accepted")
+	}
+
+	status := svc.Status()
+	if status.ActiveJob == nil {
+		t.Fatal("active job progress is nil")
+	}
+	if got := status.ActiveJob; got.Path != "/sd/gcodes/part.nc" || got.PlayedLines != 42 || got.Percent != 40 || got.ElapsedMs != 60000 {
+		t.Fatalf("active job progress = %+v", got)
+	}
+	if status.ActiveJob.RemainingMs == nil || *status.ActiveJob.RemainingMs != 90000 {
+		t.Fatalf("remaining_ms = %v, want 90000", status.ActiveJob.RemainingMs)
+	}
+
+	if !svc.arb.Tracker().ObserveStatusPayload("<Idle|MPos:1,2,3|WPos:4,5,6>") {
+		t.Fatal("idle status payload was not accepted")
+	}
+	if got := svc.Status().ActiveJob; got != nil {
+		t.Fatalf("idle active job progress = %+v, want nil", got)
+	}
+	if got := machineJobProgress(machine.Status{State: machine.Run, Progress: []float64{math.NaN(), 40, 60}}, ""); got != nil {
+		t.Fatalf("non-finite active job progress = %+v, want nil", got)
+	}
+}
+
 func TestParseGcodePreviewSkipsLeadInRapidsFromUnknownStart(t *testing.T) {
 	gcode := strings.Join([]string{
 		"G21 G90",

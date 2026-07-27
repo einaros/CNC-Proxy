@@ -173,6 +173,18 @@ type MachineStatus struct {
 	HaltReason   *machine.HaltReason `json:"halt_reason,omitempty"`
 	Progress     []float64           `json:"progress,omitempty"`
 	Machine      []float64           `json:"machine,omitempty"`
+	ActiveJob    *MachineJobProgress `json:"active_job,omitempty"`
+}
+
+// MachineJobProgress is the normalized player progress reported by the
+// firmware's P: status field. RemainingMs uses the same percentage-based
+// estimate as the official controller.
+type MachineJobProgress struct {
+	Path        string `json:"path,omitempty"`
+	PlayedLines int64  `json:"played_lines"`
+	Percent     int    `json:"percent"`
+	ElapsedMs   int64  `json:"elapsed_ms"`
+	RemainingMs *int64 `json:"remaining_ms,omitempty"`
 }
 
 // ProbeZRequest describes one serialized Z probe at the current XY or at a
@@ -275,7 +287,45 @@ func (s *Service) Status() MachineStatus {
 		HaltReason:   st.HaltReason,
 		Progress:     st.Progress,
 		Machine:      st.Machine,
+		ActiveJob:    machineJobProgress(st, s.store.ActiveGcodePath()),
 	}
+}
+
+func machineJobProgress(st machine.Status, activePath string) *MachineJobProgress {
+	if !stateMayReportActiveGcode(st.State) || len(st.Progress) < 3 {
+		return nil
+	}
+	for _, value := range st.Progress[:3] {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return nil
+		}
+	}
+	playedLines := int64(st.Progress[0])
+	if playedLines <= 0 {
+		return nil
+	}
+	percent := int(st.Progress[1])
+	if percent < 0 {
+		percent = 0
+	} else if percent > 100 {
+		percent = 100
+	}
+	elapsedSeconds := int64(st.Progress[2])
+	if elapsedSeconds < 0 {
+		elapsedSeconds = 0
+	}
+	progress := &MachineJobProgress{
+		Path:        activePath,
+		PlayedLines: playedLines,
+		Percent:     percent,
+		ElapsedMs:   elapsedSeconds * int64(time.Second/time.Millisecond),
+	}
+	if percent > 0 {
+		remainingSeconds := int64(100-percent) * elapsedSeconds / int64(percent)
+		remainingMs := remainingSeconds * int64(time.Second/time.Millisecond)
+		progress.RemainingMs = &remainingMs
+	}
+	return progress
 }
 
 func (s *Service) pendingJobCount() int {
