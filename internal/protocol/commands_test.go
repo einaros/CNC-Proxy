@@ -98,4 +98,7 @@ func TestControllerActionLines(t *testing.T) {
 	if got := CalibrateCurrentToolLine(); got != "M491\n" {
 		t.Errorf("CalibrateCurrentToolLine = %q", got)
 	}
+	if got := Probe3DLine(4, 20, 20, 2, 2); got != "M480.4 X20 Y20 Z2 D2\n" {
+		t.Errorf("Probe3DLine = %q", got)
+	}
 }

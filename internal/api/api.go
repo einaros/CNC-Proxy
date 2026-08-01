@@ -89,6 +89,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/probe/z", s.probeZ)                      // one serialized Z probe
 	mux.HandleFunc("POST /api/probe/auto-z", s.autoZProbe)             // controller-style M495 auto Z probe
 	mux.HandleFunc("POST /api/probe/floor", s.floorZProbe)             // verified floor Z zero + safe retract
+	mux.HandleFunc("POST /api/probe/3d", s.probe3D)                    // controller-style wired M480 3D probe
 	mux.HandleFunc("POST /api/outline/trace", s.traceOutline)          // serialized probe-laser outline trace
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
@@ -396,6 +397,19 @@ func (s *Server) floorZProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) probe3D(w http.ResponseWriter, r *http.Request) {
+	var body service.Probe3DRequest
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	res, err := s.svc.Probe3D(body)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
 }
 
 func (s *Server) traceOutline(w http.ResponseWriter, r *http.Request) {

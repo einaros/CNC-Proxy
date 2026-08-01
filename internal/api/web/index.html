@@ -351,6 +351,18 @@
   .origin-row label span { min-height: var(--tap-label-h); text-transform: uppercase; letter-spacing: .04em; }
   .origin-row input, .origin-row select { width: 100%; min-width: 0; }
   .origin-row button { align-self: end; justify-content: center; min-width: 0; white-space: nowrap; }
+  #probe-3d-modal { width: min(620px, calc(100vw - 24px)); --probe-3d-control-h: 36px; --probe-3d-label-h: 14px; }
+  .probe-3d-body { max-height: calc(100dvh - 96px); overflow: auto; padding: 16px; display: grid; gap: 16px; }
+  .probe-3d-mode, .probe-3d-field { min-width: 0; display: grid; grid-template-rows: var(--probe-3d-label-h) var(--probe-3d-control-h); gap: 4px; color: var(--muted); font-size: 11px; line-height: 1.2; }
+  .probe-3d-mode > span, .probe-3d-field > span { min-height: var(--probe-3d-label-h); text-transform: uppercase; letter-spacing: .04em; }
+  .probe-3d-mode select, .probe-3d-field input { width: 100%; min-width: 0; height: var(--probe-3d-control-h); min-height: var(--probe-3d-control-h); }
+  .probe-3d-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .probe-3d-field.is-inactive { visibility: hidden; }
+  .probe-3d-note { margin: 0; padding: 10px 12px; color: var(--warn); line-height: 1.45; background: rgba(217,154,58,.1); border: 1px solid rgba(217,154,58,.42); border-radius: var(--radius); }
+  .probe-3d-preflight { min-height: 52px; margin: 0; padding: 8px 12px; color: transparent; line-height: 1.4; background: transparent; border: 1px solid transparent; border-radius: var(--radius); }
+  .probe-3d-preflight.is-visible { color: var(--err); background: rgba(232,106,95,.1); border-color: rgba(232,106,95,.46); }
+  .probe-3d-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .probe-3d-actions button { min-height: 40px; justify-content: center; }
   .control-command-drawer .tap-primary-controls { grid-template-columns: minmax(0, 1fr) 90px; }
   .control-command-drawer .tap-feed-field { width: 100%; }
   .control-command-drawer .tap-feed-stepper { grid-template-columns: 34px minmax(0, 1fr) 34px; }
@@ -491,6 +503,11 @@
   .file-col-actions { width: 28%; }
   @media (min-width: 881px) {
     #folder-sidebar { position: sticky; top: 142px; }
+    #active-job-view { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }
+    #active-job-view > .page-section { min-height: 0; height: 100%; align-content: stretch; }
+    #active-gcode-panel { min-height: 0; height: 100%; grid-template-rows: minmax(0, 1fr); align-content: stretch; }
+    .active-gcode-body { min-height: 0; height: 100%; grid-template-rows: auto minmax(0, 1fr); align-content: stretch; }
+    .active-gcode-workspace { min-height: 0; height: 100%; }
     #control-view { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
     #control-view > .page-section { min-height: 0; }
     #control-view #jog, #control-view .control-page-layout { min-height: 0; height: 100%; }
@@ -530,6 +547,7 @@
   }
   @media (max-width: 760px) {
     header, .toolbar, #macro-editor, .macro-grid, .gamepad-axis-row, .gamepad-bindings-head, .gamepad-binding, .jog-summary, .tap-move-toolbar, .tap-control-group, .tap-coordinate-panel, .tap-coordinate-row, .tap-primary-controls, .tap-origin-panel, .tap-move-body, .origin-action-grid, .origin-row, .origin-row-preset, .origin-row-save, .origin-modal-fields, .origin-modal-source { grid-auto-flow: row; display: grid; align-items: stretch; grid-template-columns: 1fr; }
+    .probe-3d-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .outline-capture { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: 20px 36px 36px 32px 32px; grid-template-areas: "title title" "actions actions" "exports exports" "settings settings" "summary summary"; }
     .control-command-drawer .gamepad-axis-row, .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 1fr; }
     .control-command-drawer .gamepad-axis-row label:last-child { grid-column: auto; }
@@ -670,6 +688,7 @@
                     <select id="tool-change-select" aria-label="Change tool">
                       <option value="">Change tool</option>
                       <option value="0">Probe</option>
+                      <option value="9999">3D Probe</option>
                       <option value="1">Tool 1</option>
                       <option value="2">Tool 2</option>
                       <option value="3">Tool 3</option>
@@ -691,6 +710,7 @@
                       <option value="">Set current</option>
                       <option value="-1">Empty</option>
                       <option value="0">Probe</option>
+                      <option value="9999">3D Probe</option>
                       <option value="1">Tool 1</option>
                       <option value="2">Tool 2</option>
                       <option value="3">Tool 3</option>
@@ -917,6 +937,7 @@
                         <button type="button" id="origin-set-open">Set Origin</button>
                         <button type="button" id="origin-presets-open">Origin Presets</button>
                         <button type="button" id="origin-probe-z">Probe Z</button>
+                        <button type="button" id="origin-probe-3d">3D Probe</button>
                       </div>
                     </div>
                   </div>
@@ -1134,6 +1155,51 @@
       <label><span>Z</span><input id="origin-xyz-z" type="number" step="0.001" inputmode="decimal" placeholder="Unchanged"></label>
     </div>
     <div class="origin-modal-actions"><button type="button" id="origin-xyz-apply">Set XYZ</button></div>
+  </div>
+</dialog>
+<dialog id="probe-3d-modal" aria-labelledby="probe-3d-title">
+  <div class="machine-settings-modal-head">
+    <h2 id="probe-3d-title">3D Probe</h2>
+    <button type="button" id="probe-3d-close" aria-label="Close 3D Probe">Close</button>
+  </div>
+  <div class="probe-3d-body">
+    <label class="probe-3d-mode">
+      <span>Probe operation</span>
+      <select id="probe-3d-kind">
+        <optgroup label="Outside corner">
+          <option value="outside_bottom_left">Bottom-left corner</option>
+          <option value="outside_top_left">Top-left corner</option>
+          <option value="outside_top_right">Top-right corner</option>
+          <option value="outside_bottom_right">Bottom-right corner</option>
+        </optgroup>
+        <optgroup label="Inside corner">
+          <option value="inside_bottom_left">Bottom-left corner</option>
+          <option value="inside_top_left">Top-left corner</option>
+          <option value="inside_top_right">Top-right corner</option>
+          <option value="inside_bottom_right">Bottom-right corner</option>
+        </optgroup>
+        <optgroup label="Center">
+          <option value="bore_pocket">Bore / pocket</option>
+          <option value="bore_pocket_x">Bore / pocket — X only</option>
+          <option value="bore_pocket_y">Bore / pocket — Y only</option>
+          <option value="boss_block">Boss / block</option>
+          <option value="boss_block_x">Boss / block — X only</option>
+          <option value="boss_block_y">Boss / block — Y only</option>
+        </optgroup>
+      </select>
+    </label>
+    <div class="probe-3d-fields">
+      <label id="probe-3d-x-field" class="probe-3d-field"><span>X Offset</span><input id="probe-3d-x" type="number" value="20" min="0" max="5000" step="0.1" inputmode="decimal"></label>
+      <label id="probe-3d-y-field" class="probe-3d-field"><span>Y Offset</span><input id="probe-3d-y" type="number" value="20" min="0" max="5000" step="0.1" inputmode="decimal"></label>
+      <label id="probe-3d-z-field" class="probe-3d-field"><span>Z Offset</span><input id="probe-3d-z" type="number" value="2" min="0" max="5000" step="0.1" inputmode="decimal"></label>
+      <label class="probe-3d-field"><span>Probe Diameter</span><input id="probe-3d-diameter" type="number" value="2" min="0.001" max="5000" step="0.001" inputmode="decimal"></label>
+    </div>
+    <p id="probe-3d-note" class="probe-3d-note">Position the 3D Probe for the selected operation and make sure it is stable.</p>
+    <p id="probe-3d-preflight" class="probe-3d-preflight" aria-hidden="true"></p>
+    <div class="probe-3d-actions">
+      <button type="button" id="probe-3d-cancel">Cancel</button>
+      <button type="button" id="probe-3d-run" class="primary" aria-describedby="probe-3d-note probe-3d-preflight">Probe</button>
+    </div>
   </div>
 </dialog>
 <dialog id="origin-set-modal" class="origin-modal" aria-labelledby="origin-set-title">

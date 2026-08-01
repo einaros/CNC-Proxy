@@ -1518,6 +1518,9 @@ func TestToolActionsSendControllerCommands(t *testing.T) {
 	if res, err := svc.SetCurrentToolID(8888); err != nil || res.Command != "M493.2T8888" {
 		t.Fatalf("SetCurrentToolID laser result=%+v err=%v", res, err)
 	}
+	if res, err := svc.SetCurrentToolID(9999); err != nil || res.Command != "M493.2T9999" {
+		t.Fatalf("SetCurrentToolID 3D probe result=%+v err=%v", res, err)
+	}
 	if res, err := svc.ChangeTool(4); err != nil || res.Command != "M6T4" {
 		t.Fatalf("ChangeTool result=%+v err=%v", res, err)
 	}
@@ -1530,16 +1533,174 @@ func TestToolActionsSendControllerCommands(t *testing.T) {
 	if res, err := svc.CalibrateCurrentTool(); err != nil || res.Command != "M491" {
 		t.Fatalf("CalibrateCurrentTool result=%+v err=%v", res, err)
 	}
-	if g := m.Gcodes(); len(g) != 8 ||
+	if g := m.Gcodes(); len(g) != 9 ||
 		g[0] != "M493.2T3" ||
 		g[1] != "M493.2T0" ||
 		g[2] != "M493.2T-1" ||
 		g[3] != "M493.2T8888" ||
-		g[4] != "M6T4" ||
-		g[5] != "M490.2" ||
-		g[6] != "M6T-1" ||
-		g[7] != "M491" {
+		g[4] != "M493.2T9999" ||
+		g[5] != "M6T4" ||
+		g[6] != "M490.2" ||
+		g[7] != "M6T-1" ||
+		g[8] != "M491" {
 		t.Fatalf("machine gcodes = %v, want vendor tool commands", g)
+	}
+}
+
+func TestProbe3DMapsControllerOperations(t *testing.T) {
+	tests := []struct {
+		kind string
+		want string
+	}{
+		{"outside_top_left", "M480.1 X20 Y21 Z2 D2"},
+		{"outside_top_right", "M480.2 X20 Y21 Z2 D2"},
+		{"outside_bottom_right", "M480.3 X20 Y21 Z2 D2"},
+		{"outside_bottom_left", "M480.4 X20 Y21 Z2 D2"},
+		{"inside_top_left", "M480.5 X20 Y21 Z2 D2"},
+		{"inside_top_right", "M480.6 X20 Y21 Z2 D2"},
+		{"inside_bottom_right", "M480.7 X20 Y21 Z2 D2"},
+		{"inside_bottom_left", "M480.8 X20 Y21 Z2 D2"},
+		{"bore_pocket", "M480.9 X20 Y21 Z2 D2"},
+		{"bore_pocket_x", "M480.9 X20 Y0 Z2 D2"},
+		{"bore_pocket_y", "M480.9 X0 Y21 Z2 D2"},
+		{"boss_block", "M480.10 X20 Y21 Z2 D2"},
+		{"boss_block_x", "M480.10 X20 Y0 Z2 D2"},
+		{"boss_block_y", "M480.10 X0 Y21 Z2 D2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			got, _, err := probe3DLine(Probe3DRequest{
+				Kind:       tt.kind,
+				XOffsetMM:  -20,
+				YOffsetMM:  -21,
+				ZOffsetMM:  -2,
+				DiameterMM: -2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got = strings.TrimSpace(got); got != tt.want {
+				t.Fatalf("probe3DLine = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProbe3DRequiresDedicatedToolAndSendsVendorCommand(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	tr.Observe(machine.Idle)
+	req := Probe3DRequest{
+		Kind:       "outside_bottom_left",
+		XOffsetMM:  20,
+		YOffsetMM:  20,
+		ZOffsetMM:  2,
+		DiameterMM: 2,
+	}
+	if _, err := svc.Probe3D(req); !errors.Is(err, ErrProbeUnavailable) {
+		t.Fatalf("Probe3D with regular tool err = %v, want ErrProbeUnavailable", err)
+	}
+	if got := m.Gcodes(); len(got) != 0 {
+		t.Fatalf("3D probe leaked without dedicated tool: %v", got)
+	}
+	if _, err := svc.SetCurrentToolID(ToolID3DProbe); err != nil {
+		t.Fatal(err)
+	}
+	res, err := svc.Probe3D(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verified || res.Command != "M480.4 X20 Y20 Z2 D2" || !strings.Contains(res.Message, "machine completion was not available") {
+		t.Fatalf("Probe3D result = %+v", res)
+	}
+	if got := m.Gcodes(); !stringSlicesEqual(got, []string{"M493.2T9999", "M480.4 X20 Y20 Z2 D2"}) {
+		t.Fatalf("3D probe gcodes = %v", got)
+	}
+}
+
+func TestProbe3DRejectsPredictableInitialSoftLimitMove(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Idle|MPos:-252.725,-164.814,-90.467|WPos:0,0,0|T:9999,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	ui := svc.UISettings()
+	ui.Machine.Learned = store.MachineLearned{
+		LearnedAt: time.Now(),
+		SoftEndstop: store.MachineSoftEndstopProfile{
+			Enabled: true,
+			XMin:    -302,
+			XMax:    -1,
+			YMin:    -212,
+			YMax:    -1,
+		},
+	}
+	if _, err := svc.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.Probe3D(Probe3DRequest{
+		Kind:       "boss_block",
+		XOffsetMM:  50,
+		YOffsetMM:  50,
+		ZOffsetMM:  2,
+		DiameterMM: 2,
+	})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("Probe3D err = %v, want ErrInvalidArgument", err)
+	}
+	if !strings.Contains(err.Error(), "X positioning target -302.725 mm") ||
+		!strings.Contains(err.Error(), "at most 49.275 mm") {
+		t.Fatalf("Probe3D err = %v, want exact soft-limit preflight", err)
+	}
+	if got := m.Gcodes(); len(got) != 0 {
+		t.Fatalf("unsafe 3D probe leaked to machine: %v", got)
+	}
+	for _, line := range svc.GcodeLog().Recent() {
+		if strings.Contains(line.Text, "3d probe M480") {
+			t.Fatalf("rejected 3D probe was falsely logged as sent: %+v", line)
+		}
+	}
+}
+
+func TestProbe3DInitialPositionLimitDirectionsMatchFirmwareModes(t *testing.T) {
+	limits := store.MachineSoftEndstopProfile{XMin: -100, XMax: 100, YMin: -100, YMax: 100}
+	tests := []struct {
+		kind string
+		mpos machine.AxisValues
+		axis string
+	}{
+		{"outside_top_left", machine.AxisValues{"x": -95, "y": 0}, "X"},
+		{"outside_top_right", machine.AxisValues{"x": 95, "y": 0}, "X"},
+		{"outside_bottom_right", machine.AxisValues{"x": 0, "y": -95}, "Y"},
+		{"outside_bottom_left", machine.AxisValues{"x": -95, "y": 0}, "X"},
+		{"inside_top_left", machine.AxisValues{"x": 0, "y": -95}, "Y"},
+		{"inside_top_right", machine.AxisValues{"x": -95, "y": 0}, "X"},
+		{"inside_bottom_right", machine.AxisValues{"x": 0, "y": 95}, "Y"},
+		{"inside_bottom_left", machine.AxisValues{"x": 95, "y": 0}, "X"},
+		{"boss_block_x", machine.AxisValues{"x": -95, "y": 0}, "X"},
+		{"boss_block_y", machine.AxisValues{"x": 0, "y": -95}, "Y"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			err := probe3DInitialPositionLimitError(Probe3DRequest{
+				Kind:       tt.kind,
+				XOffsetMM:  10,
+				YOffsetMM:  10,
+				ZOffsetMM:  2,
+				DiameterMM: 2,
+			}, tt.mpos, limits)
+			if err == nil || !strings.Contains(err.Error(), tt.axis+" positioning target") {
+				t.Fatalf("probe3DInitialPositionLimitError = %v, want %s limit", err, tt.axis)
+			}
+		})
+	}
+	if err := probe3DInitialPositionLimitError(
+		Probe3DRequest{Kind: "bore_pocket", XOffsetMM: 500, YOffsetMM: 500},
+		machine.AxisValues{"x": -95, "y": -95},
+		limits,
+	); err != nil {
+		t.Fatalf("bore/pocket has no deterministic positioning move: %v", err)
 	}
 }
 

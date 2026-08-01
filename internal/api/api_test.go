@@ -791,6 +791,10 @@ func TestWebUIServed(t *testing.T) {
 		`#active-job-view { grid-template-rows: max-content; align-content: start; }`,
 		`#active-gcode-panel { align-content: start; padding: 8px; gap: 0; }`,
 		`.active-gcode-body { min-width: 0; display: grid; grid-template-rows: auto auto; align-content: start; gap: 4px; }`,
+		`#active-job-view { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }`,
+		`#active-gcode-panel { min-height: 0; height: 100%; grid-template-rows: minmax(0, 1fr); align-content: stretch; }`,
+		`.active-gcode-body { min-height: 0; height: 100%; grid-template-rows: auto minmax(0, 1fr); align-content: stretch; }`,
+		`.active-gcode-workspace { min-height: 0; height: 100%; }`,
 		`align-items: start; min-height: 0; margin-top: 4px;`,
 	} {
 		if !strings.Contains(string(body), want) {
@@ -830,7 +834,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing compact Outline Probe layout %s", want)
 		}
 	}
-	for _, want := range []string{`Arm Movement`, `class="command-movement-arm"`, `Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `data-origin-zero="x"`, `data-origin-zero="y"`, `data-origin-zero="z"`, `Set XYZ`, `id="origin-set-xyz-open"`, `id="origin-xyz-modal"`, `id="origin-xyz-x"`, `id="origin-xyz-y"`, `id="origin-xyz-z"`, `id="origin-xyz-apply"`, `Set Origin`, `id="origin-set-open"`, `id="origin-set-modal"`, `id="origin-set-source"`, `id="origin-set-x"`, `id="origin-set-y"`, `id="origin-set-apply"`, `Origin Presets`, `id="origin-presets-open"`, `id="origin-presets-modal"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="origin-probe-z"`, `Probe Z`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `aria-label="Machine XY travel area"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `Outline Probe`, `id="outline-probe-floor"`, `Probe Floor`, `id="outline-close"`, `id="outline-load"`, `id="outline-save"`, `id="outline-file"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `Probe Field Z`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings-open"`, `id="machine-settings-modal"`, `id="machine-settings-close"`, `Travel X Min`, `Travel X Max`, `Travel Y Min`, `Travel Y Max`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learned-summary"`, `<summary>Gamepad</summary>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-outline-button"`, `gamepad-outline-button-help`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
+	for _, want := range []string{`Arm Movement`, `class="command-movement-arm"`, `Jog Settings`, `id="tap-feed-mm-min"`, `data-feed-step="-500"`, `data-feed-step="500"`, `id="tap-safe-z-enabled"`, `Move To Work`, `id="work-move-x"`, `id="work-move-y"`, `id="work-move-z"`, `data-work-move-reset="x"`, `data-work-move-reset="y"`, `data-work-move-reset="z"`, `id="work-move-send"`, `Work Zero`, `data-origin-zero="x"`, `data-origin-zero="y"`, `data-origin-zero="z"`, `Set XYZ`, `id="origin-set-xyz-open"`, `id="origin-xyz-modal"`, `id="origin-xyz-x"`, `id="origin-xyz-y"`, `id="origin-xyz-z"`, `id="origin-xyz-apply"`, `Set Origin`, `id="origin-set-open"`, `id="origin-set-modal"`, `id="origin-set-source"`, `id="origin-set-x"`, `id="origin-set-y"`, `id="origin-set-apply"`, `Origin Presets`, `id="origin-presets-open"`, `id="origin-presets-modal"`, `id="saved-origin-select"`, `id="saved-origin-recall"`, `id="saved-origin-delete"`, `id="saved-origin-label"`, `id="saved-origin-save"`, `id="origin-probe-z"`, `Probe Z`, `id="origin-probe-3d"`, `id="probe-3d-modal"`, `id="probe-3d-kind"`, `id="probe-3d-run"`, `3D Probe`, `id="workarea-hover-position"`, `id="workarea-zoom-out"`, `id="workarea-zoom-reset"`, `id="workarea-zoom-in"`, `id="workarea-viewport"`, `id="workarea-boundary"`, `aria-label="Machine XY travel area"`, `id="workarea-origin"`, `id="workarea-origin-xp"`, `id="workarea-origin-xm"`, `id="workarea-origin-yp"`, `id="workarea-origin-ym"`, `id="workarea-spindle"`, `id="workarea-target"`, `id="workarea-outline"`, `id="workarea-field-probe-preview"`, `id="outline-preview-controls"`, `id="outline-start"`, `Capture outline`, `id="outline-active-controls"`, `id="outline-end"`, `id="outline-add-point"`, `id="outline-trace"`, `Trace outline`, `id="outline-undo"`, `id="outline-redo"`, `id="outline-curve-fit"`, `Outline Probe`, `id="outline-probe-floor"`, `Probe Floor`, `id="outline-close"`, `id="outline-load"`, `id="outline-save"`, `id="outline-file"`, `id="outline-export"`, `id="outline-field-spacing"`, `Spot Gap`, `id="outline-field-probe"`, `Probe Field Z`, `id="outline-export-obj"`, `id="outline-export-height"`, `id="z-step-distance"`, `data-z-step-dir="1"`, `data-z-step-dir="-1"`, `id="machine-settings-open"`, `id="machine-settings-modal"`, `id="machine-settings-close"`, `Travel X Min`, `Travel X Max`, `Travel Y Min`, `Travel Y Max`, `id="machine-x-min"`, `id="machine-feed-min"`, `id="machine-feed-max"`, `id="machine-safe-z"`, `id="machine-learn"`, `Learn from machine`, `id="machine-learned-summary"`, `<summary>Gamepad</summary>`, `id="gamepad-panel"`, `id="gamepad-settings"`, `id="gamepad-axis-x"`, `id="gamepad-speed-z"`, `id="gamepad-outline-button"`, `gamepad-outline-button-help`, `id="gamepad-macro-bindings"`, `id="gamepad-add-macro"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -862,7 +866,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index still contains removed Probe Z row marker %s", gone)
 		}
 	}
-	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="tap-primary-controls"`, `class="tap-feed-stepper"`, `class="tap-safe-z-field"`, `class="tap-safe-z-toggle"`, `class="tap-coordinate-panel"`, `class="tap-coordinate-row"`, `grid-template-columns: repeat(3, 112px) 64px`, `class="work-move-label"`, `class="work-move-field is-live"`, `class="work-move-reset"`, `class="icon-reset"`, `class="tap-origin-panel"`, `class="origin-action-grid"`, `class="origin-modal"`, `class="origin-modal-fields"`, `class="origin-modal-source"`, `id="origin-set-change"`, `class="origin-set-change"`, `class="origin-row origin-row-preset"`, `class="origin-row origin-row-save"`, `class="saved-origin-label-field"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="workarea-controls"`, `class="outline-preview-controls"`, `width: min(178px, calc(100% - 86px))`, `.tap-move-toolbar button, .tap-safe-z-toggle`, `#jog-arm { width: 100%; min-width: 0;`, `white-space: nowrap; overflow: hidden; text-overflow: ellipsis;`, `class="outline-active-controls"`, `class="outline-capture" hidden`, `class="outline-probe-actions"`, `class="machine-settings-actions"`, `class="machine-settings-modal-body"`, `class="machine-settings-section"`, `class="machine-settings-fields machine-settings-travel-fields"`, `class="machine-settings-fields machine-settings-origin-fields"`, `class="machine-settings-fields machine-settings-motion-fields"`, `class="machine-settings-field"`, `class="machine-learned-summary"`, `class="z-step-controls"`, `class="table-scroll"`} {
+	for _, want := range []string{`class="machine-status-item machine-status-position"`, `class="position-line"`, `class="tap-move-toolbar"`, `class="tap-primary-controls"`, `class="tap-feed-stepper"`, `class="tap-safe-z-field"`, `class="tap-safe-z-toggle"`, `class="tap-coordinate-panel"`, `class="tap-coordinate-row"`, `grid-template-columns: repeat(3, 112px) 64px`, `class="work-move-label"`, `class="work-move-field is-live"`, `class="work-move-reset"`, `class="icon-reset"`, `class="tap-origin-panel"`, `class="origin-action-grid"`, `class="origin-modal"`, `class="origin-modal-fields"`, `class="origin-modal-source"`, `id="origin-set-change"`, `class="origin-set-change"`, `class="origin-row origin-row-preset"`, `class="origin-row origin-row-save"`, `class="saved-origin-label-field"`, `class="tap-move-body"`, `class="workarea-frame"`, `class="workarea-controls"`, `class="outline-preview-controls"`, `width: min(178px, calc(100% - 86px))`, `.tap-move-toolbar button, .tap-safe-z-toggle`, `#jog-arm { width: 100%; min-width: 0;`, `white-space: nowrap; overflow: hidden; text-overflow: ellipsis;`, `class="outline-active-controls"`, `class="outline-capture" hidden`, `class="outline-probe-actions"`, `class="machine-settings-actions"`, `class="machine-settings-modal-body"`, `class="machine-settings-section"`, `class="machine-settings-fields machine-settings-travel-fields"`, `class="machine-settings-fields machine-settings-origin-fields"`, `class="machine-settings-fields machine-settings-motion-fields"`, `class="machine-settings-field"`, `class="machine-learned-summary"`, `class="z-step-controls"`, `class="table-scroll"`, `id="probe-3d-preflight" class="probe-3d-preflight" aria-hidden="true"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing layout marker %s", want)
 		}
@@ -980,7 +984,7 @@ func TestWebUIServed(t *testing.T) {
 	if got := three.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("three.module.min.js Cache-Control = %q, want no-store", got)
 	}
-	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "activeJobPreviewState", "gcodeCursorForPlayedLine", "syncActiveGcodeFromMachine", "ensureActiveGcodeSource", "renderActiveGcodeSource", "gcodeSourceLineForCursor", "gcodeSourceWindow", "syncActiveGcodeSourceLine", "showActiveJobLeftTab", "activeJobLeftTabs", "activeJobSplitBounds", "setActiveJobSplitPercent", "bindActiveJobSplitter", "activeJobOverlayOriginFrom", "activeJobContextOverlayData", "interpolateOutlinePathZ", "activeJobFieldProbeComplete", "field_probe_complete", "syncGcodeContextOverlay", "rebuildGcodeContextOverlay", "combineGcodeBounds", "gcodeRenderPixelRatio", "viewCubeTargetComponents", "gcodeOrbitAnglesForDirection", `projection: "orthographic"`, `gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 })`, "onGcodeViewCubePointerMove", "rotateGcodeOrbitByDrag", "gcodeCubeDragStep", "THREE.WebGLRenderer", "gcodeWorldCoordinates", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active", "/api/files/", "/api/tool/current", "/api/tool/change", "/api/tool/continue", "/api/tool/calibrate"} {
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "drawGcodePreview", "activeJobPreviewState", "gcodeCursorForPlayedLine", "syncActiveGcodeFromMachine", "ensureActiveGcodeSource", "renderActiveGcodeSource", "gcodeSourceLineForCursor", "gcodeSourceWindow", "syncActiveGcodeSourceLine", "showActiveJobLeftTab", "activeJobLeftTabs", "activeJobSplitBounds", "setActiveJobSplitPercent", "bindActiveJobSplitter", "activeJobOverlayOriginFrom", "activeJobContextOverlayData", "interpolateOutlinePathZ", "activeJobFieldProbeComplete", "field_probe_complete", "syncGcodeContextOverlay", "rebuildGcodeContextOverlay", "combineGcodeBounds", "gcodeRenderPixelRatio", "viewCubeTargetComponents", "gcodeOrbitAnglesForDirection", `projection: "orthographic"`, `gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 })`, "onGcodeViewCubePointerMove", "rotateGcodeOrbitByDrag", "gcodeCubeDragStep", "THREE.WebGLRenderer", "gcodeWorldCoordinates", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active", "/api/files/", "/api/tool/current", "/api/tool/change", "/api/tool/continue", "/api/tool/calibrate", "/api/probe/3d", "runProbe3D", "is3DProbeToolActive"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -1795,6 +1799,81 @@ func TestFloorZProbeEndpointRetractsToSafeZ(t *testing.T) {
 	want := []string{"G53 G0 Z-5.0000", "G38.2 Z-20.0000 F50.0000", "G10 L20 P0 Z0", "G53 G0 Z-3.0000"}
 	if got := m.Gcodes(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("floor z probe gcodes = %v, want %v", got, want)
+	}
+}
+
+func TestProbe3DEndpointUsesDedicatedToolAndVendorWorkflow(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	status := "<Idle|MPos:20,30,-5|WPos:12.5,-3.25,1|T:9999,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+
+	resp := postJSON(t, srv.URL+"/api/probe/3d", map[string]any{
+		"kind":        "bore_pocket_x",
+		"x_offset_mm": 20,
+		"y_offset_mm": 21,
+		"z_offset_mm": 2,
+		"diameter_mm": 2,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("3D probe status = %d: %s", resp.StatusCode, body)
+	}
+	var result service.MachineActionResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "probe_3d" || result.Verified || result.Command != "M480.9 X20 Y0 Z2 D2" {
+		t.Fatalf("3D probe result = %+v", result)
+	}
+	if got := m.Gcodes(); !reflect.DeepEqual(got, []string{"M480.9 X20 Y0 Z2 D2"}) {
+		t.Fatalf("3D probe gcodes = %v", got)
+	}
+}
+
+func TestProbe3DEndpointRejectsPredictableSoftLimitMove(t *testing.T) {
+	srv, m, tr, svc, _ := serverWithMachineState(t)
+	status := "<Idle|MPos:-252.725,-164.814,-90.467|WPos:0,0,0|T:9999,0>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("failed to seed tracker status")
+	}
+	ui := svc.UISettings()
+	ui.Machine.Learned = store.MachineLearned{
+		LearnedAt: time.Now(),
+		SoftEndstop: store.MachineSoftEndstopProfile{
+			Enabled: true,
+			XMin:    -302,
+			XMax:    -1,
+			YMin:    -212,
+			YMax:    -1,
+		},
+	}
+	if _, err := svc.SetUISettings(ui); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := postJSON(t, srv.URL+"/api/probe/3d", map[string]any{
+		"kind":        "boss_block",
+		"x_offset_mm": 50,
+		"y_offset_mm": 50,
+		"z_offset_mm": 2,
+		"diameter_mm": 2,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("3D probe status = %d: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("X positioning target -302.725 mm")) {
+		t.Fatalf("3D probe error = %s", body)
+	}
+	if got := m.Gcodes(); len(got) != 0 {
+		t.Fatalf("unsafe 3D probe leaked through API: %v", got)
 	}
 }
 

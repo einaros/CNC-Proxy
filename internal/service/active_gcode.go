@@ -368,21 +368,23 @@ func (s *Service) RunActiveGcode() (MachineActionResult, error) {
 }
 
 func validCurrentToolID(toolID int) bool {
-	return toolID == -1 || toolID == 0 || toolID == 8888 || (toolID >= 1 && toolID <= 999)
+	return toolID == -1 || toolID == ToolIDProbe || toolID == ToolIDLaser || toolID == ToolID3DProbe || (toolID >= 1 && toolID <= 999)
 }
 
 func validChangeToolID(toolID int) bool {
-	return toolID == 0 || toolID == 8888 || (toolID >= 1 && toolID <= 999)
+	return toolID == ToolIDProbe || toolID == ToolIDLaser || toolID == ToolID3DProbe || (toolID >= 1 && toolID <= 999)
 }
 
 func toolDisplayName(toolID int) string {
 	switch toolID {
 	case -1:
 		return "Empty"
-	case 0:
+	case ToolIDProbe:
 		return "Probe"
-	case 8888:
+	case ToolIDLaser:
 		return "Laser"
+	case ToolID3DProbe:
+		return "3D Probe"
 	default:
 		return fmt.Sprintf("Tool %d", toolID)
 	}
@@ -392,7 +394,7 @@ func toolDisplayName(toolID int) string {
 // declaring which tool is currently installed.
 func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
 	if !validCurrentToolID(toolID) {
-		err := fmt.Errorf("%w: tool_id must be Empty (-1), Probe (0), Laser (8888), or between 1 and 999", ErrInvalidArgument)
+		err := fmt.Errorf("%w: tool_id must be Empty (-1), Probe (0), Laser (8888), 3D Probe (9999), or between 1 and 999", ErrInvalidArgument)
 		return MachineActionResult{Action: "set_tool", ToolID: toolID, Message: err.Error()}, err
 	}
 	display := strings.TrimSpace(protocol.SetCurrentToolLine(toolID))
@@ -415,7 +417,7 @@ func (s *Service) SetCurrentToolID(toolID int) (MachineActionResult, error) {
 // tool with the firmware's normal tool-change flow.
 func (s *Service) ChangeTool(toolID int) (MachineActionResult, error) {
 	if !validChangeToolID(toolID) {
-		err := fmt.Errorf("%w: tool_id must be Probe (0), Laser (8888), or between 1 and 999", ErrInvalidArgument)
+		err := fmt.Errorf("%w: tool_id must be Probe (0), Laser (8888), 3D Probe (9999), or between 1 and 999", ErrInvalidArgument)
 		return MachineActionResult{Action: "change_tool", ToolID: toolID, Message: err.Error()}, err
 	}
 	display := strings.TrimSpace(protocol.ChangeToolLine(toolID))
@@ -596,6 +598,190 @@ func (s *Service) zProbeSetWorkZero(retractSafe bool) (MachineActionResult, erro
 		return res, err
 	}
 	return res, nil
+}
+
+// Probe3D starts the official controller's wired 3D-probe workflow. Firmware
+// tool 9999 enables the wired probe input; M480 owns the complete motion
+// sequence and work-origin update. The command remains unverified because the
+// WiFi protocol has no correlated completion reply for this automation.
+func (s *Service) Probe3D(req Probe3DRequest) (MachineActionResult, error) {
+	line, label, err := probe3DLine(req)
+	if err != nil {
+		err = fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+		return MachineActionResult{Action: "probe_3d", Message: err.Error()}, err
+	}
+	display := strings.TrimSpace(line)
+	res := MachineActionResult{
+		Action:  "probe_3d",
+		ToolID:  ToolID3DProbe,
+		Command: display,
+		Message: "3D probe command sent for " + label + "; machine completion was not available.",
+	}
+	err = s.arb.WithMachine(true, func(c *client.Conn) error {
+		st, statusErr := s.queryRecoveryStatus(c)
+		if statusErr != nil {
+			if errors.Is(statusErr, ErrMachineStatusStale) {
+				return statusErr
+			}
+			return fmt.Errorf("%w: %v", ErrMachineStatusStale, statusErr)
+		}
+		if st.State != machine.Idle {
+			return fmt.Errorf("%w: machine reports %s", ErrMachineStatusStale, statusSummary(st))
+		}
+		if st.Tool == nil || st.Tool.Active != ToolID3DProbe {
+			return fmt.Errorf("%w: active tool is %s; 3D Probe (9999) is required", ErrProbeUnavailable, toolStatusLabel(st.Tool))
+		}
+		if limitErr := probe3DInitialPositionLimitError(req, st.MPos, s.store.UISettings().Machine.Learned.SoftEndstop); limitErr != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidArgument, limitErr)
+		}
+		s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "3d probe "+display)
+		out, sendErr := c.SendConsoleCommand(ensureWireLine(line), client.GcodeOpts{Cap: gcodeReplyCap})
+		res.Output = out
+		if sendErr != nil {
+			return sendErr
+		}
+		s.refreshStatusBestEffort(c)
+		return nil
+	})
+	if res.Output != "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, res.Output)
+	}
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		res.Message = err.Error()
+		return res, err
+	}
+	if res.Output == "" {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "sent: no reply observed")
+	}
+	return res, nil
+}
+
+func probe3DLine(req Probe3DRequest) (string, string, error) {
+	values := map[string]float64{
+		"x offset": req.XOffsetMM,
+		"y offset": req.YOffsetMM,
+		"z offset": req.ZOffsetMM,
+		"diameter": req.DiameterMM,
+	}
+	for name, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return "", "", fmt.Errorf("service: 3D probe %s must be finite", name)
+		}
+		if math.Abs(value) > maxMachineSpanMM {
+			return "", "", fmt.Errorf("service: 3D probe %s magnitude must not exceed %.0f mm", name, float64(maxMachineSpanMM))
+		}
+	}
+	if req.DiameterMM == 0 {
+		return "", "", fmt.Errorf("service: 3D probe diameter must be greater than zero")
+	}
+
+	x := math.Abs(req.XOffsetMM)
+	y := math.Abs(req.YOffsetMM)
+	z := math.Abs(req.ZOffsetMM)
+	d := math.Abs(req.DiameterMM)
+	var subcode int
+	var label string
+	switch strings.ToLower(strings.TrimSpace(req.Kind)) {
+	case "outside_top_left":
+		subcode, label = 1, "outside top-left corner"
+	case "outside_top_right":
+		subcode, label = 2, "outside top-right corner"
+	case "outside_bottom_right":
+		subcode, label = 3, "outside bottom-right corner"
+	case "outside_bottom_left":
+		subcode, label = 4, "outside bottom-left corner"
+	case "inside_top_left":
+		subcode, label = 5, "inside top-left corner"
+	case "inside_top_right":
+		subcode, label = 6, "inside top-right corner"
+	case "inside_bottom_right":
+		subcode, label = 7, "inside bottom-right corner"
+	case "inside_bottom_left":
+		subcode, label = 8, "inside bottom-left corner"
+	case "bore_pocket":
+		subcode, label = 9, "bore/pocket center"
+	case "bore_pocket_x":
+		subcode, label, y = 9, "bore/pocket X center", 0
+	case "bore_pocket_y":
+		subcode, label, x = 9, "bore/pocket Y center", 0
+	case "boss_block":
+		subcode, label = 10, "boss/block center"
+	case "boss_block_x":
+		subcode, label, y = 10, "boss/block X center", 0
+	case "boss_block_y":
+		subcode, label, x = 10, "boss/block Y center", 0
+	default:
+		return "", "", fmt.Errorf("service: unsupported 3D probe kind %q", req.Kind)
+	}
+	return protocol.Probe3DLine(subcode, x, y, z, d), label, nil
+}
+
+// probe3DInitialPositionLimitError mirrors the deterministic, non-probing XY
+// positioning moves generated by the firmware's M480 corner and boss/block
+// routines. Probe moves and post-contact moves are deliberately excluded:
+// their endpoints depend on physical contact and cannot be known beforehand.
+func probe3DInitialPositionLimitError(req Probe3DRequest, mpos machine.AxisValues, limits store.MachineSoftEndstopProfile) error {
+	x, xOK := finiteAxisValue(mpos, "x")
+	y, yOK := finiteAxisValue(mpos, "y")
+	xOffset := math.Abs(req.XOffsetMM)
+	yOffset := math.Abs(req.YOffsetMM)
+	var dx, dy float64
+	var checkX, checkY bool
+	switch strings.ToLower(strings.TrimSpace(req.Kind)) {
+	case "outside_top_left":
+		dx, dy, checkX, checkY = -xOffset, yOffset, true, true
+	case "outside_top_right":
+		dx, dy, checkX, checkY = xOffset, yOffset, true, true
+	case "outside_bottom_right":
+		dx, dy, checkX, checkY = xOffset, -yOffset, true, true
+	case "outside_bottom_left":
+		dx, dy, checkX, checkY = -xOffset, -yOffset, true, true
+	case "inside_top_left":
+		dx, dy, checkX, checkY = xOffset, -yOffset, true, true
+	case "inside_top_right":
+		dx, dy, checkX, checkY = -xOffset, -yOffset, true, true
+	case "inside_bottom_right":
+		dx, dy, checkX, checkY = -xOffset, yOffset, true, true
+	case "inside_bottom_left":
+		dx, dy, checkX, checkY = xOffset, yOffset, true, true
+	case "boss_block":
+		dx, dy, checkX, checkY = -xOffset, -yOffset, true, true
+	case "boss_block_x":
+		dx, checkX = -xOffset, true
+	case "boss_block_y":
+		dy, checkY = -yOffset, true
+	default:
+		return nil
+	}
+	if checkX && xOK {
+		if err := probe3DAxisLimitError("X", x, dx, limits.XMin, limits.XMax); err != nil {
+			return err
+		}
+	}
+	if checkY && yOK {
+		if err := probe3DAxisLimitError("Y", y, dy, limits.YMin, limits.YMax); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func probe3DAxisLimitError(axis string, current, delta, min, max float64) error {
+	if !finite(current) || !finite(delta) || !finite(min) || !finite(max) || min >= max {
+		return nil
+	}
+	target := current + delta
+	switch {
+	case target < min:
+		safeOffset := math.Max(0, current-min)
+		return fmt.Errorf("3D probe %s positioning target %.3f mm is below learned minimum %.3f mm; reduce %s Offset to at most %.3f mm or reposition the probe", axis, target, min, axis, safeOffset)
+	case target > max:
+		safeOffset := math.Max(0, max-current)
+		return fmt.Errorf("3D probe %s positioning target %.3f mm is above learned maximum %.3f mm; reduce %s Offset to at most %.3f mm or reposition the probe", axis, target, max, axis, safeOffset)
+	default:
+		return nil
+	}
 }
 
 func currentWorkXY(st machine.Status) (float64, float64, bool) {

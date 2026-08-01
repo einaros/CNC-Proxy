@@ -44,6 +44,13 @@ import (
 // relative to it.
 const GcodeRoot = "/sd/gcodes"
 
+// Tool IDs reserved by the Carvera firmware.
+const (
+	ToolIDProbe   = 0
+	ToolIDLaser   = 8888
+	ToolID3DProbe = 9999
+)
+
 const (
 	maxUIMacros          = 48
 	maxMacroLines        = 40
@@ -205,6 +212,15 @@ type ProbeZResult struct {
 	Machine    machine.AxisValues `json:"machine"`
 	RetractZMM float64            `json:"retract_z_mm"`
 	Output     string             `json:"output,omitempty"`
+}
+
+// Probe3DRequest describes one vendor M480 wired 3D-probe workflow.
+type Probe3DRequest struct {
+	Kind       string  `json:"kind"`
+	XOffsetMM  float64 `json:"x_offset_mm"`
+	YOffsetMM  float64 `json:"y_offset_mm"`
+	ZOffsetMM  float64 `json:"z_offset_mm"`
+	DiameterMM float64 `json:"diameter_mm"`
 }
 
 // TracePoint is one machine-coordinate XY point for a probe-laser outline trace.
@@ -2379,8 +2395,11 @@ func toolStatusLabel(t *machine.ToolStatus) string {
 	if t == nil {
 		return "unknown"
 	}
-	if t.Active == 0 {
+	if t.Active == ToolIDProbe {
 		return "probe"
+	}
+	if t.Active == ToolID3DProbe {
+		return "3D Probe"
 	}
 	return fmt.Sprintf("tool %d", t.Active)
 }

@@ -127,6 +127,18 @@ func AutoZProbeLine(workX, workY, offsetX, offsetY float64) string {
 		"O" + controllerFloat(offsetX) + "F" + controllerFloat(offsetY) + "\n"
 }
 
+// Probe3DLine builds the controller-compatible wired 3D-probe command. The
+// official controller maps outside corners to M480.1-.4, inside corners to
+// M480.5-.8, bore/pocket centering to M480.9, and boss/block centering to
+// M480.10.
+func Probe3DLine(subcode int, xOffset, yOffset, zOffset, diameter float64) string {
+	return "M480." + strconv.Itoa(subcode) +
+		" X" + controllerFloat(xOffset) +
+		" Y" + controllerFloat(yOffset) +
+		" Z" + controllerFloat(zOffset) +
+		" D" + controllerFloat(diameter) + "\n"
+}
+
 func controllerFloat(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
 }

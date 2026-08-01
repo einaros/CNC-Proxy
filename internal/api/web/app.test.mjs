@@ -2921,6 +2921,49 @@ test("commands wait for Tap Move to release its lease", async () => {
   assert.equal(state.jog.commandDisarm, null);
 });
 
+test("tool changes wait for Movement to disarm", async () => {
+  for (const [name, action, endpoint, toolID] of [
+    ["set", "setCurrentTool", "/api/tool/current", 9999],
+    ["change", "changeTool", "/api/tool/change", 0],
+  ]) {
+    const calls = [];
+    let releaseDisarm;
+    const ctx = buildContext([action], [], {
+      beginToolAction: (kind) => {
+        calls.push("begin:" + kind);
+        return true;
+      },
+      finishToolAction: (kind) => calls.push("finish:" + kind),
+      validToolID: () => true,
+      toolDisplayName: () => "3D Probe",
+      setToolFeedback: (message) => calls.push("feedback:" + message),
+      disarmTapMoveForCommand: () => {
+        calls.push("disarm");
+        return new Promise((resolve) => { releaseDisarm = resolve; });
+      },
+      request: async (path) => {
+        calls.push("request:" + path);
+        return { json: async () => ({ verified: true, message: "Tool changed." }) };
+      },
+      resetToolSelects: () => calls.push("reset"),
+      refreshMachineAfterToolAction: () => calls.push("refresh"),
+      appendGcodeLine: () => {},
+    });
+
+    const pending = vm.runInContext(`${action}(${toolID})`, ctx);
+    assert.deepEqual(calls, [
+      "begin:" + name,
+      "feedback:Disarming Movement before " + (name === "set" ? "setting" : "changing to") + " 3D Probe...",
+      "disarm",
+    ], name + " should wait for the disarm acknowledgement before sending the tool command");
+    releaseDisarm();
+    await pending;
+    assert.ok(calls.includes("request:" + endpoint), name + " sends the tool command after Movement is disarmed");
+    assert.ok(calls.includes("feedback:Sending " + (name === "set" ? "set-tool" : "change-tool") + " command for 3D Probe..."));
+    assert.equal(calls.at(-1), "finish:" + name);
+  }
+});
+
 test("machine learning always leaves pending state and reports through the bottom status bar", async () => {
   const state = { machineLearnPending: false };
   const calls = [];
@@ -3067,4 +3110,217 @@ test("file action lifecycle exposes pending state and releases it", () => {
   vm.runInContext("endFileAction('/sd/gcodes/part.nc')", ctx);
   assert.equal(state.fileActions.size, 0);
   assert.equal(renders.length, 2);
+});
+
+test("3D probe field rules mirror the controller variants", () => {
+  const ctx = buildContext(["probe3DFieldRules"]);
+  assert.deepEqual(
+    JSON.parse(vm.runInContext('JSON.stringify(probe3DFieldRules("bore_pocket_x"))', ctx)),
+    {
+      x: true,
+      y: false,
+      z: false,
+      note: "Move the 3D Probe inside the bore or pocket with its contact point below the top surface, and make sure the probe is stable.",
+    },
+  );
+  assert.deepEqual(
+    JSON.parse(vm.runInContext('JSON.stringify(probe3DFieldRules("boss_block_y"))', ctx)),
+    {
+      x: false,
+      y: true,
+      z: true,
+      note: "Z Offset is the probe tip-to-surface distance during edge probing. Make sure the 3D Probe is stable.",
+    },
+  );
+});
+
+test("3D Probe is a dedicated firmware tool ID", () => {
+  const ctx = buildContext(["validToolID", "toolDisplayName"]);
+  assert.equal(vm.runInContext("validToolID(9999, false)", ctx), true);
+  assert.equal(vm.runInContext("toolDisplayName(9999)", ctx), "3D Probe");
+  assert.equal(vm.runInContext("validToolID(1000, false)", ctx), false);
+});
+
+test("3D probe travel preflight mirrors deterministic firmware positioning", () => {
+  const ctx = buildContext(["probe3DInitialPositioning", "probe3DTravelPreflight"]);
+  const bounds = { x: { min: -302, max: -1 }, y: { min: -212, max: -1 } };
+  const result = JSON.parse(vm.runInContext(
+    `JSON.stringify(probe3DTravelPreflight(
+      "boss_block",
+      50,
+      50,
+      { x: -252.725, y: -164.814 },
+      ${JSON.stringify(bounds)}
+    ))`,
+    ctx,
+  ));
+  assert.equal(result.blocked, true);
+  assert.match(result.warning, /X target -302\.725 mm is below learned minimum -302\.000 mm/);
+  assert.match(result.warning, /maximum X Offset here: 49\.275 mm/);
+  assert.match(result.warning, /Y target -214\.814 mm is below learned minimum -212\.000 mm/);
+  assert.match(result.warning, /maximum Y Offset here: 47\.186 mm/);
+
+  assert.deepEqual(
+    JSON.parse(vm.runInContext('JSON.stringify(probe3DInitialPositioning("inside_top_right", 20, 21))', ctx)),
+    { x: -20, y: -21 },
+  );
+  assert.deepEqual(
+    JSON.parse(vm.runInContext('JSON.stringify(probe3DInitialPositioning("outside_top_right", 20, 21))', ctx)),
+    { x: 20, y: 21 },
+  );
+  assert.equal(
+    vm.runInContext(`probe3DTravelPreflight("bore_pocket", 500, 500, {x:-300,y:-210}, ${JSON.stringify(bounds)}).blocked`, ctx),
+    false,
+    "bore/pocket has no deterministic non-probing positioning move",
+  );
+});
+
+test("3D probe popup exposes the warning and disables Probe for a predicted conflict", () => {
+  const toggles = [];
+  const attrs = new Map();
+  const element = (extra = {}) => ({
+    disabled: false,
+    classList: { toggle: (name, active) => toggles.push([name, active]) },
+    setAttribute: (name, value) => attrs.set(name, value),
+    ...extra,
+  });
+  const elements = new Map([
+    ["probe-3d-kind", element({ value: "boss_block" })],
+    ["probe-3d-x-field", element()],
+    ["probe-3d-y-field", element()],
+    ["probe-3d-z-field", element()],
+    ["probe-3d-x", element({ value: "50" })],
+    ["probe-3d-y", element({ value: "50" })],
+    ["probe-3d-z", element({ value: "2" })],
+    ["probe-3d-diameter", element({ value: "2" })],
+    ["probe-3d-note", element({ textContent: "" })],
+    ["probe-3d-preflight", element({ textContent: "" })],
+    ["probe-3d-run", element({ textContent: "" })],
+    ["probe-3d-cancel", element()],
+    ["probe-3d-close", element()],
+  ]);
+  const warning = "Soft-limit risk: X target -302.725 mm is below learned minimum -302.000 mm.";
+  const ctx = buildContext(["renderProbe3DForm"], [], {
+    state: { jog: { probe3DPending: false } },
+    document: { getElementById: (id) => elements.get(id) || null },
+    probe3DFieldRules: () => ({ x: true, y: true, z: true, note: "Probe note." }),
+    probe3DPreflightFromControls: () => ({ blocked: true, warning }),
+    setTextIfChanged: (node, text) => { node.textContent = text; },
+    setElementBusy: () => {},
+  });
+  vm.runInContext("renderProbe3DForm()", ctx);
+  assert.equal(elements.get("probe-3d-preflight").textContent, warning);
+  assert.equal(elements.get("probe-3d-run").disabled, true);
+  assert.equal(attrs.get("aria-hidden"), "false");
+  assert.ok(toggles.some(([name, active]) => name === "is-visible" && active));
+});
+
+test("3D probe action sends the selected controller workflow", async () => {
+  const elements = new Map([
+    ["probe-3d-kind", { value: "inside_top_right" }],
+    ["probe-3d-x", { value: "20" }],
+    ["probe-3d-y", { value: "21" }],
+    ["probe-3d-z", { value: "2" }],
+    ["probe-3d-diameter", { value: "2" }],
+    ["probe-3d-modal", { close() {} }],
+  ]);
+  const state = {
+    jog: {
+      armed: false,
+      zProbePending: false,
+      probe3DPending: false,
+      zStepPending: 0,
+      target: { x: -80, y: -70, z: -5 },
+      targetLabel: "X -80.0 Y -70.0",
+    },
+    machine: { mpos: { x: -100, y: -100 } },
+  };
+  const requests = [];
+  const feedback = [];
+  const ctx = buildContext(
+    ["runProbe3D", "probe3DRequestFromControls", "probe3DNumber"],
+    [],
+    {
+      state,
+      document: { getElementById: (id) => elements.get(id) || null },
+      tapMoveTargetBusy: () => false,
+      hasPendingOriginOperation: () => false,
+      machineReadyForOriginSet: () => true,
+      is3DProbeToolActive: () => true,
+      probe3DTravelPreflight: () => ({ blocked: false, warning: "" }),
+      probe3DLearnedTravelBounds: () => ({}),
+      setOriginFeedback: (...args) => feedback.push(args),
+      renderJog: () => {},
+      renderProbe3DForm: () => {},
+      request: async (path, options) => {
+        requests.push({ path, options });
+        return { json: async () => ({ verified: false, message: "3D probe command sent; machine completion was not available." }) };
+      },
+      pollMachine: () => {},
+      setTimeout: () => {},
+      appendGcodeLine: () => {},
+    },
+  );
+  await vm.runInContext("runProbe3D()", ctx);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/probe/3d");
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    kind: "inside_top_right",
+    x_offset_mm: 20,
+    y_offset_mm: 21,
+    z_offset_mm: 2,
+    diameter_mm: 2,
+  });
+  assert.equal(state.jog.zProbePending, false);
+  assert.equal(state.jog.probe3DPending, false);
+  assert.equal(state.jog.target, null, "accepted M480 motion retires the previous Tap Move marker");
+  assert.equal(state.jog.targetLabel, "");
+  assert.deepEqual(feedback.at(-1), ["3D probe command sent; machine completion was not available.", ""]);
+});
+
+test("3D probe action does not submit a predicted soft-limit conflict", async () => {
+  const elements = new Map([
+    ["probe-3d-kind", { value: "boss_block" }],
+    ["probe-3d-x", { value: "50" }],
+    ["probe-3d-y", { value: "50" }],
+    ["probe-3d-z", { value: "2" }],
+    ["probe-3d-diameter", { value: "2" }],
+  ]);
+  const state = {
+    jog: {
+      armed: false,
+      zProbePending: false,
+      probe3DPending: false,
+      zStepPending: 0,
+      target: { x: -250, y: -160, z: -90 },
+      targetLabel: "X -250.0 Y -160.0",
+    },
+    machine: { mpos: { x: -252.725, y: -164.814 } },
+  };
+  const requests = [];
+  const feedback = [];
+  const warning = "Soft-limit risk: X target -302.725 mm is below learned minimum -302.000 mm.";
+  const ctx = buildContext(
+    ["runProbe3D", "probe3DRequestFromControls", "probe3DNumber"],
+    [],
+    {
+      state,
+      document: { getElementById: (id) => elements.get(id) || null },
+      tapMoveTargetBusy: () => false,
+      hasPendingOriginOperation: () => false,
+      machineReadyForOriginSet: () => true,
+      is3DProbeToolActive: () => true,
+      probe3DTravelPreflight: () => ({ blocked: true, warning }),
+      probe3DLearnedTravelBounds: () => ({}),
+      setOriginFeedback: (...args) => feedback.push(args),
+      renderProbe3DForm: () => {},
+      request: async (...args) => requests.push(args),
+    },
+  );
+  await vm.runInContext("runProbe3D()", ctx);
+  assert.equal(requests.length, 0);
+  assert.deepEqual(feedback.at(-1), [warning, "error"]);
+  assert.equal(state.jog.probe3DPending, false);
+  assert.deepEqual(state.jog.target, { x: -250, y: -160, z: -90 }, "rejected probe retains the Tap Move marker");
+  assert.equal(state.jog.targetLabel, "X -250.0 Y -160.0");
 });

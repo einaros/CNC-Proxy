@@ -102,6 +102,7 @@ const state = {
     zStepLabel: "",
     commandDisarm: null,
     zProbePending: false,
+    probe3DPending: false,
     originPending: 0,
     originPendingAxis: "",
     originPendingMode: "",
@@ -348,6 +349,8 @@ function toolDisplayName(toolID) {
     return "Probe";
   case 8888:
     return "Laser";
+  case 9999:
+    return "3D Probe";
   default:
     return Number.isFinite(Number(toolID)) ? "Tool " + Number(toolID) : "-";
   }
@@ -356,7 +359,7 @@ function toolDisplayName(toolID) {
 function validToolID(toolID, allowEmpty = false) {
   if (!Number.isInteger(toolID)) return false;
   if (toolID === -1) return allowEmpty;
-  return toolID === 0 || toolID === 8888 || (toolID >= 1 && toolID <= 999);
+  return toolID === 0 || toolID === 8888 || toolID === 9999 || (toolID >= 1 && toolID <= 999);
 }
 
 function haltReason(m) {
@@ -1284,12 +1287,14 @@ function renderOriginButtons() {
   const j = state.jog;
   const pendingAxis = hasPendingOriginOperation();
   const zProbePending = !!j.zProbePending;
+  const probe3DPending = !!j.probe3DPending;
   const jogReady = !!j.caps?.enabled && j.link === "online" && j.armed;
   const externalJogBusy = !j.armed && j.availability && !j.availability.available && j.availability.reason === "busy";
   const apiReady = !j.armed && machineReadyForOriginSet() && !externalJogBusy;
   const ready = (jogReady || apiReady) && !j.armPending && !tapMoveTargetBusy() && !j.zStepPending && !pendingAxis && !zProbePending;
   const busy = !!j.armPending || tapMoveTargetBusy() || !!j.zStepPending || !!pendingAxis || zProbePending;
   const probeReady = apiReady && isProbeToolActive();
+  const probe3DReady = apiReady && is3DProbeToolActive();
   for (const btn of document.querySelectorAll("[data-origin-zero]")) {
     btn.disabled = busy;
     setSoftDisabled(btn, !busy && !ready);
@@ -1298,7 +1303,13 @@ function renderOriginButtons() {
   if (probe) {
     probe.disabled = busy;
     setSoftDisabled(probe, !busy && !probeReady);
-    setTextIfChanged(probe, zProbePending ? "Probing..." : "Probe Z");
+    setTextIfChanged(probe, zProbePending && !probe3DPending ? "Probing..." : "Probe Z");
+  }
+  const probe3D = document.getElementById("origin-probe-3d");
+  if (probe3D) {
+    probe3D.disabled = busy;
+    setSoftDisabled(probe3D, !busy && !probe3DReady);
+    setTextIfChanged(probe3D, probe3DPending ? "Probing..." : "3D Probe");
   }
   for (const id of ["origin-set-xyz-open", "origin-set-open", "origin-presets-open"]) {
     const btn = document.getElementById(id);
@@ -2276,6 +2287,10 @@ function outlinePointLabel(p) {
 
 function isProbeToolActive() {
   return Number(state.machine?.tool?.active) === 0;
+}
+
+function is3DProbeToolActive() {
+  return Number(state.machine?.tool?.active) === 9999;
 }
 
 function outlineSummaryText() {
@@ -7755,11 +7770,14 @@ async function setCurrentTool(toolID = null) {
   }
   if (!validToolID(toolID, true)) {
     finishToolAction("set");
-    setToolFeedback("Choose Empty, Probe, Laser, or tool 1-999.", "error");
+    setToolFeedback("Choose Empty, Probe, 3D Probe, Laser, or tool 1-999.", "error");
     return;
   }
-  setToolFeedback("Sending set-tool command for " + toolDisplayName(toolID) + "...", "");
+  const toolName = toolDisplayName(toolID);
+  setToolFeedback("Disarming Movement before setting " + toolName + "...", "");
   try {
+    await disarmTapMoveForCommand();
+    setToolFeedback("Sending set-tool command for " + toolName + "...", "");
     const r = await request("/api/tool/current", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -7784,11 +7802,14 @@ async function changeTool(toolID = null) {
   }
   if (!validToolID(toolID, false)) {
     finishToolAction("change");
-    setToolFeedback("Choose Probe, Laser, or tool 1-999.", "error");
+    setToolFeedback("Choose Probe, 3D Probe, Laser, or tool 1-999.", "error");
     return;
   }
-  setToolFeedback("Sending change-tool command for " + toolDisplayName(toolID) + "...", "");
+  const toolName = toolDisplayName(toolID);
+  setToolFeedback("Disarming Movement before changing to " + toolName + "...", "");
   try {
+    await disarmTapMoveForCommand();
+    setToolFeedback("Sending change-tool command for " + toolName + "...", "");
     const r = await request("/api/tool/change", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -9429,6 +9450,223 @@ function closeOriginDialog(id) {
   document.getElementById(id)?.close();
 }
 
+function probe3DFieldRules(kind) {
+  kind = String(kind || "");
+  const x = !kind.endsWith("_y");
+  const y = !kind.endsWith("_x");
+  const z = !kind.startsWith("bore_pocket");
+  const note = kind.startsWith("bore_pocket")
+    ? "Move the 3D Probe inside the bore or pocket with its contact point below the top surface, and make sure the probe is stable."
+    : "Z Offset is the probe tip-to-surface distance during edge probing. Make sure the 3D Probe is stable.";
+  return { x, y, z, note };
+}
+
+function probe3DInitialPositioning(kind, xOffset, yOffset) {
+  const x = Math.abs(Number(xOffset));
+  const y = Math.abs(Number(yOffset));
+  switch (String(kind || "")) {
+    case "outside_top_left": return { x: -x, y };
+    case "outside_top_right": return { x, y };
+    case "outside_bottom_right": return { x, y: -y };
+    case "outside_bottom_left": return { x: -x, y: -y };
+    case "inside_top_left": return { x, y: -y };
+    case "inside_top_right": return { x: -x, y: -y };
+    case "inside_bottom_right": return { x: -x, y };
+    case "inside_bottom_left": return { x, y };
+    case "boss_block": return { x: -x, y: -y };
+    case "boss_block_x": return { x: -x };
+    case "boss_block_y": return { y: -y };
+    default: return {};
+  }
+}
+
+function probe3DTravelPreflight(kind, xOffset, yOffset, mpos, bounds) {
+  const delta = probe3DInitialPositioning(kind, xOffset, yOffset);
+  const issues = [];
+  for (const axis of ["x", "y"]) {
+    if (!Object.hasOwn(delta, axis)) continue;
+    const current = Number(mpos?.[axis]);
+    const min = Number(bounds?.[axis]?.min);
+    const max = Number(bounds?.[axis]?.max);
+    if (![current, delta[axis], min, max].every(Number.isFinite) || min >= max) continue;
+    const target = current + delta[axis];
+    const label = axis.toUpperCase();
+    if (target < min) {
+      issues.push(`${label} target ${target.toFixed(3)} mm is below learned minimum ${min.toFixed(3)} mm (maximum ${label} Offset here: ${Math.max(0, current - min).toFixed(3)} mm).`);
+    } else if (target > max) {
+      issues.push(`${label} target ${target.toFixed(3)} mm is above learned maximum ${max.toFixed(3)} mm (maximum ${label} Offset here: ${Math.max(0, max - current).toFixed(3)} mm).`);
+    }
+  }
+  return {
+    blocked: issues.length > 0,
+    warning: issues.length ? "Soft-limit risk: " + issues.join(" ") + " Reduce the offset or reposition the probe." : "",
+  };
+}
+
+function probe3DLearnedTravelBounds() {
+  const learned = state.ui.machine?.learned || {};
+  const soft = learned.soft_endstop || {};
+  const xMin = Number(soft.x_min);
+  const xMax = Number(soft.x_max);
+  const yMin = Number(soft.y_min);
+  const yMax = Number(soft.y_max);
+  return {
+    x: Number.isFinite(xMin) && Number.isFinite(xMax) && xMin < xMax ? { min: xMin, max: xMax } : null,
+    y: Number.isFinite(yMin) && Number.isFinite(yMax) && yMin < yMax ? { min: yMin, max: yMax } : null,
+  };
+}
+
+function probe3DPreflightFromControls() {
+  const kind = document.getElementById("probe-3d-kind")?.value || "";
+  const x = Number(document.getElementById("probe-3d-x")?.value);
+  const y = Number(document.getElementById("probe-3d-y")?.value);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { blocked: false, warning: "" };
+  return probe3DTravelPreflight(kind, x, y, state.machine.mpos, probe3DLearnedTravelBounds());
+}
+
+function renderProbe3DForm() {
+  const kind = document.getElementById("probe-3d-kind")?.value || "";
+  const rules = probe3DFieldRules(kind);
+  const pending = !!state.jog.probe3DPending;
+  for (const axis of ["x", "y", "z"]) {
+    const field = document.getElementById("probe-3d-" + axis + "-field");
+    const input = document.getElementById("probe-3d-" + axis);
+    const active = !!rules[axis];
+    field?.classList.toggle("is-inactive", !active);
+    field?.setAttribute("aria-hidden", active ? "false" : "true");
+    if (input) input.disabled = pending || !active;
+  }
+  const kindSelect = document.getElementById("probe-3d-kind");
+  const diameter = document.getElementById("probe-3d-diameter");
+  if (kindSelect) kindSelect.disabled = pending;
+  if (diameter) diameter.disabled = pending;
+  const note = document.getElementById("probe-3d-note");
+  if (note) note.textContent = rules.note;
+  const preflight = probe3DPreflightFromControls();
+  const preflightNode = document.getElementById("probe-3d-preflight");
+  if (preflightNode) {
+    preflightNode.textContent = preflight.warning;
+    preflightNode.classList.toggle("is-visible", preflight.blocked);
+    preflightNode.setAttribute("aria-hidden", preflight.blocked ? "false" : "true");
+  }
+  const run = document.getElementById("probe-3d-run");
+  if (run) {
+    run.disabled = pending || preflight.blocked;
+    setTextIfChanged(run, pending ? "Probing..." : "Probe");
+    setElementBusy(run, pending);
+  }
+  const cancel = document.getElementById("probe-3d-cancel");
+  const close = document.getElementById("probe-3d-close");
+  if (cancel) cancel.disabled = pending;
+  if (close) close.disabled = pending;
+}
+
+function probe3DNumber(id, label, positive = false) {
+  const raw = String(document.getElementById(id)?.value || "").trim();
+  const value = Number(raw);
+  if (raw === "" || !Number.isFinite(value)) throw new Error(label + " must be a number.");
+  if (value < 0 || value > 5000 || (positive && value === 0)) {
+    throw new Error(label + (positive ? " must be greater than 0 and no more than 5000 mm." : " must be between 0 and 5000 mm."));
+  }
+  return value;
+}
+
+function probe3DRequestFromControls() {
+  return {
+    kind: document.getElementById("probe-3d-kind")?.value || "",
+    x_offset_mm: probe3DNumber("probe-3d-x", "X Offset"),
+    y_offset_mm: probe3DNumber("probe-3d-y", "Y Offset"),
+    z_offset_mm: probe3DNumber("probe-3d-z", "Z Offset"),
+    diameter_mm: probe3DNumber("probe-3d-diameter", "Probe Diameter", true),
+  };
+}
+
+function openProbe3D() {
+  if (state.jog.armed) {
+    setOriginFeedback("Disarm Movement before running 3D probe.", "error");
+    return;
+  }
+  if (!machineReadyForOriginSet()) {
+    setOriginFeedback("Machine must be connected and Idle to run 3D probe.", "error");
+    return;
+  }
+  if (!is3DProbeToolActive()) {
+    setOriginFeedback("3D probe requires the 3D Probe tool to be active.", "error");
+    return;
+  }
+  const dialog = document.getElementById("probe-3d-modal");
+  if (!dialog || dialog.open) return;
+  renderProbe3DForm();
+  dialog.showModal();
+  document.getElementById("probe-3d-kind")?.focus();
+}
+
+function closeProbe3D() {
+  if (state.jog.probe3DPending) return;
+  document.getElementById("probe-3d-modal")?.close();
+}
+
+async function runProbe3D() {
+  if (state.jog.zProbePending || tapMoveTargetBusy() || state.jog.zStepPending || hasPendingOriginOperation()) return;
+  if (state.jog.armed) {
+    setOriginFeedback("Disarm Movement before running 3D probe.", "error");
+    return;
+  }
+  if (!machineReadyForOriginSet()) {
+    setOriginFeedback("Machine must be connected and Idle to run 3D probe.", "error");
+    return;
+  }
+  if (!is3DProbeToolActive()) {
+    setOriginFeedback("3D probe requires the 3D Probe tool to be active.", "error");
+    return;
+  }
+  let body;
+  try {
+    body = probe3DRequestFromControls();
+  } catch (e) {
+    setOriginFeedback(e.message, "error");
+    return;
+  }
+  const preflight = probe3DTravelPreflight(body.kind, body.x_offset_mm, body.y_offset_mm, state.machine.mpos, probe3DLearnedTravelBounds());
+  if (preflight.blocked) {
+    setOriginFeedback(preflight.warning, "error");
+    renderProbe3DForm();
+    return;
+  }
+
+  state.jog.zProbePending = true;
+  state.jog.probe3DPending = true;
+  setOriginFeedback("Starting 3D probe...");
+  renderJog();
+  renderProbe3DForm();
+  try {
+    const resp = await request("/api/probe/3d", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const result = await resp.json();
+    // M480 owns all subsequent motion and origin changes, so a completed Tap
+    // Move target no longer represents an active or useful machine target.
+    // Clear it only after the 3D-probe command has been accepted; rejected
+    // requests retain the marker.
+    state.jog.target = null;
+    state.jog.targetLabel = "";
+    setOriginFeedback(result.message || "3D probe command sent; machine completion was not available.", result.verified ? "ok" : "");
+    document.getElementById("probe-3d-modal")?.close();
+    pollMachine();
+    setTimeout(pollMachine, 1200);
+  } catch (e) {
+    setOriginFeedback("3D probe failed: " + e.message, "error");
+    appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
+  } finally {
+    state.jog.probe3DPending = false;
+    state.jog.zProbePending = false;
+    renderProbe3DForm();
+    renderJog();
+  }
+}
+
 function applyXYZOrigin() {
   try {
     const { targets, label } = originTargetsFromXYZ();
@@ -10349,6 +10587,19 @@ function init() {
     bindButtonAction(btn, () => setOriginAxis(btn.dataset.originZero));
   }
   bindButtonAction(document.getElementById("origin-probe-z"), runAutoZProbe);
+  bindButtonAction(document.getElementById("origin-probe-3d"), openProbe3D);
+  bindButtonAction(document.getElementById("probe-3d-close"), closeProbe3D);
+  bindButtonAction(document.getElementById("probe-3d-cancel"), closeProbe3D);
+  bindButtonAction(document.getElementById("probe-3d-run"), runProbe3D);
+  document.getElementById("probe-3d-kind").onchange = renderProbe3DForm;
+  for (const id of ["probe-3d-x", "probe-3d-y", "probe-3d-z", "probe-3d-diameter"]) {
+    document.getElementById(id).oninput = renderProbe3DForm;
+  }
+  document.getElementById("probe-3d-modal").addEventListener("cancel", (e) => {
+    e.preventDefault();
+    closeProbe3D();
+  });
+  renderProbe3DForm();
   bindButtonAction(document.getElementById("origin-set-xyz-open"), () => openOriginDialog("origin-xyz-modal"));
   bindButtonAction(document.getElementById("origin-set-open"), () => openOriginDialog("origin-set-modal"));
   bindButtonAction(document.getElementById("origin-presets-open"), () => openOriginDialog("origin-presets-modal"));
