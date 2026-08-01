@@ -9887,8 +9887,12 @@ function applyJogEvent(ev) {
   } else if (ev.type === "status" && ev.status) {
     clearNotice("machine-status");
     state.jog.observed = ev.status.mpos || state.jog.observed;
-    const holdEstimate = jogEstimateActive();
-    if (!holdEstimate) {
+    // Motion events are deliberately estimates; a STATUS_RES is the observed
+    // machine position and must win immediately. Keeping an estimate until its
+    // local queue timer elapsed could leave the preview showing motion that the
+    // firmware rejected or had not parsed yet, especially when the session was
+    // disarmed by the same status report.
+    if (ev.status.mpos) {
       state.jog.mpos = ev.status.mpos || state.jog.mpos;
       state.jog.wpos = ev.status.wpos || state.jog.wpos;
       state.jog.estimated = false;
@@ -9900,9 +9904,9 @@ function applyJogEvent(ev) {
       age_ms: ev.status.age_ms,
       observed_at: ev.status.observed_at || state.machine.observed_at,
       raw: ev.status.raw || state.machine.raw,
-      mpos: holdEstimate ? state.machine.mpos : (ev.status.mpos || state.machine.mpos),
-      wpos: holdEstimate ? state.machine.wpos : (ev.status.wpos || state.machine.wpos),
-      motion_estimated: holdEstimate ? !!state.machine.motion_estimated : false,
+      mpos: ev.status.mpos || state.machine.mpos,
+      wpos: ev.status.wpos || state.machine.wpos,
+      motion_estimated: ev.status.mpos ? false : !!state.machine.motion_estimated,
       connected: true,
     };
     machineChanged = true;

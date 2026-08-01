@@ -50,6 +50,7 @@ type Server struct {
 	readyOnce   sync.Once
 	logPath     string
 	mountStatus func(context.Context) WebDAVMountStatus
+	setMount    func(context.Context, bool) error
 	remount     func(context.Context) error
 
 	mu            sync.Mutex
@@ -75,8 +76,9 @@ func (s *Server) SetManagerProcessExit(fn func()) {
 	s.processExit = fn
 }
 
-func (s *Server) SetWebDAVMountControls(status func(context.Context) WebDAVMountStatus, remount func(context.Context) error) {
+func (s *Server) SetWebDAVMountControls(status func(context.Context) WebDAVMountStatus, setMount func(context.Context, bool) error, remount func(context.Context) error) {
 	s.mountStatus = status
+	s.setMount = setMount
 	s.remount = remount
 }
 
@@ -103,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/proxy/restart", s.withAuth(s.restartProxy))
 	mux.HandleFunc("POST /api/proxy/build", s.withAuth(s.buildProxy))
 	mux.HandleFunc("GET /api/webdav/mount", s.withAuth(s.webDAVMount))
+	mux.HandleFunc("PUT /api/webdav/mount", s.withAuth(s.setWebDAVMount))
 	mux.HandleFunc("POST /api/webdav/remount", s.withAuth(s.remountWebDAV))
 	mux.HandleFunc("POST /api/notify", s.withAuth(s.notify))
 	mux.HandleFunc("POST /api/deploy", s.withAuth(s.deploy))
@@ -467,6 +470,34 @@ func (s *Server) buildProxy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) webDAVMount(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, map[string]any{"ok": true, "mount": s.webDAVMountStatus(r.Context())})
+}
+
+func (s *Server) setWebDAVMount(w http.ResponseWriter, r *http.Request) {
+	if s.setMount == nil {
+		http.Error(w, "webdav mount control is unavailable", http.StatusNotImplemented)
+		return
+	}
+	var in struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if in.Enabled == nil {
+		http.Error(w, "enabled is required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	err := s.setMount(ctx, *in.Enabled)
+	mount := s.webDAVMountStatus(context.Background())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		s.writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "mount": mount})
+		return
+	}
+	s.writeJSON(w, map[string]any{"ok": true, "mount": mount})
 }
 
 func (s *Server) remountWebDAV(w http.ResponseWriter, r *http.Request) {

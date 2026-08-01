@@ -33,7 +33,14 @@ $n.Dispose()
 `
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", encodePowerShell(script))
 	configureBackgroundCommand(cmd)
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Every started os/exec command must be waited on. Mount failures can emit
+	// notifications for a long-running manager process; leaving each completed
+	// PowerShell child unwaited leaks its process handle until the manager exits.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 func psQuote(s string) string {

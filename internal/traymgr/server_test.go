@@ -322,6 +322,74 @@ func TestServerWebDAVRemountEndpointUsesFreshMount(t *testing.T) {
 	}
 }
 
+func TestServerWebDAVMountEndpointDisablesFailedDesiredMount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tray.json")
+	cfg := DefaultConfig()
+	cfg.WebDAVMount.Enabled = true
+	writeRawConfig(t, path, cfg)
+
+	app, err := NewApp(path, nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	var unmounts int
+	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
+		t.Fatal("disable should not mount")
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) error {
+		unmounts++
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
+		return false, nil
+	})
+	defer restore()
+
+	ts := httptest.NewServer(app.Server.Handler())
+	defer ts.Close()
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/webdav/mount", strings.NewReader(`{"enabled":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT /api/webdav/mount status = %d: %s", resp.StatusCode, body)
+	}
+	if unmounts != 1 {
+		t.Fatalf("unmounts = %d, want 1", unmounts)
+	}
+	var body struct {
+		Mount WebDAVMountStatus `json:"mount"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Mount.Desired || body.Mount.Mounted {
+		t.Fatalf("mount status = %+v, want disabled and unmounted", body.Mount)
+	}
+}
+
+func TestManagerWebUsesOneBottomStatusRegionAndOffersMountToggle(t *testing.T) {
+	if got := strings.Count(indexHTML, `role="status"`); got != 1 {
+		t.Fatalf("role=status count = %d, want one", got)
+	}
+	for _, want := range []string{`id="actionStatus"`, `id="toggleWebDAV"`, `PUT`, `/api/webdav/mount`} {
+		if !strings.Contains(indexHTML, want) {
+			t.Fatalf("manager UI missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{`id="processMsg"`, `id="webdavMsg"`, `id="managerMsg"`, `id="proxyMsg"`, `id="logMsg"`} {
+		if strings.Contains(indexHTML, forbidden) {
+			t.Fatalf("manager UI still contains inline transient surface %q", forbidden)
+		}
+	}
+}
+
 func TestServerPutConfigPersistsAndUpdatesSupervisor(t *testing.T) {
 	cfg := DefaultConfig()
 	configPath := filepath.Join(t.TempDir(), "tray.json")

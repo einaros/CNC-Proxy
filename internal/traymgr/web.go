@@ -14,7 +14,7 @@ html, body { min-height:100%; }
 body { margin:0; font:14px/1.4 system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text); }
 header { height:56px; display:grid; grid-template-columns:minmax(0,1fr) minmax(160px,auto); gap:var(--gap-md); align-items:center; padding:10px 18px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:1; overflow:hidden; }
 h1 { font-size:17px; margin:0; font-weight:650; }
-main { max-width:1180px; margin:0 auto; padding:18px; display:grid; gap:var(--gap-lg); }
+main { max-width:1180px; margin:0 auto; padding:18px 18px 70px; display:grid; gap:var(--gap-lg); }
 section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; display:grid; gap:var(--gap-md); min-width:0; }
 h2 { margin:0; font-size:14px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
 .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:var(--gap-md); }
@@ -32,14 +32,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline:2px so
 .actions { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:var(--gap-sm); align-items:center; min-width:0; }
 .status { min-width:0; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:right; }
 .info { color:var(--muted); border:1px solid var(--line); border-radius:var(--radius); padding:8px 9px; background:rgba(0,0,0,.03); overflow-wrap:anywhere; margin:0; }
-.msg { min-height:22px; color:var(--muted); margin:0; overflow-wrap:anywhere; }
-.msg.err { color:var(--bad); }
-.msg.ok { color:var(--ok); }
+.action-status { position:fixed; left:0; right:0; bottom:0; height:52px; display:flex; align-items:center; padding:8px 18px; border-top:1px solid var(--line); background:var(--panel); color:var(--muted); z-index:2; overflow:auto; overflow-wrap:anywhere; }
+.action-status.err { color:var(--bad); }
+.action-status.ok { color:var(--ok); }
 pre { white-space:pre-wrap; max-height:260px; overflow:auto; border:1px solid var(--line); border-radius:var(--radius); padding:10px; background:rgba(0,0,0,.04); margin:0; }
 @media (max-width:640px) {
   header { grid-template-columns:minmax(0,1fr); height:auto; min-height:56px; align-items:start; }
   .status { text-align:left; }
-  main { padding:12px; }
+  main { padding:12px 12px 66px; }
   .actions { grid-template-columns:1fr; }
 }
 </style>
@@ -55,13 +55,12 @@ pre { white-space:pre-wrap; max-height:260px; overflow:auto; border:1px solid va
       <button class="danger" id="stop">Stop Proxy</button>
       <button id="build">Build Proxy</button>
     </div>
-    <p class="msg" id="processMsg"></p>
   </section>
   <section>
     <h2>WebDAV Mount</h2>
     <p class="info" id="webdavStatus"></p>
-    <p class="msg" id="webdavMsg"></p>
     <div class="actions">
+      <button id="toggleWebDAV">Enable WebDAV Mount</button>
       <button id="refreshWebDAV">Refresh WebDAV Mount</button>
     </div>
   </section>
@@ -69,7 +68,6 @@ pre { white-space:pre-wrap; max-height:260px; overflow:auto; border:1px solid va
     <h2>Manager Settings</h2>
     <div class="grid" id="managerFields"></div>
     <p class="info" id="managerStatus"></p>
-    <p class="msg" id="managerMsg"></p>
     <div class="actions">
       <button class="primary" id="saveManager">Save Manager Settings</button>
       <button id="restartManager">Restart Manager</button>
@@ -79,21 +77,21 @@ pre { white-space:pre-wrap; max-height:260px; overflow:auto; border:1px solid va
     <h2>Proxy Settings</h2>
     <p class="info" id="proxySchema"></p>
     <div class="grid" id="flagFields"></div>
-    <p class="msg" id="proxyMsg"></p>
     <div class="actions"><button class="primary" id="saveProxy">Save Proxy Settings</button></div>
   </section>
   <section>
     <h2>Manager Log</h2>
     <div class="actions"><button class="danger" id="clearLog">Clear Log</button></div>
-    <p class="msg" id="logMsg"></p>
     <pre id="notifications"></pre>
   </section>
 </main>
+<footer class="action-status" id="actionStatus" role="status" aria-live="polite"></footer>
 <script>
 let cfg, options;
 let optionSource = "manager fallback";
 let managerToken = localStorage.getItem("cncTrayToken") || "";
 let configRenderKey = "";
+let webDAVMountState = {};
 const pendingActions = new Set();
 function authHeaders() { return managerToken ? {"X-CNC-Tray-Token": managerToken} : {}; }
 async function req(path, opts={}) {
@@ -230,9 +228,8 @@ function managerRestartURL(url) {
     return location.href;
   }
 }
-function waitForManagerRestart(msgEl, url) {
-  msgEl.textContent = "Manager restarting...";
-  msgEl.className = "msg";
+function waitForManagerRestart(url) {
+  setMsg("", "Manager restarting...", "");
   setTimeout(() => { window.location.href = managerRestartURL(url); }, 1200);
 }
 async function refresh() {
@@ -251,8 +248,10 @@ function renderStatus(st) {
   renderWebDAVStatus(st.webdav_mount || {});
 }
 function renderWebDAVStatus(mount) {
+  webDAVMountState = mount;
   const status = document.getElementById("webdavStatus");
-  const button = document.getElementById("refreshWebDAV");
+  const toggle = document.getElementById("toggleWebDAV");
+  const refresh = document.getElementById("refreshWebDAV");
   const bits = [
     "Desired: " + (mount.desired ? "yes" : "no"),
     "Mounted: " + (mount.mounted ? "yes" : "no"),
@@ -260,13 +259,15 @@ function renderWebDAVStatus(mount) {
   if (mount.busy) bits.push("Busy");
   if (mount.error) bits.push("Last error: " + mount.error);
   status.textContent = bits.join(" · ");
-  button.disabled = pendingActions.has("webdav") || !!mount.busy || (!mount.desired && !mount.mounted);
+  const retryUnmount = !mount.desired && (mount.mounted || mount.error_action === "unmount");
+  toggle.textContent = mount.desired ? "Disable WebDAV Mount" : (retryUnmount ? "Retry WebDAV Unmount" : "Enable WebDAV Mount");
+  toggle.disabled = pendingActions.has("webdav") || (!!mount.busy && !mount.desired);
+  refresh.disabled = pendingActions.has("webdav") || !!mount.busy || !mount.mounted;
 }
-function setMsg(id, text, kind) {
-  const el = document.getElementById(id);
-  if (!el) return;
+function setMsg(_id, text, kind) {
+  const el = document.getElementById("actionStatus");
   el.textContent = text || "";
-  el.className = "msg" + (kind ? " " + kind : "");
+  el.className = "action-status" + (kind ? " " + kind : "");
 }
 function setBusy(action, ids, busy) {
   if (busy) pendingActions.add(action);
@@ -300,13 +301,12 @@ async function action(path, msgEl, actionKey, buttonIDs) {
 document.getElementById("saveManager").onclick = async () => {
   if (pendingActions.has("manager-config")) return;
   setBusy("manager-config", ["saveManager","restartManager"], true);
-  const el = document.getElementById("managerMsg");
   setMsg("managerMsg", "Saving manager settings...", "");
   try {
     const r = await req("/api/manager/config", {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(collectManagerConfig())});
     cfg = r.config || cfg;
     storeManagerToken(cfg);
-    waitForManagerRestart(el, r.manager_url);
+    waitForManagerRestart(r.manager_url);
   } catch (e) {
     setMsg("managerMsg", e.message, "err");
     setBusy("manager-config", ["saveManager","restartManager"], false);
@@ -315,16 +315,14 @@ document.getElementById("saveManager").onclick = async () => {
 document.getElementById("saveProxy").onclick = async () => {
   if (pendingActions.has("proxy-config")) return;
   setBusy("proxy-config", ["saveProxy"], true);
-  const el = document.getElementById("proxyMsg");
   setMsg("proxyMsg", "Saving proxy settings...", "");
   try {
     const r = await req("/api/proxy/config", {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(collectProxyConfig())});
     cfg = r.config || cfg;
     optionSource = r.option_source || optionSource;
-    if (r.proxy_restarted) el.textContent = "Proxy settings saved; proxy restarted" + (r.process?.pid ? " (PID " + r.process.pid + ")" : "");
-    else if (r.proxy_changed && !r.proxy_was_running) el.textContent = "Proxy settings saved; proxy is stopped, so no restart was needed";
-    else el.textContent = "Proxy settings saved; no proxy restart needed";
-    el.className = "msg ok";
+    if (r.proxy_restarted) setMsg("proxyMsg", "Proxy settings saved; proxy restarted" + (r.process?.pid ? " (PID " + r.process.pid + ")" : ""), "ok");
+    else if (r.proxy_changed && !r.proxy_was_running) setMsg("proxyMsg", "Proxy settings saved; proxy is stopped, so no restart was needed", "ok");
+    else setMsg("proxyMsg", "Proxy settings saved; no proxy restart needed", "ok");
     await refresh();
   } catch (e) {
     setMsg("proxyMsg", e.message, "err");
@@ -335,19 +333,37 @@ document.getElementById("saveProxy").onclick = async () => {
 document.getElementById("restartManager").onclick = async () => {
   if (pendingActions.has("manager-restart")) return;
   setBusy("manager-restart", ["saveManager","restartManager"], true);
-  const el = document.getElementById("managerMsg");
   setMsg("managerMsg", "Working...", "");
   try {
     const r = await req("/api/manager/restart", {method:"POST"});
-    waitForManagerRestart(el, r.manager_url);
+    waitForManagerRestart(r.manager_url);
   } catch (e) {
     setMsg("managerMsg", e.message, "err");
     setBusy("manager-restart", ["saveManager","restartManager"], false);
   }
 };
+document.getElementById("toggleWebDAV").onclick = async () => {
+  if (pendingActions.has("webdav")) return;
+  const enabled = !webDAVMountState.desired && !webDAVMountState.mounted && webDAVMountState.error_action !== "unmount";
+  setBusy("webdav", ["toggleWebDAV","refreshWebDAV"], true);
+  setMsg("webdavMsg", enabled ? "Enabling WebDAV mount..." : "Disabling WebDAV mount...", "");
+  try {
+    const r = await req("/api/webdav/mount", {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({enabled})});
+    renderWebDAVStatus(r.mount || {});
+    if (!!r.mount?.desired !== enabled || !!r.mount?.mounted !== enabled) throw new Error("WebDAV mount state could not be verified");
+    setMsg("webdavMsg", enabled ? "WebDAV mount enabled and mounted." : "WebDAV mount disabled and unmounted.", "ok");
+    await refreshStatus();
+  } catch (e) {
+    setMsg("webdavMsg", e.message, "err");
+    await refreshStatus().catch(() => {});
+  } finally {
+    setBusy("webdav", ["toggleWebDAV","refreshWebDAV"], false);
+    if (cfg) refreshStatus().catch(() => {});
+  }
+};
 document.getElementById("refreshWebDAV").onclick = async () => {
   if (pendingActions.has("webdav")) return;
-  setBusy("webdav", ["refreshWebDAV"], true);
+  setBusy("webdav", ["toggleWebDAV","refreshWebDAV"], true);
   setMsg("webdavMsg", "Refreshing WebDAV mount...", "");
   try {
     const r = await req("/api/webdav/remount", {method:"POST"});
@@ -358,7 +374,7 @@ document.getElementById("refreshWebDAV").onclick = async () => {
     setMsg("webdavMsg", e.message, "err");
     await refreshStatus().catch(() => {});
   } finally {
-    setBusy("webdav", ["refreshWebDAV"], false);
+    setBusy("webdav", ["toggleWebDAV","refreshWebDAV"], false);
     if (cfg) refreshStatus().catch(() => {});
   }
 };
@@ -380,8 +396,8 @@ document.getElementById("start").onclick = () => action("/api/proxy/start", "pro
 document.getElementById("stop").onclick = () => action("/api/proxy/stop", "processMsg", "proxy-process", ["start","restart","stop","build"]);
 document.getElementById("restart").onclick = () => action("/api/proxy/restart", "processMsg", "proxy-process", ["start","restart","stop","build"]);
 document.getElementById("build").onclick = () => action("/api/proxy/build", "processMsg", "proxy-process", ["start","restart","stop","build"]);
-refresh().catch(e => { document.getElementById("status").textContent = e.message; });
-setInterval(() => { if (cfg) refreshStatus().catch(e => { document.getElementById("status").textContent = e.message; }); }, 3000);
+refresh().catch(e => { document.getElementById("status").textContent = "Unavailable"; setMsg("", e.message, "err"); });
+setInterval(() => { if (cfg) refreshStatus().catch(e => { document.getElementById("status").textContent = "Unavailable"; setMsg("", e.message, "err"); }); }, 3000);
 </script>
 </body>
 </html>`

@@ -409,6 +409,68 @@ func TestWebDAVMountStatusReportsBusyWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestSetWebDAVMountDisabledCancelsInFlightAutomaticMount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tray.json")
+	cfg := DefaultConfig()
+	cfg.WebDAVMount.Enabled = true
+	writeRawConfig(t, path, cfg)
+
+	app, err := NewApp(path, nil)
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	unmounted := make(chan struct{}, 1)
+	var once sync.Once
+	restore := replaceWebDAVMountFuncs(func(ctx context.Context, req webDAVMountRequest) error {
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+		close(canceled)
+		return ctx.Err()
+	}, func(ctx context.Context, req webDAVMountRequest) error {
+		unmounted <- struct{}{}
+		return nil
+	}, func(ctx context.Context, req webDAVMountRequest) (bool, error) {
+		return false, nil
+	})
+	defer restore()
+
+	autoDone := make(chan error, 1)
+	go func() { autoDone <- app.remountWebDAVQuiet(context.Background()) }()
+	<-entered
+
+	disableDone := make(chan error, 1)
+	go func() { disableDone <- app.SetWebDAVMountEnabled(context.Background(), false) }()
+
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("disable did not cancel the in-flight automatic mount")
+	}
+	if err := <-autoDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("automatic mount error = %v, want context canceled", err)
+	}
+	if err := <-disableDone; err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	select {
+	case <-unmounted:
+	default:
+		t.Fatal("disable did not run verified unmount cleanup")
+	}
+	if app.Supervisor.Config().WebDAVMount.Enabled {
+		t.Fatal("mount remained enabled in supervisor config")
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.WebDAVMount.Enabled {
+		t.Fatal("mount remained enabled in persisted config")
+	}
+}
+
 func TestQuietRemountFreshensAfterProxyRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tray.json")
 	cfg := DefaultConfig()

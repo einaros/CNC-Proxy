@@ -2769,6 +2769,42 @@ test("jog motion keeps observed machine position distinct from its prediction", 
   assert.deepEqual(JSON.parse(JSON.stringify(state.jog.target)), { x: 10, y: 2, z: 3 });
 });
 
+test("observed jog status immediately corrects an unconfirmed preview estimate", () => {
+  const state = {
+    jog: {
+      armed: true,
+      observed: { x: 1, y: 2, z: 3 },
+      mpos: { x: 4, y: 2, z: 3 },
+      wpos: { x: 4, y: 2, z: 3 },
+      estimated: true,
+      estimatedUntil: 10_000,
+      error: "",
+      errorCode: "",
+    },
+    machine: {
+      state: "Run",
+      mpos: { x: 4, y: 2, z: 3 },
+      wpos: { x: 4, y: 2, z: 3 },
+      motion_estimated: true,
+    },
+  };
+  const ctx = buildContext(["applyJogEvent"], [], {
+    state,
+    clearNotice: () => {},
+    renderMachine: () => {},
+    renderJog: () => {},
+  });
+  vm.runInContext(
+    "applyJogEvent({ type: 'status', status: { state: 'Idle', age_ms: 0, mpos: { x: 1.5, y: 2, z: 3 }, wpos: { x: 1.5, y: 2, z: 3 } } })",
+    ctx,
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(state.jog.mpos)), { x: 1.5, y: 2, z: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.machine.mpos)), { x: 1.5, y: 2, z: 3 });
+  assert.equal(state.jog.estimated, false);
+  assert.equal(state.jog.estimatedUntil, 0);
+  assert.equal(state.machine.motion_estimated, false);
+});
+
 test("saving Machine Settings keeps learned machine profiles", () => {
   const ids = [
     "machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max",

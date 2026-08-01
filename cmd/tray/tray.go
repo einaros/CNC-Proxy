@@ -217,11 +217,11 @@ func onReady() {
 					statusCtx, statusCancel := context.WithTimeout(context.Background(), 3*time.Second)
 					status := app.WebDAVMountStatus(statusCtx)
 					statusCancel()
-					if status.Busy {
+					if status.Busy && !status.Desired {
 						updateMountItem(app, mMount)
 						continue
 					}
-					beginMountSet(!status.Mounted)
+					beginMountSet(webDAVMountEnableRequest(status))
 				}
 			case <-mRefreshMount.ClickedCh:
 				beginRemount()
@@ -294,28 +294,41 @@ func updateMountItem(app *traymgr.App, item *systray.MenuItem) {
 	status := app.WebDAVMountStatus(ctx)
 	cancel()
 	if status.Busy {
-		item.SetTitle("Mounting WebDAV…")
-		item.Disable()
+		if status.Desired {
+			item.SetTitle("Disable WebDAV Mount")
+			item.Enable()
+		} else {
+			item.SetTitle("Unmounting WebDAV…")
+			item.Disable()
+		}
 		return
 	}
 	if status.Error != "" {
 		switch status.ErrorAction {
 		case "unmount":
-			item.SetTitle("WebDAV Unmount Failed")
+			item.SetTitle("Retry WebDAV Unmount")
 		default:
-			item.SetTitle("WebDAV Mount Failed")
+			if status.Desired {
+				item.SetTitle("Disable WebDAV Mount (mount failed)")
+			} else {
+				item.SetTitle("Enable WebDAV Mount")
+			}
 		}
 		item.Enable()
 		return
 	}
-	if status.Mounted {
-		item.SetTitle("Unmount WebDAV")
-	} else if status.Desired {
-		item.SetTitle("Retry WebDAV Mount")
+	if status.Desired {
+		item.SetTitle("Disable WebDAV Mount")
+	} else if status.Mounted {
+		item.SetTitle("Retry WebDAV Unmount")
 	} else {
-		item.SetTitle("Mount WebDAV")
+		item.SetTitle("Enable WebDAV Mount")
 	}
 	item.Enable()
+}
+
+func webDAVMountEnableRequest(status traymgr.WebDAVMountStatus) bool {
+	return !status.Desired && !status.Mounted && status.ErrorAction != "unmount"
 }
 
 func updateRefreshMountItem(app *traymgr.App, item *systray.MenuItem, busy bool) {

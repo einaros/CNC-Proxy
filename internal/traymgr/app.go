@@ -19,6 +19,9 @@ type App struct {
 	mountRetry time.Duration
 
 	mountMu                    sync.Mutex
+	mountCancelMu              sync.Mutex
+	mountCancel                context.CancelFunc
+	mountOperationID           uint64
 	lastFreshMountProxyStarted time.Time
 
 	mu              sync.Mutex
@@ -57,7 +60,7 @@ func NewApp(configPath string, notifier Notifier) (*App, error) {
 	sup := NewSupervisor(cfg, DefaultLogPath(configPath))
 	srv := NewServer(configPath, sup, notifier)
 	app := &App{ConfigPath: configPath, Supervisor: sup, Server: srv, mountRetry: 10 * time.Second}
-	srv.SetWebDAVMountControls(app.WebDAVMountStatus, app.RemountWebDAV)
+	srv.SetWebDAVMountControls(app.WebDAVMountStatus, app.SetWebDAVMountEnabled, app.RemountWebDAV)
 	return app, nil
 }
 
@@ -81,9 +84,6 @@ func (a *App) SetWebDAVMountEnabled(ctx context.Context, enabled bool) error {
 	requestCfg.WebDAVMount.Enabled = enabled
 	a.logWebDAVOperation("info", fmt.Sprintf("%s requested target=%s", action, webDAVMountLogTarget(requestCfg)))
 
-	a.mountMu.Lock()
-	defer a.mountMu.Unlock()
-
 	next := a.Supervisor.Config()
 	next.WebDAVMount.Enabled = enabled
 	if err := SaveManagerConfig(a.ConfigPath, next); err != nil {
@@ -91,13 +91,29 @@ func (a *App) SetWebDAVMountEnabled(ctx context.Context, enabled bool) error {
 		return err
 	}
 	a.Supervisor.SetConfig(next)
+
+	// Persist the operator's desired state before waiting for a native mount
+	// operation. In particular, disabling must be able to cancel an automatic
+	// remount that is currently blocked on an unavailable WebDAV service.
+	a.cancelActiveWebDAVMount()
+	a.mountMu.Lock()
+	defer a.mountMu.Unlock()
+	opCtx, finish := a.beginWebDAVMountOperation(ctx)
+	defer finish()
+
+	next = a.Supervisor.Config()
+	if next.WebDAVMount.Enabled != enabled {
+		// A newer request superseded this one while it waited for the native
+		// mount operation to stop.
+		return nil
+	}
 	var err error
 	if enabled {
 		a.logWebDAVOperation("info", "mount native call starting target="+webDAVMountLogTarget(next))
-		err = MountWebDAVFresh(ctx, next)
+		err = MountWebDAVFresh(opCtx, next)
 	} else {
 		a.logWebDAVOperation("info", "unmount native call starting target="+webDAVMountLogTarget(next))
-		err = UnmountWebDAV(ctx, next)
+		err = UnmountWebDAV(opCtx, next)
 	}
 	if err != nil {
 		a.recordWebDAVMountError(action, err)
@@ -116,12 +132,15 @@ func (a *App) RemountWebDAV(ctx context.Context) error {
 }
 
 func (a *App) remountWebDAV(ctx context.Context) error {
+	a.cancelActiveWebDAVMount()
 	a.mountMu.Lock()
 	defer a.mountMu.Unlock()
+	opCtx, finish := a.beginWebDAVMountOperation(ctx)
+	defer finish()
 
 	cfg := a.Supervisor.Config()
 	if !cfg.WebDAVMount.Enabled {
-		mounted, err := WebDAVMounted(ctx, cfg)
+		mounted, err := WebDAVMounted(opCtx, cfg)
 		if err != nil {
 			a.recordWebDAVMountError("remount", err)
 			return err
@@ -132,7 +151,7 @@ func (a *App) remountWebDAV(ctx context.Context) error {
 		}
 	}
 	a.logWebDAVOperation("info", "remount native call starting target="+webDAVMountLogTarget(cfg))
-	if err := MountWebDAVFresh(ctx, cfg); err != nil {
+	if err := MountWebDAVFresh(opCtx, cfg); err != nil {
 		a.recordWebDAVMountError("remount", err)
 		return err
 	}
@@ -201,6 +220,10 @@ func (a *App) webDAVMountLoop(ctx context.Context) {
 					return
 				}
 				if err != nil {
+					if !a.Supervisor.Config().WebDAVMount.Enabled || errors.Is(err, context.Canceled) {
+						timer.Reset(delay)
+						continue
+					}
 					msg := err.Error()
 					_, current := a.lastWebDAVMountError()
 					a.setLastMountError("remount", msg)
@@ -229,19 +252,47 @@ func (a *App) webDAVMountLoop(ctx context.Context) {
 func (a *App) remountWebDAVQuiet(ctx context.Context) error {
 	a.mountMu.Lock()
 	defer a.mountMu.Unlock()
+	opCtx, finish := a.beginWebDAVMountOperation(ctx)
+	defer finish()
 
 	cfg := a.Supervisor.Config()
 	if !cfg.WebDAVMount.Enabled {
 		return nil
 	}
 	if a.needsFreshMountLocked() {
-		if err := MountWebDAVFresh(ctx, cfg); err != nil {
+		if err := MountWebDAVFresh(opCtx, cfg); err != nil {
 			return err
 		}
 		a.markFreshMountLocked()
 		return nil
 	}
-	return MountWebDAV(ctx, cfg)
+	return MountWebDAV(opCtx, cfg)
+}
+
+func (a *App) cancelActiveWebDAVMount() {
+	a.mountCancelMu.Lock()
+	cancel := a.mountCancel
+	a.mountCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *App) beginWebDAVMountOperation(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	a.mountCancelMu.Lock()
+	a.mountOperationID++
+	id := a.mountOperationID
+	a.mountCancel = cancel
+	a.mountCancelMu.Unlock()
+	return ctx, func() {
+		cancel()
+		a.mountCancelMu.Lock()
+		if a.mountOperationID == id {
+			a.mountCancel = nil
+		}
+		a.mountCancelMu.Unlock()
+	}
 }
 
 func (a *App) needsFreshMountLocked() bool {
