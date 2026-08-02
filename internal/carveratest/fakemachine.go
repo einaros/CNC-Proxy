@@ -25,6 +25,7 @@ type FakeMachine struct {
 	dirs                map[string]bool   // created directories
 	status              string            // payload for "?" (e.g. "<Idle|...>")
 	statusReplyDelay    time.Duration     // optional test hook: delay "?" replies
+	statusQueries       int               // number of "?" polls received (test observation)
 	probeReplyDelay     time.Duration     // optional test hook: delay G30/G38 replies
 	dropStatusReplies   bool              // optional test hook: ignore "?" replies
 	dropStatusN         int               // optional test hook: ignore the next N "?" replies
@@ -47,6 +48,7 @@ type FakeMachine struct {
 	gcodes              []string          // CTRL_MULTI gcode lines received (motion/MDI)
 	controls            []byte            // CTRL_SINGLE control chars received (!, ~, 0x18)
 	gcodeReplies        map[string]string // exact line -> textual reply payload
+	rejectedGcodes      map[string]string // exact line -> immediate error without execution (test hook)
 	uploadPacketSizes   []int             // packet sizes advertised by upload senders
 	unlockDoesNotClear  bool              // test hook: $X replies but leaves status unchanged
 	m999DoesNotClear    bool              // test hook: M999 replies but leaves status unchanged
@@ -95,6 +97,7 @@ func NewOn(addr string) (*FakeMachine, error) {
 		status:             "<Idle|MPos:0,0,0|WPos:0,0,0|C:2,4,0,1|T:0,0.000>",
 		failCmd:            map[string]bool{},
 		gcodeReplies:       map[string]string{},
+		rejectedGcodes:     map[string]string{},
 		downloadPacketSize: 8192,
 		config:             defaultFakeMachineConfig(),
 		modelName:          "CA1",
@@ -149,6 +152,13 @@ func (m *FakeMachine) SetStatusReplyDelay(d time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statusReplyDelay = d
+}
+
+// StatusQueries reports how many `?` polls reached the fake machine.
+func (m *FakeMachine) StatusQueries() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.statusQueries
 }
 
 // SetProbeReplyDelay delays G30/G38 contact replies. It keeps the fake from
@@ -275,6 +285,19 @@ func (m *FakeMachine) SetGcodeReply(line, reply string) {
 	m.gcodeReplies[line] = reply
 }
 
+// RejectGcode makes an exact gcode line return an immediate diagnostic without
+// executing it. Passing an empty reply clears the hook. It models transient
+// firmware/planner refusal for interactive retry tests.
+func (m *FakeMachine) RejectGcode(line, reply string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if reply == "" {
+		delete(m.rejectedGcodes, line)
+		return
+	}
+	m.rejectedGcodes[line] = reply
+}
+
 // SetUnlockDoesNotClear makes $X leave the current status unchanged while still
 // replying like firmware. Tests use this to exercise M999 recovery fallback.
 func (m *FakeMachine) SetUnlockDoesNotClear(v bool) {
@@ -349,6 +372,7 @@ func (m *FakeMachine) handle(c net.Conn) {
 						switch f.Data[0] {
 						case '?':
 							m.mu.Lock()
+							m.statusQueries++
 							delay := m.statusReplyDelay
 							drop := m.dropStatusReplies
 							if !drop && m.dropStatusN > 0 {
@@ -1094,8 +1118,15 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		//     these, so the fake stays silent unless a reply is explicitly set.
 		m.mu.Lock()
 		m.gcodes = append(m.gcodes, line)
-		m.applySimulatedGcodeLocked(line)
-		reply, ok := m.gcodeReplies[line]
+		reply, rejected := m.rejectedGcodes[line]
+		if !rejected {
+			m.applySimulatedGcodeLocked(line)
+		}
+		configuredReply, ok := m.gcodeReplies[line]
+		if !rejected && ok {
+			reply = configuredReply
+		}
+		ok = rejected || ok
 		if !ok {
 			reply, ok = m.defaultGcodeReplyLocked(line, time.Now())
 		}

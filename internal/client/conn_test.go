@@ -161,6 +161,90 @@ func TestQueryStateSurfacesPrecedingMotionError(t *testing.T) {
 	}
 }
 
+func TestQueryStateDrainsBurstOfPrecedingMotionErrors(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+	conn := New(clientSide)
+
+	go func() {
+		serverSide.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("error:planner busy one\n")))
+		serverSide.Write(protocol.Encode(protocol.CmdNormalInfo, []byte("error:planner busy two\n")))
+		var scan protocol.Scanner
+		buf := make([]byte, 128)
+		for {
+			n, err := serverSide.Read(buf)
+			for _, frame := range scan.Push(buf[:n]) {
+				if frame.Cmd == protocol.CmdCtrlSingle && string(frame.Data) == "?" {
+					serverSide.Write(protocol.Encode(protocol.CmdStatusRes, []byte("<Idle|MPos:0,0,0>")))
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	if _, err := conn.QueryState(testTimeout); err == nil || !strings.Contains(err.Error(), "planner busy") {
+		t.Fatalf("burst diagnostic = %v, want planner error", err)
+	}
+	payload, err := conn.QueryState(testTimeout)
+	if err != nil {
+		t.Fatalf("fresh query after burst drain: %v", err)
+	}
+	if payload != "<Idle|MPos:0,0,0>" {
+		t.Fatalf("fresh status after burst drain = %q", payload)
+	}
+}
+
+func TestWriteGcodeLineCompletesShortTransportWrites(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	conn := New(&shortWriteConn{Conn: clientSide, max: 3})
+	got := make(chan protocol.Frame, 1)
+	go func() {
+		var scan protocol.Scanner
+		buf := make([]byte, 64)
+		for {
+			n, err := serverSide.Read(buf)
+			for _, frame := range scan.Push(buf[:n]) {
+				got <- frame
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	if err := conn.WriteGcodeLine("$J X4.0000 F1.0000"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-got:
+		if frame.Cmd != protocol.CmdCtrlMulti || string(frame.Data) != "$J X4.0000 F1.0000\n" {
+			t.Fatalf("short-write frame = cmd=%02x data=%q", byte(frame.Cmd), frame.Data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("short transport writes never produced a complete frame")
+	}
+}
+
+type shortWriteConn struct {
+	net.Conn
+	max int
+}
+
+func (c *shortWriteConn) Write(p []byte) (int, error) {
+	if c.max > 0 && len(p) > c.max {
+		p = p[:c.max]
+	}
+	return c.Conn.Write(p)
+}
+
 func TestUploadRoundTrip(t *testing.T) {
 	m, _ := carveratest.New()
 	defer m.Close()

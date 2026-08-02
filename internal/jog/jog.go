@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/protocol"
@@ -44,8 +45,11 @@ const (
 	minDeadmanTimeout         = 300 * time.Millisecond
 	minJogSegment             = 60 * time.Millisecond
 	maxJogSegment             = 100 * time.Millisecond
+	minJogLookahead           = 120 * time.Millisecond
+	maxJogLookahead           = 180 * time.Millisecond
 	minActiveStatusGap        = time.Second
 	maxActiveStatusGap        = 2 * time.Second
+	maxSegmentsPerTick        = 2
 	motionLogGap              = time.Second
 	motionEventGap            = 33 * time.Millisecond
 	statusWaitGap             = 500 * time.Millisecond
@@ -54,7 +58,6 @@ const (
 	jogCoordinateResolutionMM = 0.0001
 	targetPositionToleranceMM = 0.02
 	minTargetVerifyGrace      = 2 * time.Second
-	minSegmentVerifyGrace     = 500 * time.Millisecond
 )
 
 // Config controls the jog engine.
@@ -244,15 +247,6 @@ type pendingTarget struct {
 	verifyAfter  time.Time
 }
 
-// pendingJogSegment records a command that reached the socket but has not yet
-// been confirmed complete by an Idle status at its commanded position. Wall
-// clock time alone must never clear it or admit another gamepad segment.
-type pendingJogSegment struct {
-	seq         int64
-	target      machine.AxisValues
-	verifyAfter time.Time
-}
-
 // Manager owns the single active jog session.
 type Manager struct {
 	cfg Config
@@ -393,6 +387,8 @@ type Session struct {
 	leaseID         int64
 	statusInFlight  bool
 	statusRetry     bool
+	statusFailures  int
+	nextStatusAt    time.Time
 	statusWG        sync.WaitGroup
 	lastStatus      machine.Status
 	lastStatusAt    time.Time
@@ -405,7 +401,6 @@ type Session struct {
 	lastAlarmRaw    string
 	lastMotionLog   time.Time
 	targetPending   *pendingTarget
-	segmentPending  *pendingJogSegment
 }
 
 // Events streams server messages until the session closes.
@@ -586,7 +581,6 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	queuedUntil := s.queuedUntil
 	statusInFlight := s.statusInFlight
 	targetPending := s.targetPending != nil
-	segmentPending := s.segmentPending != nil
 	s.mu.Unlock()
 	if lease == nil {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm jog before using step buttons"})
@@ -595,10 +589,6 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	}
 	if targetPending {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for the current tap move to reach its target"})
-		return
-	}
-	if segmentPending {
-		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for the current jog segment to finish"})
 		return
 	}
 	if !canContinueJog(st.State) {
@@ -655,16 +645,10 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 		to:    copyAxes(target),
 	}, now)
 	s.lastMotionCmd = cmd
-	s.segmentPending = &pendingJogSegment{
-		seq:         seq,
-		target:      copyAxes(target),
-		verifyAfter: segEnd.Add(segmentVerifyGrace(s.mgr.cfg)),
-	}
 	s.mu.Unlock()
 	s.logMotion(now, cmd)
 	s.emitMotionEstimate(now, st, target, delta, cmd, queuedLead)
 	s.emit(Event{Type: "ack", Seq: seq})
-	s.requestStatus()
 }
 
 func (s *Session) handleOrigin(seq int64, axis string, value float64) {
@@ -694,7 +678,6 @@ func (s *Session) handleOriginCommand(seq int64, cmd string, machineOrigin machi
 	queuedUntil := s.queuedUntil
 	statusInFlight := s.statusInFlight
 	targetPending := s.targetPending != nil
-	segmentPending := s.segmentPending != nil
 	s.mu.Unlock()
 	if lease == nil {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm tap move before setting origin"})
@@ -703,10 +686,6 @@ func (s *Session) handleOriginCommand(seq int64, cmd string, machineOrigin machi
 	}
 	if targetPending {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for the current tap move to reach its target"})
-		return
-	}
-	if segmentPending {
-		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for the current jog segment to finish before setting origin"})
 		return
 	}
 	if st.State != machine.Idle {
@@ -792,7 +771,6 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	queuedUntil := s.queuedUntil
 	statusInFlight := s.statusInFlight
 	targetPending := s.targetPending != nil
-	segmentPending := s.segmentPending != nil
 	s.mu.Unlock()
 	if lease == nil {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm tap move before selecting a target"})
@@ -801,10 +779,6 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	}
 	if targetPending {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "tap move is awaiting the previous target"})
-		return
-	}
-	if segmentPending {
-		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for the current jog segment to finish before selecting a tap target"})
 		return
 	}
 	if !canContinueJog(st.State) {
@@ -1030,6 +1004,8 @@ func (s *Session) handleArm(seq int64) {
 	s.leaseID++
 	s.statusInFlight = false
 	s.statusRetry = false
+	s.statusFailures = 0
+	s.nextStatusAt = time.Time{}
 	s.armed = true
 	s.haveInput = false
 	s.lastStatus = st
@@ -1087,6 +1063,11 @@ func (s *Session) requestStatus() {
 		s.mu.Unlock()
 		return
 	}
+	now := s.mgr.now()
+	if !s.nextStatusAt.IsZero() && now.Before(s.nextStatusAt) {
+		s.mu.Unlock()
+		return
+	}
 	leaseID := s.leaseID
 	timeout := statusQueryTimeout(s.mgr.cfg)
 	s.statusInFlight = true
@@ -1111,14 +1092,13 @@ func (s *Session) shouldRequestStatus(now time.Time) bool {
 	haveInput := s.haveInput
 	inFlight := s.statusInFlight
 	targetPending := s.targetPending != nil
-	segmentPending := s.segmentPending != nil
 	lastStatusAt := s.lastStatusAt
 	s.mu.Unlock()
 	if lease == nil || inFlight {
 		return false
 	}
 	gap := s.mgr.cfg.StatusInterval
-	if !targetPending && !segmentPending && motionInputActive(haveInput, in, now, s.mgr.cfg) {
+	if !targetPending && motionInputActive(haveInput, in, now, s.mgr.cfg) {
 		gap = activeStatusPollInterval(s.mgr.cfg)
 	}
 	return lastStatusAt.IsZero() || now.Sub(lastStatusAt) >= gap
@@ -1138,19 +1118,39 @@ func (s *Session) handleStatusResult(res statusResult) {
 	s.mu.Unlock()
 
 	if res.err != nil {
-		if isTimeout(res.err) {
-			s.mu.Lock()
-			s.statusRetry = true
-			s.mu.Unlock()
-			s.emitStatusWaiting(s.mgr.now())
+		if client.IsConnectionError(res.err) && !isTimeout(res.err) {
+			s.failLease(CodeMachineError, res.err)
 			return
 		}
-		s.failLease(CodeMachineError, res.err)
+		// A status query shares the interactive stream with silent $J frames.
+		// A delayed reply or an immediate firmware diagnostic has no request ID,
+		// so neither proves the lease is unusable or that a particular queued jog
+		// was rejected. Keep queue admission time-bounded and retry the poll with
+		// backoff; a real Alarm status remains terminal below.
+		now := s.mgr.now()
+		s.scheduleStatusRetry(now)
+		s.emitStatusWaiting(now)
 		return
 	}
 	if err := s.applyStatusPayload(res.payload); err != nil {
-		s.failLease(CodeMachineError, err)
+		// A malformed/truncated STATUS_RES leaves the previous observation to age
+		// out. It is not evidence that the machine connection or jog lease died.
+		// Stop extending the bounded queue once that observation becomes stale,
+		// but retry in place so one damaged WiFi frame cannot disarm Movement.
+		now := s.mgr.now()
+		s.scheduleStatusRetry(now)
+		s.emitStatusWaiting(now)
 	}
+}
+
+func (s *Session) scheduleStatusRetry(now time.Time) {
+	s.mu.Lock()
+	s.statusRetry = true
+	if s.statusFailures < 30 {
+		s.statusFailures++
+	}
+	s.nextStatusAt = now.Add(statusRetryDelay(s.statusFailures, s.mgr.cfg))
+	s.mu.Unlock()
 }
 
 func (s *Session) applyStatusPayload(payload string) error {
@@ -1163,9 +1163,10 @@ func (s *Session) applyStatusPayload(payload string) error {
 	now := s.mgr.now()
 	s.lastStatusAt = now
 	s.statusRetry = false
+	s.statusFailures = 0
+	s.nextStatusAt = time.Time{}
 	var completed *pendingTarget
 	var notReached *pendingTarget
-	var segmentFailed *pendingJogSegment
 	if pending := s.targetPending; pending != nil {
 		switch {
 		case targetReached(st.MPos, pending.target):
@@ -1181,22 +1182,11 @@ func (s *Session) applyStatusPayload(payload string) error {
 			s.segments = nil
 		}
 	}
-	if pending := s.segmentPending; pending != nil && st.State == machine.Idle {
-		switch {
-		case targetReached(st.MPos, pending.target):
-			s.segmentPending = nil
-			s.planned = copyAxes(st.MPos)
-			s.queuedUntil = time.Time{}
-			s.segments = nil
-		case !now.Before(pending.verifyAfter):
-			segmentFailed = copyPendingJogSegment(pending)
-			s.segmentPending = nil
-			s.planned = copyAxes(st.MPos)
-			s.queuedUntil = time.Time{}
-			s.segments = nil
-		}
-	}
-	if queueLead(now, s.queuedUntil) == 0 {
+	// During Run, MPos is the physical position while planned is the end of the
+	// firmware queue. A wall-clock estimate reaching zero does not prove that
+	// queue has drained; resetting planned here would lose our only bound on how
+	// far ahead we have submitted. Idle is the firmware's actual drain signal.
+	if queueLead(now, s.queuedUntil) == 0 && st.State == machine.Idle {
 		s.planned = copyAxes(st.MPos)
 		s.segments = nil
 	}
@@ -1215,17 +1205,6 @@ func (s *Session) applyStatusPayload(payload string) error {
 			Code:    CodeTargetNotReached,
 			Message: "machine stopped before reaching the requested tap target",
 		})
-	}
-	if segmentFailed != nil {
-		s.release(nil)
-		s.emit(Event{
-			Type:    "error",
-			Seq:     segmentFailed.seq,
-			Code:    CodeTargetNotReached,
-			Message: "machine stopped before completing the jog segment",
-		})
-		s.emitState(segmentFailed.seq)
-		return nil
 	}
 	if !canContinueJog(st.State) {
 		s.release(nil)
@@ -1247,7 +1226,6 @@ func (s *Session) motionTick() {
 	statusInFlight := s.statusInFlight
 	statusRetry := s.statusRetry
 	targetPending := copyPendingTarget(s.targetPending)
-	segmentPending := copyPendingJogSegment(s.segmentPending)
 	s.mu.Unlock()
 
 	queuedLead := queueLead(now, queuedUntil)
@@ -1299,39 +1277,15 @@ func (s *Session) motionTick() {
 		}
 		return
 	}
-	if segmentPending != nil {
-		if queuedLead > 0 {
-			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
-		}
-		if !statusInFlight && (statusRetry || lastStatusAt.IsZero() || now.Sub(lastStatusAt) >= s.mgr.cfg.StatusInterval) {
-			s.requestStatus()
-		}
-		return
-	}
-	// A status poll and a jog write must never overlap on this uncorrelated,
-	// single-conversation protocol. Let already accepted motion drain while the
-	// poll is outstanding, but do not add more commands merely because the
-	// socket write would succeed. A successful STATUS_RES (or a retry after a
-	// timeout) reopens the motion path.
-	if statusInFlight {
-		if queuedLead > 0 {
-			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
-		}
-		return
-	}
-	if statusRetry {
+	// $J is a silent planner append. It is safe to keep the bounded lookahead
+	// filled while the one STATUS_RES reader is outstanding: writes are atomic,
+	// and the status frame has its own type. Poll failures are retryable and must
+	// not turn a short firmware delay into a dropped jog lease.
+	if statusRetry && !statusInFlight {
 		s.requestStatus()
-		if queuedLead > 0 {
-			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
-		}
-		return
 	}
-	if activeMotion && (lastStatusAt.IsZero() || now.Sub(lastStatusAt) >= activeStatusPollInterval(s.mgr.cfg)) {
+	if activeMotion && !statusInFlight && (lastStatusAt.IsZero() || now.Sub(lastStatusAt) >= activeStatusPollInterval(s.mgr.cfg)) {
 		s.requestStatus()
-		if queuedLead > 0 {
-			s.emitMotionEstimate(now, st, planned, Axes{}, "", queuedLead)
-		}
-		return
 	}
 	if !activeMotion {
 		if queuedLead > 0 {
@@ -1348,10 +1302,11 @@ func (s *Session) motionTick() {
 		s.requestStatus()
 		return
 	}
-	if planned == nil || queuedLead == 0 {
+	if planned == nil || (queuedLead == 0 && st.State == machine.Idle) {
 		planned = copyAxes(st.MPos)
 	}
 	segDur := jogSegmentDuration(s.mgr.cfg)
+	lookahead := jogLookahead(s.mgr.cfg)
 
 	delta := MotionDelta(in.Axes, in.Slow, s.mgr.cfg)
 	if delta.X == 0 && delta.Y == 0 && delta.Z == 0 {
@@ -1367,37 +1322,78 @@ func (s *Session) motionTick() {
 	if lease == nil {
 		return
 	}
-	target := copyAxes(planned)
-	target["x"] += delta.X
-	target["y"] += delta.Y
-	target["z"] += delta.Z
-	cmd := jogCommandForDuration(target, delta, s.mgr.cfg, segDur)
-	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
-		s.failLease(CodeMachineError, err)
-		return
+	lastCmd := ""
+	for sent := 0; sent < maxSegmentsPerTick; sent++ {
+		admitAt := s.mgr.now()
+		queuedLead = queueLead(admitAt, queuedUntil)
+		if queuedLead >= lookahead {
+			break
+		}
+		s.mu.Lock()
+		latest := s.latest
+		inputCurrent := s.haveInput && motionInputActive(true, latest, admitAt, s.mgr.cfg)
+		s.mu.Unlock()
+		if !inputCurrent {
+			break
+		}
+		// Input is latest-wins and may change while the first frame in this refill
+		// is being written (especially over USB). Recompute every block so a
+		// direction, speed, or slow-mode change never causes a second stale block.
+		delta = MotionDelta(latest.Axes, latest.Slow, s.mgr.cfg)
+		if delta.X == 0 && delta.Y == 0 && delta.Z == 0 {
+			break
+		}
+		target := copyAxes(planned)
+		target["x"] += delta.X
+		target["y"] += delta.Y
+		target["z"] += delta.Z
+		// Compare planned and physical position only immediately after a new
+		// sample. Between samples, a healthy
+		// machine is expected to move away from the old MPos; continuously using
+		// that old value as a hard fence periodically starves the planner.
+		if physicalLeadCheckDue(admitAt, lastStatusAt, s.mgr.cfg) && jogLeadTooLarge(target, st.MPos, s.mgr.cfg) {
+			break
+		}
+		cmd := jogCommandForDuration(target, delta, s.mgr.cfg, segDur)
+		if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
+			s.failLease(CodeMachineError, err)
+			return
+		}
+		writtenAt := s.mgr.now()
+		segStart := queuedUntil
+		if segStart.Before(writtenAt) {
+			segStart = writtenAt
+		}
+		segEnd := segStart.Add(segDur)
+		queuedUntil = segEnd
+		queuedLead = queueLead(writtenAt, queuedUntil)
+		s.mu.Lock()
+		s.planned = target
+		s.queuedUntil = queuedUntil
+		s.segments = appendPlannedSegment(s.segments, plannedSegment{
+			start: segStart,
+			end:   segEnd,
+			from:  copyAxes(planned),
+			to:    copyAxes(target),
+		}, writtenAt)
+		s.lastMotionCmd = cmd
+		latest = s.latest
+		inputUnchanged := s.haveInput && motionInputActive(true, latest, s.mgr.now(), s.mgr.cfg)
+		s.mu.Unlock()
+		planned = target
+		lastCmd = cmd
+		s.logMotion(writtenAt, cmd)
+		// SetInput runs directly from the WebSocket reader. If the deadman or
+		// stick was released while this tick was filling the planner, stop
+		// admission after the command already written instead of appending
+		// another stale segment. No halt/feed-hold is sent and the armed lease is
+		// preserved.
+		if !inputUnchanged {
+			break
+		}
 	}
-	segEnd := now.Add(segDur)
-	queuedUntil = segEnd
-	queuedLead = queueLead(now, queuedUntil)
-	s.mu.Lock()
-	s.planned = target
-	s.queuedUntil = queuedUntil
-	s.segments = appendPlannedSegment(s.segments, plannedSegment{
-		start: now,
-		end:   segEnd,
-		from:  copyAxes(planned),
-		to:    copyAxes(target),
-	}, now)
-	s.lastMotionCmd = cmd
-	s.segmentPending = &pendingJogSegment{
-		seq:         in.Seq,
-		target:      copyAxes(target),
-		verifyAfter: segEnd.Add(segmentVerifyGrace(s.mgr.cfg)),
-	}
-	s.mu.Unlock()
-	s.logMotion(now, cmd)
-	s.emitMotionEstimate(now, st, target, delta, cmd, queuedLead)
-	s.requestStatus()
+	emitAt := s.mgr.now()
+	s.emitMotionEstimate(emitAt, st, planned, delta, lastCmd, queueLead(emitAt, queuedUntil))
 }
 
 // Normalize converts raw axes into one tick of motion in mm.
@@ -1539,26 +1535,6 @@ func copyPendingTarget(in *pendingTarget) *pendingTarget {
 	}
 }
 
-func segmentVerifyGrace(cfg Config) time.Duration {
-	cfg = cfg.normalize()
-	grace := 4 * cfg.StatusInterval
-	if grace < minSegmentVerifyGrace {
-		return minSegmentVerifyGrace
-	}
-	return grace
-}
-
-func copyPendingJogSegment(in *pendingJogSegment) *pendingJogSegment {
-	if in == nil {
-		return nil
-	}
-	return &pendingJogSegment{
-		seq:         in.seq,
-		target:      copyAxes(in.target),
-		verifyAfter: in.verifyAfter,
-	}
-}
-
 func (s *Session) clearPendingTarget(seq int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1686,12 +1662,92 @@ func selectedJogMachineMax(delta Axes) float64 {
 
 func jogSegmentDuration(cfg Config) time.Duration {
 	cfg = cfg.normalize()
+	// Keep the established 80ms default block cadence. The refill threshold is
+	// two blocks and motionTick may append one block beyond it, giving the
+	// firmware enough junction-planning cushion for continuous high-speed jogs.
 	d := 4 * cfg.Tick
 	if d < minJogSegment {
 		d = minJogSegment
 	}
 	if d > maxJogSegment {
 		d = maxJogSegment
+	}
+	return d
+}
+
+func jogLookahead(cfg Config) time.Duration {
+	d := 2 * jogSegmentDuration(cfg.normalize())
+	if d < minJogLookahead {
+		d = minJogLookahead
+	}
+	if d > maxJogLookahead {
+		d = maxJogLookahead
+	}
+	return d
+}
+
+// jogLeadTooLarge bounds commands by physical progress, not only by elapsed
+// wall time. Under normal execution the temporal lookahead is the tighter
+// bound. If acceleration, planner pressure, or transport latency makes the
+// firmware drain more slowly than predicted, this extra one-segment margin
+// stops us filling its planner indefinitely while preserving continuous moves.
+func jogLeadTooLarge(target, observed machine.AxisValues, cfg Config) bool {
+	if len(target) == 0 || len(observed) == 0 {
+		return true
+	}
+	cfg = cfg.normalize()
+	window := jogLookahead(cfg) + jogSegmentDuration(cfg)
+	xyLimit := cfg.MaxXYMMMin * window.Minutes()
+	if xyLimit < baseMaxXYLeadMM {
+		xyLimit = baseMaxXYLeadMM
+	}
+	zLimit := cfg.MaxZMMMin * window.Minutes()
+	if zLimit < baseMaxZLeadMM {
+		zLimit = baseMaxZLeadMM
+	}
+	for _, axis := range []string{"x", "y"} {
+		to, toOK := target[axis]
+		at, atOK := observed[axis]
+		if !toOK || !atOK || math.Abs(to-at) > xyLimit {
+			return true
+		}
+	}
+	to, toOK := target["z"]
+	at, atOK := observed["z"]
+	return !toOK || !atOK || math.Abs(to-at) > zLimit
+}
+
+func physicalLeadCheckDue(now, observedAt time.Time, cfg Config) bool {
+	if observedAt.IsZero() {
+		return true
+	}
+	cfg = cfg.normalize()
+	age := now.Sub(observedAt)
+	return age >= 0 && age <= 2*cfg.Tick
+}
+
+func statusRetryDelay(failures int, cfg Config) time.Duration {
+	cfg = cfg.normalize()
+	base := 2 * cfg.StatusInterval
+	if base < 250*time.Millisecond {
+		base = 250 * time.Millisecond
+	}
+	capDelay := activeStatusPollInterval(cfg)
+	if base > capDelay {
+		base = capDelay
+	}
+	if failures < 1 {
+		failures = 1
+	}
+	d := base
+	for i := 1; i < failures && d < capDelay; i++ {
+		if d > capDelay/2 {
+			return capDelay
+		}
+		d *= 2
+	}
+	if d > capDelay {
+		return capDelay
 	}
 	return d
 }
@@ -1985,6 +2041,8 @@ func (s *Session) release(err error) {
 	s.armed = false
 	s.statusInFlight = false
 	s.statusRetry = false
+	s.statusFailures = 0
+	s.nextStatusAt = time.Time{}
 	s.planned = nil
 	s.queuedUntil = time.Time{}
 	s.segments = nil
@@ -1994,7 +2052,6 @@ func (s *Session) release(err error) {
 	s.lastAlarmRaw = ""
 	s.lastMotionLog = time.Time{}
 	s.targetPending = nil
-	s.segmentPending = nil
 	s.mu.Unlock()
 	if lease != nil {
 		s.statusWG.Wait()

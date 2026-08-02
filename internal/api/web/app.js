@@ -27,6 +27,8 @@ const ACTIVE_JOB_SPLIT_STEP_PERCENT = 2;
 const ACTIVE_JOB_SPLIT_MIN_LEFT_PX = 260;
 const ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX = 320;
 const ACTIVE_JOB_SPLITTER_PX = 16;
+const JOG_INPUT_HEARTBEAT_MS = 100;
+const JOG_INPUT_DEADZONE = 0.12;
 const MACHINE_SETTING_IDS = [
   "machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max",
   "machine-origin-x", "machine-origin-y", "machine-feed-min", "machine-feed-max",
@@ -121,6 +123,9 @@ const state = {
     reconnectAttempt: 0,
     sampleTimer: null,
     preferredPadIndex: null,
+    lastInput: null,
+    lastInputSentAt: 0,
+    inputSuspended: false,
   },
   outline: defaultOutlineState(),
   workarea: defaultWorkAreaView(),
@@ -8697,6 +8702,7 @@ function connectJog() {
     state.jog.reconnectAttempt = 0;
     state.jog.error = "";
     state.jog.errorCode = "";
+    resetJogInputSender();
     renderJog();
   };
   ws.onclose = () => {
@@ -8705,6 +8711,7 @@ function connectJog() {
     state.jog.link = "offline";
     state.jog.armed = false;
     state.jog.sent.clear();
+    resetJogInputSender();
     completeCommandDisarm(state.jog.commandDisarm?.seq, "Tap Move disconnected before the command.");
     if (state.jog.armQueuedAction) {
       const action = state.jog.armQueuedAction;
@@ -8781,16 +8788,64 @@ function scheduleJogReconnect() {
   }, delay);
 }
 
-function sendJog(msg) {
+function sameJogInput(a, b) {
+  return !!a && !!b && a.deadman === b.deadman && a.slow === b.slow && sameJogAxes(a.axes, b.axes);
+}
+
+function jogInputActive(input) {
+  return !!input?.deadman && ["x", "y", "z"].some((axis) => Math.abs(Number(input.axes?.[axis] || 0)) > JOG_INPUT_DEADZONE);
+}
+
+function resetJogInputSender() {
+  state.jog.lastInput = null;
+  state.jog.lastInputSentAt = 0;
+}
+
+function sendJogInput(msg, force = false) {
+  const ws = state.jog.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connectJog();
+    return 0;
+  }
+
+  const input = {
+    type: "input",
+    deadman: !!msg.deadman,
+    slow: !!msg.slow,
+    axes: {
+      x: clampAxis(Number(msg.axes?.x || 0)),
+      y: clampAxis(Number(msg.axes?.y || 0)),
+      z: clampAxis(Number(msg.axes?.z || 0)),
+    },
+  };
+  const now = performance.now();
+  const previous = state.jog.lastInput;
+  const changed = !sameJogInput(previous, input);
+  const urgentStop = jogInputActive(previous) && !jogInputActive(input);
+  const heartbeatDue = jogInputActive(input) && now - Number(state.jog.lastInputSentAt || 0) >= JOG_INPUT_HEARTBEAT_MS;
+  if (!force && !changed && !heartbeatDue) return 0;
+
+  // Gamepad intent is latest-wins. Never build a browser-side train of stale
+  // active samples behind a congested WebSocket; the next sample retries the
+  // newest axes. A stop always enters the socket immediately and therefore
+  // sits behind at most the one frame the browser has already handed off.
+  if (!force && !urgentStop && Number(ws.bufferedAmount || 0) > 0) return 0;
+  input.seq = msg.seq || state.jog.seq++;
+  ws.send(JSON.stringify(input));
+  state.jog.lastInput = input;
+  state.jog.lastInputSentAt = now;
+  return input.seq;
+}
+
+function sendJog(msg, force = false) {
+  if (msg.type === "input") return sendJogInput(msg, force);
   const ws = state.jog.ws;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     connectJog();
     return 0;
   }
   if (!msg.seq) msg.seq = state.jog.seq++;
-  // "input" messages are fire-and-forget (the server never acks them); only
-  // track messages that expect an ack so `sent` stays bounded while armed.
-  if (msg.type !== "input") state.jog.sent.set(msg.seq, performance.now());
+  state.jog.sent.set(msg.seq, performance.now());
   ws.send(JSON.stringify(msg));
   return msg.seq;
 }
@@ -9873,7 +9928,9 @@ function applyJogEvent(ev) {
     }
     flushQueuedTapMoveArm();
   } else if (ev.type === "state") {
-    state.jog.armed = !!ev.armed;
+    const armed = !!ev.armed;
+    if (state.jog.armed !== armed) resetJogInputSender();
+    state.jog.armed = armed;
     if (ev.availability) {
       state.jog.availability = ev.availability;
       if (ev.availability.available) {
@@ -9951,7 +10008,9 @@ function applyJogEvent(ev) {
     }
     if (ev.seq && ev.seq === state.jog.armPending) {
       const action = state.jog.armPendingAction;
-      state.jog.armed = action === "arm";
+      const armed = action === "arm";
+      if (state.jog.armed !== armed) resetJogInputSender();
+      state.jog.armed = armed;
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
       if (action === "disarm") {
@@ -10064,6 +10123,7 @@ function applyJogEvent(ev) {
     state.jog.errorCode = ev.code || "";
     state.jog.error = ev.message || ev.code || "jog error";
     if (ev.code === "controller_waiting" || ev.code === "not_idle" || ev.code === "stale_status") {
+      resetJogInputSender();
       state.jog.armed = false;
     }
   }
@@ -10164,16 +10224,14 @@ function sameButtonStates(a, b) {
 
 function sampleJog() {
   try {
+    if (state.jog.inputSuspended) {
+      const changed = releaseJogInput();
+      if (changed) renderJog();
+      return;
+    }
     const gp = currentGamepad();
     if (!gp) {
-      const changed = !!state.jog.pad || !!state.jog.deadman ||
-        !sameJogAxes(state.jog.axes, { x: 0, y: 0, z: 0 }) ||
-        (Array.isArray(state.jog.buttons) && state.jog.buttons.length > 0);
-      state.jog.pad = "";
-      state.jog.deadman = false;
-      state.jog.axes = { x: 0, y: 0, z: 0 };
-      state.jog.buttons = [];
-      if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes });
+      const changed = releaseJogInput();
       if (changed) renderJog();
       return;
     }
@@ -10208,6 +10266,20 @@ function sampleJog() {
   } finally {
     scheduleJogSample();
   }
+}
+
+function releaseJogInput(force = false) {
+  const changed = !!state.jog.pad || !!state.jog.deadman ||
+    !sameJogAxes(state.jog.axes, { x: 0, y: 0, z: 0 }) ||
+    (Array.isArray(state.jog.buttons) && state.jog.buttons.length > 0);
+  state.jog.pad = "";
+  state.jog.deadman = false;
+  state.jog.axes = { x: 0, y: 0, z: 0 };
+  state.jog.buttons = [];
+  if (state.jog.armed && (force || changed || jogInputActive(state.jog.lastInput))) {
+    sendJog({ type: "input", deadman: false, axes: state.jog.axes }, true);
+  }
+  return changed;
 }
 
 function scheduleJogSample() {
@@ -10739,10 +10811,27 @@ function init() {
     connectJog();
   });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
+    if (document.hidden) {
+      state.jog.inputSuspended = true;
+      if (releaseJogInput(true)) renderJog();
+    } else {
+      state.jog.inputSuspended = false;
       connectJog();
       scheduleJogSample();
     }
+  });
+  window.addEventListener("blur", () => {
+    state.jog.inputSuspended = true;
+    if (releaseJogInput(true)) renderJog();
+  });
+  window.addEventListener("focus", () => {
+    state.jog.inputSuspended = false;
+    connectJog();
+    scheduleJogSample();
+  });
+  window.addEventListener("pagehide", () => {
+    state.jog.inputSuspended = true;
+    releaseJogInput(true);
   });
   window.addEventListener("gamepadconnected", (e) => {
     state.jog.preferredPadIndex = e.gamepad?.index ?? state.jog.preferredPadIndex;
@@ -10753,11 +10842,7 @@ function init() {
   });
   window.addEventListener("gamepaddisconnected", (e) => {
     if (state.jog.preferredPadIndex === e.gamepad?.index) state.jog.preferredPadIndex = null;
-    state.jog.pad = "";
-    state.jog.deadman = false;
-    state.jog.axes = { x: 0, y: 0, z: 0 };
-    state.jog.buttons = [];
-    if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes });
+    releaseJogInput(true);
     renderJog();
   });
   scheduleJogSample();

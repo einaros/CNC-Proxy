@@ -1400,6 +1400,13 @@ func TestJogWebSocketArmAndInput(t *testing.T) {
 	for time.Now().Before(deadline) {
 		for _, line := range m.Gcodes() {
 			if strings.HasPrefix(line, "$J X") {
+				writeWS(t, c, map[string]any{"type": "input", "seq": 3, "deadman": false, "axes": map[string]float64{"x": 0}})
+				time.Sleep(40 * time.Millisecond)
+				stopped := len(m.Gcodes())
+				time.Sleep(400 * time.Millisecond)
+				if got := len(m.Gcodes()); got != stopped {
+					t.Fatalf("WebSocket release admitted later jog frames: stopped=%d got=%d gcodes=%v", stopped, got, m.Gcodes())
+				}
 				return
 			}
 		}

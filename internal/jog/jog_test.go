@@ -2,7 +2,6 @@ package jog
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"net"
 	"strings"
@@ -823,7 +822,7 @@ func TestJogSetMachineOriginUsesOneVendorG10L2Command(t *testing.T) {
 	t.Fatalf("no machine-origin command observed: %v", fm.Gcodes())
 }
 
-func TestJogFastTickKeepsOneObservedSegmentInFlight(t *testing.T) {
+func TestJogFastTickMaintainsBoundedBackToBackLookahead(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
 	base := time.Unix(100, 0)
@@ -847,27 +846,19 @@ func TestJogFastTickKeepsOneObservedSegmentInFlight(t *testing.T) {
 		clock.Set(base.Add(time.Duration(i) * mgr.cfg.Tick))
 		s.motionTick()
 	}
-	var got int
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		got = len(fm.Gcodes())
-		if got >= 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got != 1 {
-		t.Fatalf("jog should keep exactly one unobserved segment in flight, got %d commands: %v", got, fm.Gcodes())
+	got := fm.Gcodes()
+	if len(got) < 3 {
+		t.Fatalf("jog did not establish back-to-back planner segments: %v", got)
 	}
 	s.mu.Lock()
-	pending := copyPendingJogSegment(s.segmentPending)
-	scheduled := s.queuedUntil.Sub(base)
+	lead := queueLead(clock.Now(), s.queuedUntil)
+	lastStatusAt := s.lastStatusAt
 	s.mu.Unlock()
-	if pending == nil {
-		t.Fatal("unobserved segment was cleared by elapsed wall-clock time")
+	if lead < jogLookahead(mgr.cfg) || lead > jogLookahead(mgr.cfg)+jogSegmentDuration(mgr.cfg) {
+		t.Fatalf("queued lead = %s, want refill-threshold cushion in [%s,%s]", lead, jogLookahead(mgr.cfg), jogLookahead(mgr.cfg)+jogSegmentDuration(mgr.cfg))
 	}
-	if scheduled <= 0 || scheduled > jogSegmentDuration(mgr.cfg) {
-		t.Fatalf("scheduled segment = %s, want one bounded segment", scheduled)
+	if physicalLeadCheckDue(clock.Now(), lastStatusAt, mgr.cfg) {
+		t.Fatal("an old physical-position sample should not throttle a healthy buffered jog")
 	}
 	motions := drainAvailableEvents(s, "motion")
 	if motions == 0 {
@@ -878,13 +869,13 @@ func TestJogFastTickKeepsOneObservedSegmentInFlight(t *testing.T) {
 	}
 }
 
-func TestGamepadJogWaitsForObservedSegmentCompletion(t *testing.T) {
+func TestGamepadJogQueuesNextSegmentWhileMachineIsRun(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
 	base := time.Unix(100, 0)
 	clock := newManualClock(base)
 	mgr.now = clock.Now
-	mgr.cfg.Tick = time.Hour
+	mgr.cfg.Tick = 20 * time.Millisecond
 	mgr.cfg.StatusInterval = time.Hour
 	mgr.cfg.DeadmanTimeout = 2 * time.Second
 
@@ -898,68 +889,45 @@ func TestGamepadJogWaitsForObservedSegmentCompletion(t *testing.T) {
 	drainUntil(t, s, "ack")
 	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
 	s.motionTick()
-	drainUntil(t, s, "status")
-
-	deadline := time.Now().Add(time.Second)
-	for len(fm.Gcodes()) < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := len(fm.Gcodes()); got != 1 {
-		t.Fatalf("first gamepad segment = %d commands, want 1", got)
-	}
-	s.motionTick()
-	if got := len(fm.Gcodes()); got != 1 {
-		t.Fatalf("second segment started before observed completion: %v", fm.Gcodes())
-	}
-
-	s.mu.Lock()
-	pending := copyPendingJogSegment(s.segmentPending)
-	s.mu.Unlock()
-	if pending == nil {
-		t.Fatal("first gamepad segment was not awaiting observed completion")
-	}
-	clock.Set(base.Add(100 * time.Millisecond))
-	if err := s.applyStatusPayload("<Idle|MPos:0,0,0|WPos:0,0,0>"); err != nil {
-		t.Fatal(err)
-	}
-	s.mu.Lock()
-	stillPending := s.segmentPending != nil
-	s.mu.Unlock()
-	if !stillPending || !s.hasLease() {
-		t.Fatal("a premature Idle report at the old position cleared or disarmed the in-flight segment")
-	}
-	s.motionTick()
-	if got := len(fm.Gcodes()); got != 1 {
-		t.Fatalf("premature Idle report admitted another segment: %v", fm.Gcodes())
-	}
-
-	now := base.Add(time.Second)
-	clock.Set(now)
-	status := fmt.Sprintf("<Idle|MPos:%.4f,%.4f,%.4f|WPos:%.4f,%.4f,%.4f>",
-		pending.target["x"], pending.target["y"], pending.target["z"],
-		pending.target["x"], pending.target["y"], pending.target["z"])
-	if err := s.applyStatusPayload(status); err != nil {
-		t.Fatal(err)
-	}
-	s.SetInput(Input{Seq: 3, Deadman: true, Axes: Axes{X: 1}, At: now})
-	s.motionTick()
-	deadline = time.Now().Add(time.Second)
-	for len(fm.Gcodes()) < 2 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitForGcodeCount(t, fm, 2)
 	if got := len(fm.Gcodes()); got != 2 {
-		t.Fatalf("next segment did not start after observed completion: %v", fm.Gcodes())
+		t.Fatalf("initial lookahead = %d commands, want two back-to-back segments: %v", got, fm.Gcodes())
+	}
+
+	// The lookahead is a refill threshold, not a ceiling. One normal 20ms tick
+	// later, append the third 80ms block so scheduler and transport jitter cannot
+	// drain the firmware planner down to its currently executing block.
+	clock.Set(base.Add(mgr.cfg.Tick))
+	s.SetInput(Input{Seq: 3, Deadman: true, Axes: Axes{X: 1}, At: clock.Now()})
+	s.motionTick()
+	waitForGcodeCount(t, fm, 3)
+	if got := len(fm.Gcodes()); got != 3 {
+		t.Fatalf("refilled lookahead = %d commands, want one block beyond the low-water mark: %v", got, fm.Gcodes())
+	}
+
+	clock.Set(base.Add(100 * time.Millisecond))
+	if err := s.applyStatusPayload("<Run|MPos:5,0,0|WPos:5,0,0>"); err != nil {
+		t.Fatal(err)
+	}
+	s.SetInput(Input{Seq: 4, Deadman: true, Axes: Axes{X: 1}, At: clock.Now()})
+	s.motionTick()
+	waitForGcodeCount(t, fm, 4)
+	if got := len(fm.Gcodes()); got <= 3 {
+		t.Fatalf("Run status did not admit the next back-to-back segment: %v", fm.Gcodes())
+	}
+	if !s.hasLease() {
+		t.Fatal("continuous Run status released the armed jog lease")
 	}
 }
 
-func TestGamepadJogDisarmsIfSegmentStopsShort(t *testing.T) {
-	mgr, _, cleanup := newJogManager(t)
+func TestGamepadStopCeasesQueueAdmissionWithoutRealtimeControl(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
 	base := time.Unix(100, 0)
 	clock := newManualClock(base)
 	mgr.now = clock.Now
-	mgr.cfg.Tick = time.Hour
-	mgr.cfg.StatusInterval = minStatusEvery
+	mgr.cfg.Tick = minJogTick
+	mgr.cfg.StatusInterval = time.Hour
 	mgr.cfg.DeadmanTimeout = 2 * time.Second
 
 	s, err := mgr.Start(context.Background())
@@ -972,34 +940,219 @@ func TestGamepadJogDisarmsIfSegmentStopsShort(t *testing.T) {
 	drainUntil(t, s, "ack")
 	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
 	s.motionTick()
-	drainUntil(t, s, "status")
+	waitForGcodeCount(t, fm, 2)
+	before := len(fm.Gcodes())
 
-	s.mu.Lock()
-	pending := copyPendingJogSegment(s.segmentPending)
-	s.mu.Unlock()
-	if pending == nil {
-		t.Fatal("gamepad segment was not awaiting observed completion")
+	s.SetInput(Input{Seq: 3, Deadman: false, Axes: Axes{}, At: base})
+	for i := 1; i <= 50; i++ {
+		clock.Set(base.Add(time.Duration(i) * mgr.cfg.Tick))
+		s.motionTick()
 	}
-	clock.Set(pending.verifyAfter.Add(time.Millisecond))
-	if err := s.applyStatusPayload("<Idle|MPos:0,0,0|WPos:0,0,0>"); err != nil {
-		t.Fatal(err)
+	if got := len(fm.Gcodes()); got != before {
+		t.Fatalf("released gamepad admitted %d additional segments: before=%d commands=%v", got-before, before, fm.Gcodes())
 	}
-	ev := readEvent(t, s, "error")
-	if ev.Seq != 2 || ev.Code != CodeTargetNotReached {
-		t.Fatalf("short gamepad segment result = %+v, want target_not_reached for seq 2", ev)
+	if controls := fm.Controls(); len(controls) != 0 {
+		t.Fatalf("gamepad stop sent realtime hold/halt controls: %v", controls)
 	}
-	if s.hasLease() {
-		t.Fatal("jog remained armed after the machine stopped short of its commanded segment")
+	if !s.hasLease() {
+		t.Fatal("stopping gamepad motion should leave Movement armed")
 	}
 }
 
-func TestGamepadJogStatusTimeoutKeepsSegmentSingleFlightAndArmed(t *testing.T) {
+func TestGamepadJogSustainsBackToBackMotionThenDrainsPromptlyOnRelease(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = 20 * time.Millisecond
+	mgr.cfg.StatusInterval = minStatusEvery
+	mgr.cfg.DeadmanTimeout = minDeadmanTimeout
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	end := time.Now().Add(800 * time.Millisecond)
+	seq := int64(2)
+	for time.Now().Before(end) {
+		s.SetInput(Input{Seq: seq, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+		seq++
+		time.Sleep(15 * time.Millisecond)
+	}
+	if got := len(fm.Gcodes()); got < 8 {
+		t.Fatalf("sustained gamepad input produced only %d segments; want continuous buffered motion: %v", got, fm.Gcodes())
+	}
+	if !s.hasLease() {
+		t.Fatal("sustained back-to-back motion dropped the armed jog lease")
+	}
+
+	s.SetInput(Input{Seq: seq, Deadman: false, Axes: Axes{}, At: time.Now()})
+	// Allow a write already inside the socket call to finish, then no new $J
+	// frames may be admitted. The accepted lookahead drains without hold/halt.
+	time.Sleep(30 * time.Millisecond)
+	stoppedCount := len(fm.Gcodes())
+	time.Sleep(jogLookahead(mgr.cfg) + jogSegmentDuration(mgr.cfg) + 100*time.Millisecond)
+	if got := len(fm.Gcodes()); got != stoppedCount {
+		t.Fatalf("gamepad release kept refilling motion: stopped=%d later=%d commands=%v", stoppedCount, got, fm.Gcodes())
+	}
+	first := fm.Snapshot().Status
+	time.Sleep(150 * time.Millisecond)
+	second := fm.Snapshot().Status
+	if first.State != machine.Idle || second.State != machine.Idle {
+		t.Fatalf("released jog did not drain to Idle: first=%s second=%s", first.State, second.State)
+	}
+	if math.Abs(first.MPos["x"]-second.MPos["x"]) > targetPositionToleranceMM {
+		t.Fatalf("machine kept moving after released queue drained: first=%+v second=%+v", first.MPos, second.MPos)
+	}
+	if controls := fm.Controls(); len(controls) != 0 {
+		t.Fatalf("normal gamepad release used realtime controls: %v", controls)
+	}
+}
+
+func TestGamepadReleaseDuringSlowTransportWriteAdmitsAtMostCurrentFrame(t *testing.T) {
+	mgr, fm, gate, cleanup := newGatedJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = time.Hour
+	mgr.cfg.DeadmanTimeout = 5 * time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+
+	done := make(chan struct{})
+	go func() {
+		s.motionTick()
+		close(done)
+	}()
+	select {
+	case <-gate.started:
+	case <-time.After(time.Second):
+		t.Fatal("jog frame never entered the slow transport")
+	}
+	s.SetInput(Input{Seq: 3, Deadman: false, Axes: Axes{}, At: time.Now()})
+	close(gate.allow)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("motion tick did not finish after transport resumed")
+	}
+	waitForGcodeCount(t, fm, 1)
+	time.Sleep(30 * time.Millisecond)
+	if got := fm.Gcodes(); len(got) != 1 {
+		t.Fatalf("release during a transport write admitted stale follow-up frames: %v", got)
+	}
+	if !s.hasLease() {
+		t.Fatal("normal gamepad release disarmed the session")
+	}
+}
+
+func TestGamepadDirectionChangeDuringSlowWriteUpdatesNextFrame(t *testing.T) {
+	mgr, fm, gate, cleanup := newGatedJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = time.Hour
+	mgr.cfg.DeadmanTimeout = 5 * time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+
+	done := make(chan struct{})
+	go func() {
+		s.motionTick()
+		close(done)
+	}()
+	select {
+	case <-gate.started:
+	case <-time.After(time.Second):
+		t.Fatal("jog frame never entered the slow transport")
+	}
+	s.SetInput(Input{Seq: 3, Deadman: true, Axes: Axes{Y: 1}, At: time.Now()})
+	close(gate.allow)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("motion tick did not finish after transport resumed")
+	}
+	waitForGcodeCount(t, fm, 2)
+	got := fm.Gcodes()
+	if !strings.HasPrefix(got[0], "$J X") || !strings.HasPrefix(got[1], "$J Y") {
+		t.Fatalf("direction change reused stale axes across refill: %v", got)
+	}
+}
+
+func TestGamepadJogIsContinuousAcrossWiFiAndUSBLikeTransports(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		writeChunk int
+		writeDelay time.Duration
+	}{
+		{name: "wifi_tcp"},
+		{name: "usb_serial_pacing", writeChunk: 8, writeDelay: 500 * time.Microsecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, fm, cleanup := newPacedJogManager(t, tc.writeChunk, tc.writeDelay)
+			defer cleanup()
+			s, err := mgr.Start(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			drainUntil(t, s, "hello")
+			s.Arm(1)
+			drainUntil(t, s, "ack")
+
+			end := time.Now().Add(1300 * time.Millisecond)
+			seq := int64(2)
+			for time.Now().Before(end) {
+				s.SetInput(Input{Seq: seq, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+				seq++
+				time.Sleep(15 * time.Millisecond)
+			}
+			if got := len(fm.Gcodes()); got < 12 {
+				t.Fatalf("%s transport starved buffered jogging: commands=%d gcodes=%v", tc.name, got, fm.Gcodes())
+			}
+			if fm.StatusQueries() < 2 {
+				t.Fatalf("%s transport never completed an active-motion status poll", tc.name)
+			}
+			if !s.hasLease() {
+				t.Fatalf("%s transport dropped the armed jog lease", tc.name)
+			}
+
+			s.SetInput(Input{Seq: seq, Deadman: false, Axes: Axes{}, At: time.Now()})
+			time.Sleep(40 * time.Millisecond)
+			stopped := len(fm.Gcodes())
+			time.Sleep(jogLookahead(mgr.cfg) + jogSegmentDuration(mgr.cfg) + 100*time.Millisecond)
+			if got := len(fm.Gcodes()); got != stopped {
+				t.Fatalf("%s transport continued queue admission after release: stopped=%d got=%d", tc.name, stopped, got)
+			}
+		})
+	}
+}
+
+func TestGamepadJogStatusTimeoutRetriesWithoutDroppingBufferedMotion(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
 	base := time.Unix(100, 0)
 	clock := newManualClock(base)
 	mgr.now = clock.Now
-	mgr.cfg.Tick = time.Hour
+	mgr.cfg.Tick = 20 * time.Millisecond
 	mgr.cfg.StatusInterval = minStatusEvery
 	mgr.cfg.DeadmanTimeout = 5 * time.Second
 
@@ -1011,35 +1164,166 @@ func TestGamepadJogStatusTimeoutKeepsSegmentSingleFlightAndArmed(t *testing.T) {
 	drainUntil(t, s, "hello")
 	s.Arm(1)
 	drainUntil(t, s, "ack")
-	drainAvailableEvents(s, "state")
 	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: base})
-
 	s.motionTick()
-	deadline := time.Now().Add(time.Second)
-	for len(fm.Gcodes()) < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := len(fm.Gcodes()); got != 1 {
-		t.Fatalf("initial motion = %d commands, want one observed segment", got)
-	}
-	drainUntil(t, s, "status")
+	waitForGcodeCount(t, fm, 2)
 	before := len(fm.Gcodes())
-	clock.Set(base.Add(mgr.cfg.StatusInterval))
-	fm.SetDropStatusReplies(true)
-	s.motionTick()
-	for i := 0; i < 10; i++ {
-		clock.Add(minJogTick)
-		s.motionTick()
+
+	clock.Set(base.Add(activeStatusPollInterval(mgr.cfg)))
+	if err := s.applyStatusPayload("<Run|MPos:5,0,0|WPos:5,0,0>"); err != nil {
+		t.Fatal(err)
 	}
+	fm.SetDropStatusReplies(true)
+	s.requestStatus()
+	s.SetInput(Input{Seq: 3, Deadman: true, Axes: Axes{X: 1}, At: clock.Now()})
+	s.motionTick()
+	waitForGcodeCount(t, fm, before+1)
 	ev := readEvent(t, s, "error")
 	if ev.Code != CodeStatusWaiting {
-		t.Fatalf("dropped completion status = %+v, want status_waiting", ev)
-	}
-	if got := len(fm.Gcodes()); got != before {
-		t.Fatalf("status timeout admitted more motion: got %d commands, want %d", got, before)
+		t.Fatalf("dropped status result = %+v, want retryable status_waiting", ev)
 	}
 	if !s.hasLease() {
-		t.Fatal("completion status timeout should pause motion without disarming")
+		t.Fatal("status timeout dropped the armed jog lease")
+	}
+	if !s.statusTransactionBusy() {
+		t.Fatal("status timeout did not leave a retry pending")
+	}
+}
+
+func TestStatusRetryBackoffPreventsPollHammering(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	clock := newManualClock(base)
+	mgr.now = clock.Now
+	mgr.cfg.StatusInterval = minStatusEvery
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	fm.SetDropStatusReplies(true)
+	s.requestStatus()
+	ev := readEvent(t, s, "error")
+	if ev.Code != CodeStatusWaiting {
+		t.Fatalf("status timeout = %+v, want status_waiting", ev)
+	}
+	queries := fm.StatusQueries()
+	for i := 0; i < 20; i++ {
+		s.requestStatus()
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := fm.StatusQueries(); got != queries {
+		t.Fatalf("retry backoff admitted %d immediate extra polls", got-queries)
+	}
+
+	delay := statusRetryDelay(1, mgr.cfg)
+	clock.Set(base.Add(delay - time.Millisecond))
+	s.requestStatus()
+	time.Sleep(10 * time.Millisecond)
+	if got := fm.StatusQueries(); got != queries {
+		t.Fatalf("status poll retried before backoff: got=%d want=%d", got, queries)
+	}
+	clock.Set(base.Add(delay))
+	s.requestStatus()
+	waitForStatusQueryCount(t, fm, queries+1)
+}
+
+func TestGamepadJogRetriesUncorrelatedBusyDiagnosticWithoutDisarming(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = 20 * time.Millisecond
+	mgr.cfg.StatusInterval = minStatusEvery
+	mgr.cfg.DeadmanTimeout = time.Second
+	fm.SetStatusReplyDelay(50 * time.Millisecond)
+	fm.RejectGcode("$J X4.0000 F1.0000", "error: planner busy")
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.requestStatus()
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+	s.motionTick()
+	ev := readEvent(t, s, "error")
+	if ev.Code != CodeStatusWaiting {
+		t.Fatalf("uncorrelated planner diagnostic = %+v, want retryable status_waiting", ev)
+	}
+	if !s.hasLease() {
+		t.Fatal("uncorrelated planner diagnostic disarmed gamepad movement")
+	}
+	if !s.statusTransactionBusy() {
+		t.Fatal("uncorrelated planner diagnostic did not schedule a status retry")
+	}
+	rejectedCount := len(fm.Gcodes())
+
+	// Once the transient diagnostic clears, bounded retries reopen the normal
+	// command/status path without requiring the operator to re-arm. More than
+	// one diagnostic may already be waiting because the initial refill contained
+	// multiple planner blocks.
+	fm.RejectGcode("$J X4.0000 F1.0000", "")
+	fm.SetStatusReplyDelay(0)
+	drainStatusThroughRetries(t, s)
+	if s.statusTransactionBusy() || !s.hasLease() {
+		t.Fatalf("successful status retry did not recover in place: busy=%t armed=%t", s.statusTransactionBusy(), s.hasLease())
+	}
+	deadline := time.Now().Add(time.Second)
+	seq := int64(3)
+	for time.Now().Before(deadline) && fm.Snapshot().Status.MPos["x"] <= 0 {
+		s.SetInput(Input{Seq: seq, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+		seq++
+		s.motionTick()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := fm.Snapshot().Status.MPos["x"]; got <= 0 {
+		t.Fatalf("recovered jog never requeued rejected movement; gcodes=%v", fm.Gcodes())
+	}
+	if got := len(fm.Gcodes()); got <= rejectedCount {
+		t.Fatalf("recovered jog did not submit a replacement segment: rejected=%d after=%d", rejectedCount, got)
+	}
+}
+
+func TestGamepadJogRetriesMalformedStatusButStopsOnWellFormedUnknown(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	s.mu.Lock()
+	leaseID := s.leaseID
+	s.statusInFlight = true
+	s.mu.Unlock()
+
+	s.handleStatusResult(statusResult{leaseID: leaseID, payload: "truncated"})
+	ev := readEvent(t, s, "error")
+	if ev.Code != CodeStatusWaiting || !s.hasLease() {
+		t.Fatalf("malformed status result = %+v armed=%t, want retryable armed session", ev, s.hasLease())
+	}
+
+	// A syntactically valid but unknown firmware state must replace cached Idle
+	// and stop the lease; retry tolerance must never turn stale Idle into motion
+	// authorization.
+	if err := s.applyStatusPayload("<FutureState|MPos:0,0,0|WPos:0,0,0>"); err != nil {
+		t.Fatal(err)
+	}
+	ev = readEvent(t, s, "error")
+	if ev.Code != CodeNotIdle || s.hasLease() {
+		t.Fatalf("well-formed unknown status result = %+v armed=%t, want terminal not_idle", ev, s.hasLease())
 	}
 }
 
@@ -1087,7 +1371,7 @@ func TestJogEmitsEstimatedMotionFromQueuedSegments(t *testing.T) {
 	}
 }
 
-func TestJogStatusTransactionSerializesMotionWrites(t *testing.T) {
+func TestJogStatusTransactionDoesNotInterruptSilentMotionWrites(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
 	base := time.Unix(100, 0)
@@ -1114,22 +1398,16 @@ func TestJogStatusTransactionSerializesMotionWrites(t *testing.T) {
 		s.motionTick()
 	}
 	time.Sleep(75 * time.Millisecond)
-	if got := fm.Gcodes(); len(got) != 0 {
-		t.Fatalf("motion reached the machine while status transaction was outstanding: %v", got)
+	if got := fm.Gcodes(); len(got) < 2 {
+		t.Fatalf("status transaction interrupted buffered $J writes: %v", got)
 	}
 	drainUntil(t, s, "status")
-	s.motionTick()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if got := len(fm.Gcodes()); got >= 1 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !s.hasLease() {
+		t.Fatal("successful concurrent status transaction released jog lease")
 	}
-	t.Fatalf("motion did not resume after the status transaction completed; gcodes=%v", fm.Gcodes())
 }
 
-func TestJogStatusTimeoutPausesWithoutDisarming(t *testing.T) {
+func TestJogStatusTimeoutKeepsBoundedMotionAndArmed(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()
 	mgr.cfg.Tick = time.Hour
@@ -1156,7 +1434,7 @@ func TestJogStatusTimeoutPausesWithoutDisarming(t *testing.T) {
 		t.Fatalf("status timeout event = %+v, want status_waiting", ev)
 	}
 	if !s.statusTransactionBusy() {
-		t.Fatal("status timeout should keep normal jog I/O paused for a retry")
+		t.Fatal("status timeout should leave a retry pending")
 	}
 	if !s.hasLease() {
 		t.Fatal("status timeout during active jog should not release the lease")
@@ -1164,8 +1442,13 @@ func TestJogStatusTimeoutPausesWithoutDisarming(t *testing.T) {
 	now := time.Now()
 	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: now})
 	s.motionTick()
-	if got := fm.Gcodes(); len(got) != 0 {
-		t.Fatalf("status retry admitted motion before a fresh reply: %v", got)
+	waitForGcodeCount(t, fm, 1)
+	s.mu.Lock()
+	planned := copyAxes(s.planned)
+	observed := copyAxes(s.lastStatus.MPos)
+	s.mu.Unlock()
+	if jogLeadTooLarge(planned, observed, mgr.cfg) {
+		t.Fatalf("motion during status retry exceeded physical lead bound: planned=%+v observed=%+v", planned, observed)
 	}
 }
 
@@ -1437,17 +1720,40 @@ func TestJogRelayIdleController(t *testing.T) {
 	controller.Write(protocol.QueryStatus())
 	readStatusFrame(t, controller)
 
-	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		for _, line := range fm.Gcodes() {
-			if strings.HasPrefix(line, "$J X") {
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	queriesBeforeMotion := fm.StatusQueries()
+	seq := int64(2)
+	end := time.Now().Add(1300 * time.Millisecond)
+	for time.Now().Before(end) {
+		s.SetInput(Input{Seq: seq, Deadman: true, Axes: Axes{X: 1}, At: time.Now()})
+		seq++
+		time.Sleep(15 * time.Millisecond)
 	}
-	t.Fatalf("no relay instant jog command observed; gcodes=%v", fm.Gcodes())
+	if got := len(fm.Gcodes()); got < 12 {
+		t.Fatalf("relay path starved continuous instant jogging: commands=%d gcodes=%v", got, fm.Gcodes())
+	}
+	if fm.StatusQueries() <= queriesBeforeMotion {
+		t.Fatal("relay jog did not complete its active-motion machine status poll")
+	}
+	if !s.hasLease() {
+		t.Fatal("relay path dropped the armed lease during continuous motion")
+	}
+
+	// Controller heartbeats stay on the mux cache and must neither enter nor
+	// interrupt the interactive machine conversation.
+	queriesBeforeControllerPoll := fm.StatusQueries()
+	controller.Write(protocol.QueryStatus())
+	readStatusFrame(t, controller)
+	if got := fm.StatusQueries(); got != queriesBeforeControllerPoll {
+		t.Fatalf("controller heartbeat leaked through interactive relay lease: before=%d after=%d", queriesBeforeControllerPoll, got)
+	}
+
+	s.SetInput(Input{Seq: seq, Deadman: false, Axes: Axes{}, At: time.Now()})
+	time.Sleep(40 * time.Millisecond)
+	stopped := len(fm.Gcodes())
+	time.Sleep(jogLookahead(mgr.cfg) + jogSegmentDuration(mgr.cfg) + 100*time.Millisecond)
+	if got := len(fm.Gcodes()); got != stopped {
+		t.Fatalf("relay path admitted movement after release: stopped=%d got=%d", stopped, got)
+	}
 }
 
 func newJogManager(t *testing.T) (*Manager, *carveratest.FakeMachine, func()) {
@@ -1473,6 +1779,115 @@ func newJogManager(t *testing.T) (*Manager, *carveratest.FakeMachine, func()) {
 	cfg.DeadmanTimeout = 120 * time.Millisecond
 	mgr := New(arb, cfg)
 	return mgr, fm, fm.Close
+}
+
+type gatedJogConn struct {
+	net.Conn
+	started chan struct{}
+	allow   chan struct{}
+	once    sync.Once
+}
+
+func (c *gatedJogConn) Write(p []byte) (int, error) {
+	var scan protocol.Scanner
+	frames := scan.Push(p)
+	for _, frame := range frames {
+		if frame.Cmd != protocol.CmdCtrlMulti || !strings.HasPrefix(strings.TrimSpace(string(frame.Data)), "$J") {
+			continue
+		}
+		c.once.Do(func() {
+			close(c.started)
+			<-c.allow
+		})
+		break
+	}
+	return c.Conn.Write(p)
+}
+
+func newGatedJogManager(t *testing.T) (*Manager, *carveratest.FakeMachine, *gatedJogConn, func()) {
+	t.Helper()
+	fm, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0>"
+	fm.SetStatus(status)
+	tr := machine.NewTracker()
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("status precondition failed")
+	}
+	gate := &gatedJogConn{started: make(chan struct{}), allow: make(chan struct{})}
+	arb := session.New(session.Config{
+		Tracker:     tr,
+		StateMaxAge: time.Second,
+		Dial: func() (*client.Conn, error) {
+			raw, err := net.DialTimeout("tcp", fm.Addr(), 2*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			gate.Conn = raw
+			return client.New(gate), nil
+		},
+	})
+	mgr := New(arb, DefaultConfig())
+	cleanup := func() {
+		if gate.Conn != nil {
+			_ = gate.Conn.Close()
+		}
+		fm.Close()
+	}
+	return mgr, fm, gate, cleanup
+}
+
+type pacedJogConn struct {
+	net.Conn
+	chunk int
+	delay time.Duration
+}
+
+func (c *pacedJogConn) Write(p []byte) (int, error) {
+	if c.chunk > 0 && len(p) > c.chunk {
+		p = p[:c.chunk]
+	}
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	return c.Conn.Write(p)
+}
+
+func newPacedJogManager(t *testing.T, chunk int, delay time.Duration) (*Manager, *carveratest.FakeMachine, func()) {
+	t.Helper()
+	fm, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0>"
+	fm.SetStatus(status)
+	tr := machine.NewTracker()
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("status precondition failed")
+	}
+	var raw net.Conn
+	arb := session.New(session.Config{
+		Tracker:     tr,
+		StateMaxAge: 3 * time.Second,
+		Dial: func() (*client.Conn, error) {
+			conn, err := net.DialTimeout("tcp", fm.Addr(), 2*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			raw = conn
+			return client.New(&pacedJogConn{Conn: conn, chunk: chunk, delay: delay}), nil
+		},
+	})
+	mgr := New(arb, DefaultConfig())
+	cleanup := func() {
+		if raw != nil {
+			_ = raw.Close()
+		}
+		fm.Close()
+	}
+	return mgr, fm, cleanup
 }
 
 func drainUntil(t *testing.T, s *Session, typ string) Event {
@@ -1514,6 +1929,27 @@ func readEvent(t *testing.T, s *Session, typ string) Event {
 	}
 }
 
+func drainStatusThroughRetries(t *testing.T, s *Session) Event {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				t.Fatal("events closed before status retry recovered")
+			}
+			if ev.Type == "status" {
+				return ev
+			}
+			if ev.Type == "error" && ev.Code != CodeStatusWaiting {
+				t.Fatalf("unexpected status retry error: %+v", ev)
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for status retry recovery")
+		}
+	}
+}
+
 func drainAvailableEvents(s *Session, typ string) int {
 	n := 0
 	for {
@@ -1546,6 +1982,30 @@ func failOnAvailableErrors(t *testing.T, s *Session) {
 			return
 		}
 	}
+}
+
+func waitForGcodeCount(t *testing.T, fm *carveratest.FakeMachine, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(fm.Gcodes()) >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("received %d gcode commands, want at least %d: %v", len(fm.Gcodes()), want, fm.Gcodes())
+}
+
+func waitForStatusQueryCount(t *testing.T, fm *carveratest.FakeMachine, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if fm.StatusQueries() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("received %d status queries, want at least %d", fm.StatusQueries(), want)
 }
 
 type relayAdapter struct{ srv *relay.Server }

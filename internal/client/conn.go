@@ -125,8 +125,19 @@ func IsConnectionError(err error) bool {
 func (k *Conn) writeFrame(b []byte) error {
 	k.writeMu.Lock()
 	defer k.writeMu.Unlock()
-	_, err := k.c.Write(b)
-	return err
+	for written := 0; written < len(b); {
+		n, err := k.c.Write(b[written:])
+		if n > 0 {
+			written += n
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
 }
 
 // WriteGcodeLine writes a CTRL_MULTI gcode/console line and does not wait for a
@@ -515,18 +526,23 @@ func (k *Conn) QueryState(timeout time.Duration) (string, error) {
 }
 
 func (k *Conn) drainAvailableFrames(quiet time.Duration) error {
+	var diagnostic error
 	for {
 		f, err := k.readFrame(time.Now().Add(quiet))
 		if err == nil {
 			if f.Cmd == protocol.CmdNormalInfo {
 				if err := normalInfoError(f.Data); err != nil {
-					return err
+					// Keep draining the immediately available burst. Interactive
+					// motion can produce one diagnostic per rejected planner block;
+					// returning on the first would make later retries rediscover old
+					// errors one at a time and postpone fresh status unnecessarily.
+					diagnostic = err
 				}
 			}
 			continue
 		}
 		if isTimeout(err) {
-			return nil
+			return diagnostic
 		}
 		return err
 	}

@@ -2572,10 +2572,12 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
       tapFeedbackKind: "",
       error: "",
       errorCode: "",
+      lastInput: { deadman: true, slow: false, axes: { x: 1, y: 0, z: 0 } },
+      lastInputSentAt: 50,
     },
   };
   const ctx = buildContext(
-    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "completeCommandDisarm", "tapMoveArmSuccessText", "tapTargetLabel", "sendTapMove", "applyJogEvent"],
+    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "completeCommandDisarm", "tapMoveArmSuccessText", "tapTargetLabel", "sendTapMove", "resetJogInputSender", "applyJogEvent"],
     [],
     {
       state,
@@ -2604,11 +2606,15 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
   assert.equal(state.jog.targetPending, 0);
   assert.equal(state.jog.targetMotionPending, 0);
   assert.equal(state.jog.workMovePending, 0);
+  assert.equal(state.jog.lastInput, null);
 
   state.jog.armPending = 8;
   state.jog.armPendingAction = "arm";
+  state.jog.lastInput = { deadman: true, slow: false, axes: { x: 1, y: 0, z: 0 } };
+  state.jog.lastInputSentAt = 75;
   vm.runInContext("applyJogEvent({ type: 'ack', seq: 8 })", ctx);
   assert.equal(state.jog.armed, true);
+  assert.equal(state.jog.lastInput, null, "re-arm must send current gamepad intent immediately instead of waiting for a stale heartbeat");
   assert.equal(vm.runInContext("tapMoveTargetBusy()", ctx), false);
   vm.runInContext("sendTapMove({ x: 20, y: 5 })", ctx);
   assert.equal(sent.length, 1);
@@ -2910,18 +2916,24 @@ test("Set XYZ leaves blank axes unchanged", () => {
 test("sendJog does not track fire-and-forget input messages", () => {
   const sends = [];
   const jog = {
-    ws: { readyState: 1, send: (payload) => sends.push(payload) },
+    ws: { readyState: 1, bufferedAmount: 0, send: (payload) => sends.push(payload) },
     seq: 1,
     sent: new Map(),
+    lastInput: null,
+    lastInputSentAt: 0,
   };
-  const ctx = buildContext(["sendJog"], [], {
+  const ctx = buildContext(
+    ["sameJogAxes", "sameJogInput", "jogInputActive", "clampAxis", "sendJogInput", "sendJog"],
+    ["JOG_INPUT_HEARTBEAT_MS", "JOG_INPUT_DEADZONE"],
+    {
     WebSocket: { OPEN: 1 },
     performance: { now: () => 123 },
     connectJog: () => {
       throw new Error("unexpected reconnect");
     },
     state: { jog },
-  });
+    },
+  );
   vm.runInContext(
     `sendJog({ type: "input", deadman: true, axes: { x: 0, y: 0, z: 0 } });
      sendJog({ type: "input", deadman: true, axes: { x: 1, y: 0, z: 0 } });
@@ -2932,6 +2944,108 @@ test("sendJog does not track fire-and-forget input messages", () => {
   assert.equal(sends.length, 4, "all messages still reach the socket");
   assert.equal(jog.sent.size, 1, "only the ack-expecting message is tracked");
   assert.ok(jog.sent.has(4), "the arm message seq is tracked");
+});
+
+test("gamepad input coalesces under backpressure but never delays release", () => {
+  const sends = [];
+  let now = 0;
+  const ws = {
+    readyState: 1,
+    bufferedAmount: 0,
+    send: (payload) => sends.push(JSON.parse(payload)),
+  };
+  const jog = {
+    ws,
+    seq: 1,
+    sent: new Map(),
+    lastInput: null,
+    lastInputSentAt: 0,
+  };
+  const ctx = buildContext(
+    ["sameJogAxes", "sameJogInput", "jogInputActive", "clampAxis", "sendJogInput", "sendJog"],
+    ["JOG_INPUT_HEARTBEAT_MS", "JOG_INPUT_DEADZONE"],
+    {
+      WebSocket: { OPEN: 1 },
+      performance: { now: () => now },
+      connectJog: () => {
+        throw new Error("unexpected reconnect");
+      },
+      state: { jog },
+    },
+  );
+
+  vm.runInContext(`sendJog({ type: "input", deadman: true, axes: { x: 1, y: 0, z: 0 } })`, ctx);
+  ws.bufferedAmount = 64;
+  now = 20;
+  vm.runInContext(`sendJog({ type: "input", deadman: true, axes: { x: 0, y: 1, z: 0 } })`, ctx);
+  now = 40;
+  vm.runInContext(`sendJog({ type: "input", deadman: false, axes: { x: 0, y: 0, z: 0 } })`, ctx);
+
+  assert.equal(sends.length, 2, "congested active sample is dropped while release is queued immediately");
+  assert.equal(sends[0].deadman, true);
+  assert.equal(sends[1].deadman, false);
+  assert.deepEqual(sends[1].axes, { x: 0, y: 0, z: 0 });
+});
+
+test("steady gamepad input uses a bounded heartbeat instead of flooding the socket", () => {
+  const sends = [];
+  let now = 1;
+  const jog = {
+    ws: { readyState: 1, bufferedAmount: 0, send: (payload) => sends.push(JSON.parse(payload)) },
+    seq: 1,
+    sent: new Map(),
+    lastInput: null,
+    lastInputSentAt: 0,
+  };
+  const ctx = buildContext(
+    ["sameJogAxes", "sameJogInput", "jogInputActive", "clampAxis", "sendJogInput", "sendJog"],
+    ["JOG_INPUT_HEARTBEAT_MS", "JOG_INPUT_DEADZONE"],
+    {
+      WebSocket: { OPEN: 1 },
+      performance: { now: () => now },
+      connectJog: () => {},
+      state: { jog },
+    },
+  );
+  const sample = `sendJog({ type: "input", deadman: true, axes: { x: 1, y: 0, z: 0 } })`;
+  vm.runInContext(sample, ctx);
+  now = 20;
+  vm.runInContext(sample, ctx);
+  now = 99;
+  vm.runInContext(sample, ctx);
+  now = 101;
+  vm.runInContext(sample, ctx);
+  assert.equal(sends.length, 2, "only initial intent and the 100ms heartbeat are sent");
+});
+
+test("focus-loss release clears gamepad intent and forces a stop frame", () => {
+  const sent = [];
+  const state = {
+    jog: {
+      armed: true,
+      pad: "Controller",
+      deadman: true,
+      axes: { x: 1, y: 0, z: 0 },
+      buttons: [true],
+      lastInput: { deadman: true, slow: false, axes: { x: 1, y: 0, z: 0 } },
+    },
+  };
+  const ctx = buildContext(
+    ["sameJogAxes", "jogInputActive", "releaseJogInput"],
+    ["JOG_INPUT_DEADZONE"],
+    {
+      state,
+      sendJog: (message, force) => sent.push({ message, force }),
+    },
+  );
+  assert.equal(vm.runInContext("releaseJogInput(true)", ctx), true);
+  assert.equal(state.jog.deadman, false);
+  assert.equal(state.jog.axes.x, 0);
+  assert.equal(state.jog.axes.y, 0);
+  assert.equal(state.jog.axes.z, 0);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].force, true);
+  assert.equal(sent[0].message.deadman, false);
 });
 
 test("commands wait for Tap Move to release its lease", async () => {
