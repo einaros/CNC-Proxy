@@ -29,6 +29,10 @@ const ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX = 320;
 const ACTIVE_JOB_SPLITTER_PX = 16;
 const JOG_INPUT_HEARTBEAT_MS = 100;
 const JOG_INPUT_DEADZONE = 0.12;
+const OUTLINE_CAPTURE_SETTLE_MS = 300;
+const OUTLINE_CAPTURE_POLL_MS = 50;
+const OUTLINE_CAPTURE_TIMEOUT_MS = 60000;
+const OUTLINE_CAPTURE_POSITION_TOLERANCE_MM = 0.02;
 const MACHINE_SETTING_IDS = [
   "machine-x-min", "machine-x-max", "machine-y-min", "machine-y-max",
   "machine-origin-x", "machine-origin-y", "machine-feed-min", "machine-feed-max",
@@ -481,6 +485,7 @@ function defaultOutlineState() {
     fieldProbeTooDense: false,
     fieldProbeIssue: "",
     tracePending: false,
+    addPointPending: false,
     filePending: false,
     feedback: "",
     feedbackKind: "",
@@ -2181,41 +2186,102 @@ function endOutlineCapture() {
   renderWorkArea();
 }
 
+function outlineCaptureMotionPending() {
+  const j = state.jog;
+  const liveInput = jogInputActive(j.lastInput) || (!!j.deadman && ["x", "y", "z"].some((axis) => Math.abs(Number(j.axes?.[axis] || 0)) > JOG_INPUT_DEADZONE));
+  return tapMoveTargetBusy() ||
+    !!j.fieldProbeMovePending ||
+    !!j.zStepPending ||
+    !!j.zProbePending ||
+    !!j.probe3DPending ||
+    hasPendingOriginOperation() ||
+    liveInput ||
+    !!j.estimated ||
+    !!state.machine.motion_estimated ||
+    jogEstimateActive();
+}
+
+function outlineCapturePositionsClose(a, b, tolerance = OUTLINE_CAPTURE_POSITION_TOLERANCE_MM) {
+  if (!a?.machine || !b?.machine) return false;
+  return ["x", "y", "z"].every((axis) => {
+    const av = axisValue(a.machine, axis);
+    const bv = axisValue(b.machine, axis);
+    return av !== null && bv !== null && Math.abs(av - bv) <= tolerance;
+  });
+}
+
+async function waitForOutlineCapturePosition(options = {}) {
+  const now = options.now || (() => performance.now());
+  const delay = options.delay || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const settleMS = finiteOr(options.settleMS, OUTLINE_CAPTURE_SETTLE_MS);
+  const pollMS = finiteOr(options.pollMS, OUTLINE_CAPTURE_POLL_MS);
+  const timeoutMS = finiteOr(options.timeoutMS, OUTLINE_CAPTURE_TIMEOUT_MS);
+  const startedAt = now();
+  let stablePosition = null;
+  let stableSince = null;
+  while (now() - startedAt <= timeoutMS) {
+    if (outlineCaptureMotionPending()) {
+      stablePosition = null;
+      stableSince = null;
+    } else {
+      const position = currentOutlineCapturePosition();
+      if (position) {
+        if (stablePosition && outlineCapturePositionsClose(stablePosition, position)) {
+          if (stableSince !== null && now() - stableSince >= settleMS) return position;
+        } else {
+          stablePosition = position;
+          stableSince = now();
+        }
+      }
+    }
+    await delay(pollMS);
+  }
+  throw new Error("motion did not settle before the outline capture timeout");
+}
+
 async function addOutlinePoint() {
   const o = state.outline;
   if (!o.active) {
     setOutlineFeedback("Capture outline before adding points.", "error");
     return;
   }
-  const pos = currentOutlineCapturePosition();
-  if (!pos) {
-    setOutlineFeedback("Add point failed: current XYZ work position is unavailable.", "error");
-    return;
-  }
   if (o.closed) {
     setOutlineFeedback("Undo close before adding another point.", "error");
     return;
   }
-  if (o.fieldProbePending) return;
-  const capture = {
-    id: newID("outline-point"),
-    x: pos.work.x,
-    y: pos.work.y,
-    z: pos.work.z,
-    machine_x: pos.machine.x,
-    machine_y: pos.machine.y,
-    machine_z: pos.machine.z,
-    captured_at: new Date().toISOString(),
-  };
-  pushOutlineUndo();
-  o.active = true;
-  if (!o.origin) o.origin = cloneOutlineOrigin(pos.origin);
-  o.points.push(capture);
-  clearFieldProbeData();
-  o.feedback = "Point " + o.points.length + " added at " + outlinePointLabel(o.points[o.points.length - 1]) + ".";
-  o.feedbackKind = "ok";
+  if (o.fieldProbePending || o.addPointPending) return;
+  o.addPointPending = true;
+  o.feedback = "Waiting for motion and position to settle before adding the outline point...";
+  o.feedbackKind = "";
   renderOutlineCapture();
-  renderWorkArea();
+  try {
+    const pos = await waitForOutlineCapturePosition();
+    if (state.outline !== o || !o.active || o.closed) throw new Error("outline capture changed while waiting for motion to settle");
+    const capture = {
+      id: newID("outline-point"),
+      x: pos.work.x,
+      y: pos.work.y,
+      z: pos.work.z,
+      machine_x: pos.machine.x,
+      machine_y: pos.machine.y,
+      machine_z: pos.machine.z,
+      captured_at: new Date().toISOString(),
+    };
+    pushOutlineUndo();
+    o.active = true;
+    if (!o.origin) o.origin = cloneOutlineOrigin(pos.origin);
+    o.points.push(capture);
+    clearFieldProbeData();
+    o.feedback = "Point " + o.points.length + " added at " + outlinePointLabel(o.points[o.points.length - 1]) + ".";
+    o.feedbackKind = "ok";
+  } catch (e) {
+    o.feedback = "Add point failed: " + e.message;
+    o.feedbackKind = "error";
+  } finally {
+    o.addPointPending = false;
+    renderOutlineCapture();
+    renderWorkArea();
+  }
 }
 
 function closeOutline() {
@@ -2345,7 +2411,7 @@ function renderOutlineCapture() {
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
-  const busy = !!o.floorProbePending || !!o.fieldProbePending || !!o.fieldProbePointMovePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
+  const busy = !!o.addPointPending || !!o.floorProbePending || !!o.fieldProbePending || !!o.fieldProbePointMovePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
   if (panel) panel.hidden = !o.active;
@@ -2367,7 +2433,7 @@ function renderOutlineCapture() {
   if (add) {
     add.disabled = busy;
     setSoftDisabled(add, !busy && !!o.closed);
-    setTextIfChanged(add, "Add point");
+    setTextIfChanged(add, o.addPointPending ? "Settling..." : "Add point");
   }
   if (undo) undo.disabled = busy || !o.undo.length;
   if (redo) redo.disabled = busy || !o.redo.length;

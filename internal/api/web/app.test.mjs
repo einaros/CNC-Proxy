@@ -2654,6 +2654,65 @@ test("outline gamepad button is inert outside capture and adds exactly one point
   assert.equal(points, 1);
 });
 
+test("outline capture waits for pending motion, clears the estimate, and holds a stable final position", async () => {
+  const clock = { value: 0 };
+  const state = {
+    machine: { motion_estimated: true },
+    jog: {
+      targetMotionPending: 9,
+      fieldProbeMovePending: 0,
+      zStepPending: 0,
+      zProbePending: false,
+      probe3DPending: false,
+      deadman: false,
+      axes: { x: 0, y: 0, z: 0 },
+      estimated: true,
+      lastInput: null,
+    },
+  };
+  const ctx = buildContext([
+    "axisValue",
+    "finiteOr",
+    "outlineCaptureMotionPending",
+    "outlineCapturePositionsClose",
+    "waitForOutlineCapturePosition",
+  ], [
+    "JOG_INPUT_DEADZONE",
+    "OUTLINE_CAPTURE_SETTLE_MS",
+    "OUTLINE_CAPTURE_POLL_MS",
+    "OUTLINE_CAPTURE_TIMEOUT_MS",
+    "OUTLINE_CAPTURE_POSITION_TOLERANCE_MM",
+  ], {
+    state,
+    clock,
+    tapMoveTargetBusy: () => !!state.jog.targetMotionPending,
+    jogInputActive: () => false,
+    hasPendingOriginOperation: () => false,
+    jogEstimateActive: () => false,
+    currentOutlineCapturePosition: () => ({
+      machine: { x: clock.value < 250 ? 10 : 10.1, y: 20, z: -3 },
+      work: { x: clock.value < 250 ? 1 : 1.1, y: 2, z: 0 },
+      origin: { x: 9, y: 18, z: -3 },
+    }),
+  });
+  const result = await vm.runInContext(`waitForOutlineCapturePosition({
+    now: () => clock.value,
+    delay: async (ms) => {
+      clock.value += ms;
+      if (clock.value >= 100) {
+        state.jog.targetMotionPending = 0;
+        state.jog.estimated = false;
+        state.machine.motion_estimated = false;
+      }
+    },
+    settleMS: 200,
+    pollMS: 50,
+    timeoutMS: 2000
+  })`, ctx);
+  assert.ok(clock.value >= 450, "the stability window restarts when the observed position changes");
+  assert.equal(result.machine.x, 10.1);
+});
+
 test("focusing the outline button field captures the next gamepad press", () => {
   let saves = 0;
   const input = { value: "7", blur: () => { document.activeElement = null; } };
