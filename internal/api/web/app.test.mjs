@@ -1586,6 +1586,49 @@ test("moving to a selected field point requires armed movement and sends the Saf
   assert.equal(state.jog.fieldProbeMovePending, 17);
 });
 
+test("moving a probed field point keeps the temporary position until confirmation", async () => {
+  let accept = false;
+  let dirty = 0;
+  const state = {
+    outline: {
+      fieldProbeSelectedID: "point",
+      fieldProbePointMovePending: false,
+      fieldProbeComplete: false,
+      feedback: "",
+      feedbackKind: "",
+      fieldProbePreview: [{ id: "point", x: 5, y: 4 }],
+      fieldProbeResults: [{ id: "point", x: 3, y: 4, z: 6 }],
+    },
+  };
+  const ctx = buildContext([
+    "fieldProbePlanPointMatchesResult",
+    "selectedFieldProbePoint",
+    "restoreSelectedFieldProbePosition",
+    "finishSelectedFieldProbeMove",
+  ], [], {
+    state,
+    confirmProbeAction: async () => accept,
+    fmtCoord: (value) => String(value),
+    markGcodeContextOverlayDirty: () => { dirty++; },
+    renderOutlineCapture: () => {},
+    renderWorkArea: () => {},
+  });
+
+  await vm.runInContext("finishSelectedFieldProbeMove({ id: 'point', x: 3, y: 4, fieldProbeComplete: true })", ctx);
+  assert.deepEqual(state.outline.fieldProbePreview[0], { id: "point", x: 3, y: 4 }, "cancel restores the previous position");
+  assert.equal(state.outline.fieldProbeResults.length, 1, "cancel keeps the probe value");
+  assert.equal(state.outline.fieldProbeComplete, true);
+
+  state.outline.fieldProbePreview[0].x = 6;
+  state.outline.fieldProbeComplete = false;
+  accept = true;
+  await vm.runInContext("finishSelectedFieldProbeMove({ id: 'point', x: 3, y: 4, fieldProbeComplete: true })", ctx);
+  assert.deepEqual(state.outline.fieldProbePreview[0], { id: "point", x: 6, y: 4 }, "confirmation keeps the new position");
+  assert.equal(state.outline.fieldProbeResults.length, 0, "confirmation resets the stale probe value");
+  assert.equal(state.outline.fieldProbeComplete, false);
+  assert.equal(dirty, 1);
+});
+
 test("spot-gap spinner changes debounce expensive preview regeneration", () => {
   const input = {
     value: "8",

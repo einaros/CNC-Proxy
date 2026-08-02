@@ -477,6 +477,7 @@ function defaultOutlineState() {
     fieldProbePending: false,
     fieldProbeIndex: 0,
     fieldProbeSelectedID: "",
+    fieldProbePointMovePending: false,
     fieldProbeTooDense: false,
     fieldProbeIssue: "",
     tracePending: false,
@@ -500,6 +501,9 @@ function defaultWorkAreaView() {
     clientStartY: 0,
     tapLocal: null,
     tapProbeID: "",
+    probeDragID: "",
+    probeDragOriginal: null,
+    probeDragging: false,
     dragging: false,
   };
 }
@@ -2341,7 +2345,7 @@ function renderOutlineCapture() {
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
-  const busy = !!o.floorProbePending || !!o.fieldProbePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
+  const busy = !!o.floorProbePending || !!o.fieldProbePending || !!o.fieldProbePointMovePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
   if (panel) panel.hidden = !o.active;
@@ -2628,7 +2632,7 @@ function renderWorkAreaFieldProbePreview() {
   group.innerHTML = points.map((p, i) => {
     const done = o.fieldProbeResults.some((result) => fieldProbePlanPointMatchesResult(p.src, result));
     const selected = p.src.id === o.fieldProbeSelectedID;
-    const label = "Field probe point " + (i + 1) + ", X " + fmtCoord(p.src.x) + ", Y " + fmtCoord(p.src.y) + ", " + (done ? "probed" : "not probed");
+    const label = "Field probe point " + (i + 1) + ", X " + fmtCoord(p.src.x) + ", Y " + fmtCoord(p.src.y) + ", " + (done ? "probed" : "not probed") + (selected ? "; use arrow keys to move" : "");
     return `<circle class="${[p.src.probe_kind === "outline" || p.src.probe_kind === "border" ? "boundary" : "", p.src.probe_kind === "outline" ? "outline" : "", done ? "done" : "", selected ? "selected" : "", o.fieldProbePending && i === o.fieldProbeIndex ? "current" : ""].filter(Boolean).join(" ")}" data-field-probe-id="${escapeHtml(p.src.id)}" role="button" tabindex="0" aria-label="${escapeHtml(label)}" aria-pressed="${selected ? "true" : "false"}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`;
   }).join("");
   group.removeAttribute("display");
@@ -2737,6 +2741,93 @@ function moveToSelectedFieldProbePoint() {
   state.jog.tapFeedbackKind = "";
   renderJog();
   renderOutlineCapture();
+}
+
+function fieldProbeMoveCandidate(local) {
+  const machinePoint = workAreaToMachinePoint(workAreaLocalToContentPoint(local));
+  const origin = cloneOutlineOrigin(state.outline.origin || currentWorkOrigin());
+  const ox = axisValue(origin, "x");
+  const oy = axisValue(origin, "y");
+  if (!machinePoint || ox === null || oy === null) return null;
+  const candidate = { x: machinePoint.x - ox, y: machinePoint.y - oy };
+  const polygon = normalizedClosedPolygon(outlineWorkPoints());
+  return polygon.length >= 3 && pointInPolygonOrBoundary(candidate, polygon) ? candidate : null;
+}
+
+function updateSelectedFieldProbeDrag(local) {
+  const o = state.outline;
+  const point = selectedFieldProbePoint(o);
+  const candidate = fieldProbeMoveCandidate(local);
+  if (!point || point.id !== state.workarea.probeDragID || !candidate) return false;
+  point.x = candidate.x;
+  point.y = candidate.y;
+  o.fieldProbeComplete = false;
+  renderWorkArea();
+  return true;
+}
+
+function restoreSelectedFieldProbePosition(original) {
+  const point = selectedFieldProbePoint();
+  if (!point || !original) return;
+  point.x = original.x;
+  point.y = original.y;
+  state.outline.fieldProbeComplete = !!original.fieldProbeComplete;
+}
+
+async function finishSelectedFieldProbeMove(original) {
+  const o = state.outline;
+  const point = selectedFieldProbePoint(o);
+  if (!point || !original) return;
+  if (Math.hypot(Number(point.x) - Number(original.x), Number(point.y) - Number(original.y)) <= 1e-7) return;
+  const index = o.fieldProbePreview.indexOf(point);
+  const previousResult = o.fieldProbeResults.find((sample) => fieldProbePlanPointMatchesResult(original, sample)) || null;
+  if (!previousResult) {
+    o.fieldProbeComplete = false;
+    markGcodeContextOverlayDirty();
+    setOutlineFeedback("Field point " + (index + 1) + " moved.", "ok");
+    renderWorkArea();
+    return;
+  }
+  o.fieldProbePointMovePending = true;
+  renderOutlineCapture();
+  const accepted = await confirmProbeAction({
+    title: "Move Probed Point",
+    message: "Keep field point " + (index + 1) + " at X " + fmtCoord(point.x) + " Y " + fmtCoord(point.y) + "?",
+    warning: "This point already has a Z sample. Keeping the new position will reset that probe value.",
+    confirmLabel: "Move and Reset",
+  });
+  if (accepted) {
+    o.fieldProbeResults = o.fieldProbeResults.filter((sample) => !fieldProbePlanPointMatchesResult(original, sample));
+    o.fieldProbeComplete = false;
+    markGcodeContextOverlayDirty();
+    o.feedback = "Field point " + (index + 1) + " moved and its probe value was reset.";
+    o.feedbackKind = "ok";
+  } else {
+    restoreSelectedFieldProbePosition(original);
+    o.feedback = "Field point move canceled; its probe value was kept.";
+    o.feedbackKind = "";
+  }
+  o.fieldProbePointMovePending = false;
+  renderOutlineCapture();
+  renderWorkArea();
+}
+
+function moveSelectedFieldProbePointBy(dx, dy) {
+  const o = state.outline;
+  const point = selectedFieldProbePoint(o);
+  if (!point || o.fieldProbePointMovePending || o.fieldProbePending) return;
+  const original = { id: point.id, x: point.x, y: point.y, fieldProbeComplete: !!o.fieldProbeComplete };
+  const candidate = { x: Number(point.x) + Number(dx), y: Number(point.y) + Number(dy) };
+  const polygon = normalizedClosedPolygon(outlineWorkPoints());
+  if (polygon.length < 3 || !pointInPolygonOrBoundary(candidate, polygon)) {
+    setOutlineFeedback("Field point must remain inside the captured outline.", "error");
+    return;
+  }
+  point.x = candidate.x;
+  point.y = candidate.y;
+  o.fieldProbeComplete = false;
+  renderWorkArea();
+  finishSelectedFieldProbeMove(original);
 }
 
 function unprobedFieldProbePoints(plan, results) {
@@ -9976,6 +10067,12 @@ function handleWorkAreaPointerDown(e) {
   v.clientStartY = e.clientY;
   v.tapLocal = { x: local.x, y: local.y };
   v.tapProbeID = String(e.target?.dataset?.fieldProbeId || "");
+  const selected = selectedFieldProbePoint();
+  v.probeDragID = selected && selected.id === v.tapProbeID && !state.outline.fieldProbePointMovePending && !state.outline.fieldProbePending
+    ? selected.id
+    : "";
+  v.probeDragOriginal = v.probeDragID ? { id: selected.id, x: selected.x, y: selected.y, fieldProbeComplete: !!state.outline.fieldProbeComplete } : null;
+  v.probeDragging = false;
   v.dragging = false;
   try {
     svg.setPointerCapture(e.pointerId);
@@ -9997,10 +10094,12 @@ function handleWorkAreaPointerMove(e) {
   const moved = Math.hypot(e.clientX - v.clientStartX, e.clientY - v.clientStartY);
   if (!v.dragging && moved > WORKAREA_PAN_THRESHOLD_PX) {
     v.dragging = true;
-    svg.classList.add("panning");
+    v.probeDragging = !!v.probeDragID;
+    svg.classList.add(v.probeDragging ? "moving-probe" : "panning");
   }
   if (v.dragging) {
-    panWorkArea(local.x - v.pointerLastX, local.y - v.pointerLastY);
+    if (v.probeDragging) updateSelectedFieldProbeDrag(local);
+    else panWorkArea(local.x - v.pointerLastX, local.y - v.pointerLastY);
     v.pointerLastX = local.x;
     v.pointerLastY = local.y;
     updateWorkAreaHoverPosition(local);
@@ -10016,6 +10115,7 @@ function clearWorkAreaPointer(e) {
   const svg = document.getElementById("workarea-plot");
   if (svg) {
     svg.classList.remove("panning");
+    svg.classList.remove("moving-probe");
     if (e) {
       try {
         svg.releasePointerCapture(e.pointerId);
@@ -10028,18 +10128,24 @@ function clearWorkAreaPointer(e) {
   v.dragging = false;
   v.tapLocal = null;
   v.tapProbeID = "";
+  v.probeDragID = "";
+  v.probeDragOriginal = null;
+  v.probeDragging = false;
 }
 
 function handleWorkAreaPointerUp(e) {
   const v = state.workarea;
   if (!v || v.pointerId !== e.pointerId) return;
   const wasDragging = !!v.dragging;
+  const wasProbeDrag = !!v.probeDragging;
   const local = wasDragging ? workAreaSVGPointFromClient(e) : v.tapLocal;
   const probeID = wasDragging ? "" : v.tapProbeID;
+  const probeOriginal = wasProbeDrag ? v.probeDragOriginal : null;
   clearWorkAreaPointer(e);
   updateWorkAreaHoverPosition(local);
   e.preventDefault();
-  if (!wasDragging && probeID) selectFieldProbePoint(probeID);
+  if (wasProbeDrag) finishSelectedFieldProbeMove(probeOriginal);
+  else if (!wasDragging && probeID) selectFieldProbePoint(probeID);
   else if (!wasDragging && local) handleWorkAreaTap(local);
 }
 
@@ -10060,15 +10166,29 @@ function bindWorkAreaInteractions() {
   svg.addEventListener("pointerup", handleWorkAreaPointerUp);
   svg.addEventListener("pointerleave", hideWorkAreaHoverPosition);
   svg.addEventListener("pointercancel", (e) => {
+    const original = state.workarea?.probeDragOriginal;
+    if (original) {
+      restoreSelectedFieldProbePosition(original);
+      renderWorkArea();
+    }
     clearWorkAreaPointer(e);
     hideWorkAreaHoverPosition();
   });
   svg.addEventListener("wheel", handleWorkAreaWheel, { passive: false });
   svg.addEventListener("keydown", (e) => {
     const probeID = String(e.target?.dataset?.fieldProbeId || "");
-    if (!probeID || (e.key !== "Enter" && e.key !== " ")) return;
+    if (!probeID) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      selectFieldProbePoint(probeID);
+      return;
+    }
+    if (probeID !== state.outline.fieldProbeSelectedID || !e.key.startsWith("Arrow")) return;
     e.preventDefault();
-    selectFieldProbePoint(probeID);
+    const step = e.shiftKey ? 10 : 1;
+    const dx = e.key === "ArrowLeft" ? -step : (e.key === "ArrowRight" ? step : 0);
+    const dy = e.key === "ArrowDown" ? -step : (e.key === "ArrowUp" ? step : 0);
+    moveSelectedFieldProbePointBy(dx, dy);
   });
 }
 
