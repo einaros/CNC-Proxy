@@ -1465,12 +1465,14 @@ test("physical outline probes remain visibly distinct from generated border prob
       fieldProbeResults: [],
       fieldProbePending: false,
       fieldProbeIndex: 0,
+      fieldProbeSelectedID: "field-probe-0002",
     },
   };
   const ctx = buildContext([
     "renderWorkAreaFieldProbePreview",
     "displayedFieldProbePoints",
     "fieldProbePlanPointMatchesResult",
+    "escapeHtml",
   ], ["PROBE_SPOT_DIAMETER_MM", "PROBE_SPOT_RADIUS_MM"], {
     state,
     document: { getElementById: () => group },
@@ -1480,11 +1482,51 @@ test("physical outline probes remain visibly distinct from generated border prob
     workAreaMMRadius: () => 1,
     workPointToMachinePoint: (point) => point,
     machineToWorkAreaPoint: (point) => point,
+    fmtCoord: (value) => String(value),
   });
   vm.runInContext("renderWorkAreaFieldProbePreview()", ctx);
   assert.match(group.innerHTML, /class="boundary outline"/, "captured outline probes retain the captured-point treatment");
-  assert.match(group.innerHTML, /class="boundary"[^>]*cx="10\.00"/, "generated border probes remain a separate boundary class");
+  assert.match(group.innerHTML, /class="boundary selected"[^>]*cx="10\.00"/, "generated border probes remain a separate boundary class");
+  assert.match(group.innerHTML, /class="boundary selected"[^>]*role="button"[^>]*aria-pressed="true"/, "the selected probe is keyboard-operable and visibly selected");
   assert.match(group.innerHTML, /class=""[^>]*cx="5\.00"/, "interior field probes retain the field treatment");
+});
+
+test("resetting a selected probe removes only that point's current sample", async () => {
+  const messages = [];
+  let dirty = 0;
+  const state = {
+    outline: {
+      fieldProbeSelectedID: "second",
+      fieldProbePending: false,
+      fieldProbeComplete: true,
+      fieldProbePreview: [
+        { id: "first", x: 1, y: 2 },
+        { id: "second", x: 3, y: 4 },
+      ],
+      fieldProbeResults: [
+        { id: "first", x: 1, y: 2, z: 5 },
+        { id: "second", x: 3, y: 4, z: 6 },
+      ],
+    },
+  };
+  const ctx = buildContext([
+    "fieldProbePlanPointMatchesResult",
+    "selectedFieldProbePoint",
+    "selectedFieldProbeResult",
+    "resetSelectedFieldProbeValue",
+  ], [], {
+    state,
+    confirmProbeAction: async () => true,
+    fmtCoord: (value) => String(value),
+    markGcodeContextOverlayDirty: () => { dirty++; },
+    setOutlineFeedback: (text, kind) => messages.push({ text, kind }),
+    renderWorkArea: () => {},
+  });
+  await vm.runInContext("resetSelectedFieldProbeValue()", ctx);
+  assert.deepEqual(state.outline.fieldProbeResults, [{ id: "first", x: 1, y: 2, z: 5 }]);
+  assert.equal(state.outline.fieldProbeComplete, false);
+  assert.equal(dirty, 1);
+  assert.deepEqual(messages, [{ text: "Probe value reset for field point 2.", kind: "ok" }]);
 });
 
 test("spot-gap spinner changes debounce expensive preview regeneration", () => {

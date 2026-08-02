@@ -475,6 +475,7 @@ function defaultOutlineState() {
     fieldProbeComplete: false,
     fieldProbePending: false,
     fieldProbeIndex: 0,
+    fieldProbeSelectedID: "",
     fieldProbeTooDense: false,
     fieldProbeIssue: "",
     tracePending: false,
@@ -497,6 +498,7 @@ function defaultWorkAreaView() {
     clientStartX: 0,
     clientStartY: 0,
     tapLocal: null,
+    tapProbeID: "",
     dragging: false,
   };
 }
@@ -2332,6 +2334,7 @@ function renderOutlineCapture() {
   const exp = document.getElementById("outline-export");
   const spacing = document.getElementById("outline-field-spacing");
   const fieldProbe = document.getElementById("outline-field-probe");
+  const resetProbe = document.getElementById("outline-field-reset");
   const exportControls = document.getElementById("outline-export-controls");
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
@@ -2397,6 +2400,15 @@ function renderOutlineCapture() {
     setTextIfChanged(fieldProbe, o.fieldProbePending ? "Probing " + Math.min(o.fieldProbeIndex + 1, o.fieldProbePreview.length) + "/" + o.fieldProbePreview.length : "Probe Field Z");
     fieldProbe.disabled = busy;
     setSoftDisabled(fieldProbe, !busy && (!fieldReady || !probeActive || state.jog.armed || !o.fieldProbePreview.length || !!o.fieldProbeTooDense));
+  }
+  if (resetProbe) {
+    const selected = selectedFieldProbePoint(o);
+    const hasResult = !!selectedFieldProbeResult(o);
+    resetProbe.disabled = busy;
+    setSoftDisabled(resetProbe, !busy && !hasResult);
+    resetProbe.title = selected
+      ? (hasResult ? "Reset the selected point's probe value" : "The selected point has no probe value")
+      : "Select a field probe point first";
   }
   if (exportControls) exportControls.hidden = !o.fieldProbeResults.length;
   if (exportObj) {
@@ -2603,9 +2615,12 @@ function renderWorkAreaFieldProbePreview() {
     group.innerHTML = "";
     return;
   }
-  group.innerHTML = points.map((p, i) =>
-    `<circle class="${[p.src.probe_kind === "outline" || p.src.probe_kind === "border" ? "boundary" : "", p.src.probe_kind === "outline" ? "outline" : "", o.fieldProbeResults.some((result) => fieldProbePlanPointMatchesResult(p.src, result)) ? "done" : "", o.fieldProbePending && i === o.fieldProbeIndex ? "current" : ""].filter(Boolean).join(" ")}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`
-  ).join("");
+  group.innerHTML = points.map((p, i) => {
+    const done = o.fieldProbeResults.some((result) => fieldProbePlanPointMatchesResult(p.src, result));
+    const selected = p.src.id === o.fieldProbeSelectedID;
+    const label = "Field probe point " + (i + 1) + ", X " + fmtCoord(p.src.x) + ", Y " + fmtCoord(p.src.y) + ", " + (done ? "probed" : "not probed");
+    return `<circle class="${[p.src.probe_kind === "outline" || p.src.probe_kind === "border" ? "boundary" : "", p.src.probe_kind === "outline" ? "outline" : "", done ? "done" : "", selected ? "selected" : "", o.fieldProbePending && i === o.fieldProbeIndex ? "current" : ""].filter(Boolean).join(" ")}" data-field-probe-id="${escapeHtml(p.src.id)}" role="button" tabindex="0" aria-label="${escapeHtml(label)}" aria-pressed="${selected ? "true" : "false"}" cx="${p.plot.x.toFixed(2)}" cy="${p.plot.y.toFixed(2)}" r="${r.toFixed(2)}"></circle>`;
+  }).join("");
   group.removeAttribute("display");
 }
 
@@ -2616,6 +2631,46 @@ function displayedFieldProbePoints(outline) {
 function fieldProbePlanPointMatchesResult(plan, result) {
   if (!plan || !result || plan.id !== result.id) return false;
   return Math.hypot(Number(plan.x) - Number(result.x), Number(plan.y) - Number(result.y)) <= 0.05;
+}
+
+function selectedFieldProbePoint(outline = state.outline) {
+  const selectedID = String(outline?.fieldProbeSelectedID || "");
+  return (outline?.fieldProbePreview || []).find((point) => point.id === selectedID) || null;
+}
+
+function selectedFieldProbeResult(outline = state.outline) {
+  const point = selectedFieldProbePoint(outline);
+  return point
+    ? (outline?.fieldProbeResults || []).find((result) => fieldProbePlanPointMatchesResult(point, result)) || null
+    : null;
+}
+
+function selectFieldProbePoint(id) {
+  const o = state.outline;
+  const point = (o.fieldProbePreview || []).find((candidate) => candidate.id === id);
+  if (!point) return false;
+  o.fieldProbeSelectedID = point.id;
+  renderOutlineCapture();
+  renderWorkArea();
+  return true;
+}
+
+async function resetSelectedFieldProbeValue() {
+  const o = state.outline;
+  const point = selectedFieldProbePoint(o);
+  const result = selectedFieldProbeResult(o);
+  if (!point || !result || o.fieldProbePending) return;
+  const index = o.fieldProbePreview.indexOf(point);
+  if (!await confirmProbeAction({
+    title: "Reset Probe Value",
+    message: "Reset the Z sample for field point " + (index + 1) + " at X " + fmtCoord(point.x) + " Y " + fmtCoord(point.y) + "?",
+    confirmLabel: "Reset Value",
+  })) return;
+  o.fieldProbeResults = o.fieldProbeResults.filter((sample) => !fieldProbePlanPointMatchesResult(point, sample));
+  o.fieldProbeComplete = false;
+  markGcodeContextOverlayDirty();
+  setOutlineFeedback("Probe value reset for field point " + (index + 1) + ".", "ok");
+  renderWorkArea();
 }
 
 function unprobedFieldProbePoints(plan, results) {
@@ -2647,7 +2702,10 @@ function clearFieldProbeData(keepPreview = false) {
   o.fieldProbeIndex = 0;
   o.fieldProbeTooDense = false;
   o.fieldProbeIssue = "";
-  if (!keepPreview) o.fieldProbePreview = [];
+  if (!keepPreview) {
+    o.fieldProbePreview = [];
+    o.fieldProbeSelectedID = "";
+  }
 }
 
 function updateFieldProbePreview() {
@@ -2655,6 +2713,7 @@ function updateFieldProbePreview() {
   markGcodeContextOverlayDirty();
   if (!o.closed || o.points.length < 3) {
     o.fieldProbePreview = [];
+    o.fieldProbeSelectedID = "";
     o.fieldProbeTooDense = false;
     o.fieldProbeIssue = "";
     return;
@@ -2662,12 +2721,14 @@ function updateFieldProbePreview() {
   const geometry = effectiveOutlineGeometry(outlineWorkPoints(), o.closed, o.curveFit);
   if (geometry.limited) {
     o.fieldProbePreview = [];
+    o.fieldProbeSelectedID = "";
     o.fieldProbeTooDense = true;
     o.fieldProbeIssue = "curve fit generated too many outline points";
     return;
   }
   const built = buildFieldProbePreview(geometry.points, fieldProbeSpotGap(), outlineWorkPoints());
   o.fieldProbePreview = built.points;
+  if (!selectedFieldProbePoint(o)) o.fieldProbeSelectedID = "";
   o.fieldProbeTooDense = built.tooDense;
   o.fieldProbeIssue = built.issue || "";
 }
@@ -9842,6 +9903,7 @@ function handleWorkAreaPointerDown(e) {
   v.clientStartX = e.clientX;
   v.clientStartY = e.clientY;
   v.tapLocal = { x: local.x, y: local.y };
+  v.tapProbeID = String(e.target?.dataset?.fieldProbeId || "");
   v.dragging = false;
   try {
     svg.setPointerCapture(e.pointerId);
@@ -9893,6 +9955,7 @@ function clearWorkAreaPointer(e) {
   v.pointerId = null;
   v.dragging = false;
   v.tapLocal = null;
+  v.tapProbeID = "";
 }
 
 function handleWorkAreaPointerUp(e) {
@@ -9900,10 +9963,12 @@ function handleWorkAreaPointerUp(e) {
   if (!v || v.pointerId !== e.pointerId) return;
   const wasDragging = !!v.dragging;
   const local = wasDragging ? workAreaSVGPointFromClient(e) : v.tapLocal;
+  const probeID = wasDragging ? "" : v.tapProbeID;
   clearWorkAreaPointer(e);
   updateWorkAreaHoverPosition(local);
   e.preventDefault();
-  if (!wasDragging && local) handleWorkAreaTap(local);
+  if (!wasDragging && probeID) selectFieldProbePoint(probeID);
+  else if (!wasDragging && local) handleWorkAreaTap(local);
 }
 
 function handleWorkAreaWheel(e) {
@@ -9927,6 +9992,12 @@ function bindWorkAreaInteractions() {
     hideWorkAreaHoverPosition();
   });
   svg.addEventListener("wheel", handleWorkAreaWheel, { passive: false });
+  svg.addEventListener("keydown", (e) => {
+    const probeID = String(e.target?.dataset?.fieldProbeId || "");
+    if (!probeID || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    selectFieldProbePoint(probeID);
+  });
 }
 
 function applyJogEvent(ev) {
@@ -10747,6 +10818,7 @@ function init() {
   };
   outlineSpacing.onchange = scheduleOutlineFieldSpacingUpdate;
   bindButtonAction(document.getElementById("outline-field-probe"), runFieldProbe);
+  bindButtonAction(document.getElementById("outline-field-reset"), resetSelectedFieldProbeValue);
   bindButtonAction(document.getElementById("outline-probe-floor"), probeFloor);
   bindButtonAction(document.getElementById("outline-export-obj"), exportHeightOBJ);
   bindButtonAction(document.getElementById("outline-export-height"), exportHeightImage);

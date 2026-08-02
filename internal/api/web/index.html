@@ -389,15 +389,16 @@
   .outline-preview-controls > #outline-start { border-color: rgba(87,166,214,.72); background: rgba(87,166,214,.18); }
   .outline-active-controls { display: grid; gap: 5px; align-items: stretch; }
   .outline-active-controls label { min-height: 30px; display: flex; gap: 6px; align-items: center; justify-content: center; padding: 4px 8px; color: var(--muted); background: rgba(18,23,28,.88); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
-  .outline-capture { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: 20px 36px 32px; grid-template-areas: "title title title title" "actions actions exports exports" "settings summary summary summary"; gap: 6px; align-items: stretch; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
+  .outline-capture { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: 20px 36px 32px; grid-template-areas: "title title title title" "actions actions exports exports" "settings settings summary summary"; gap: 6px; align-items: stretch; padding: 8px; background: rgba(18,23,28,.54); border: 1px solid var(--border); border-radius: var(--radius); }
   .outline-capture[hidden] { display: none; }
   .outline-probe-title { grid-area: title; display: flex; align-items: center; min-width: 0; color: var(--text); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
   .outline-probe-actions, .outline-export-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; min-width: 0; }
   .outline-probe-actions { grid-area: actions; }
   .outline-probe-actions button { width: 100%; min-width: 0; height: 36px; min-height: 36px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .outline-probe-settings { grid-area: settings; display: flex; min-width: 0; align-items: center; justify-self: start; }
+  .outline-probe-settings { grid-area: settings; display: flex; gap: 8px; min-width: 0; align-items: center; justify-self: start; }
   .outline-probe-settings label { display: grid; grid-template-columns: max-content 72px; gap: 8px; align-items: center; width: max-content; min-width: 0; height: 32px; color: var(--muted); }
   .outline-probe-settings input[type="number"] { width: 72px; min-width: 0; height: 32px; }
+  .outline-probe-settings button { height: 32px; min-height: 32px; white-space: nowrap; }
   .outline-export-controls { grid-area: exports; }
   .outline-export-controls button { min-width: 0; height: 36px; min-height: 36px; padding-inline: 8px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .outline-summary { grid-area: summary; min-width: 0; height: 32px; overflow: auto; align-content: center; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -416,6 +417,9 @@
   #workarea-field-probe-preview circle.boundary { fill: rgba(223,241,251,.42); stroke: var(--accent); }
   #workarea-field-probe-preview circle.outline { fill: #dff1fb; stroke: #12171c; }
   #workarea-field-probe-preview circle.done { fill: rgba(68,194,123,.36); stroke: var(--ok); }
+  #workarea-field-probe-preview circle[role="button"] { cursor: pointer; }
+  #workarea-field-probe-preview circle.selected { stroke: #fff; stroke-width: .8; }
+  #workarea-field-probe-preview circle:focus-visible { outline: none; stroke: #fff; stroke-width: 1; }
   #workarea-field-probe-preview circle.current { fill: rgba(87,166,214,.52); stroke: var(--accent); stroke-width: .55; }
   #workarea-origin-x, #workarea-origin-y { display: none; }
   #workarea-viewport line, #workarea-viewport path, #workarea-viewport circle, #workarea-boundary { vector-effect: non-scaling-stroke; }
@@ -1075,6 +1079,7 @@
               </div>
               <div class="outline-probe-settings">
                 <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
+                <button type="button" id="outline-field-reset">Reset value</button>
               </div>
               <div id="outline-summary" class="outline-summary"></div>
             </div>
