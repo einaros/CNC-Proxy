@@ -147,6 +147,7 @@ test("outline file load reports transient completion only through the bottom sta
     state,
     confirm: () => true,
     outlineStateFromJSON: () => loaded,
+    markGcodeContextOverlayDirty: () => {},
     updateFieldProbePreview: () => { previewUpdates++; },
     renderOutlineCapture: () => {},
     renderWorkArea: () => {},
@@ -178,7 +179,15 @@ test("field probing keeps every travel and retract at the starting machine Z", a
       origin: { x: -200, y: -100, z: -40 },
       floorMachineZ: -40,
       fieldProbePreview: [{ id: "first", x: 1, y: 2 }, { id: "second", x: 3, y: 4 }],
-      fieldProbeResults: [],
+      fieldProbeResults: [{
+        id: "first",
+        x: 1,
+        y: 2,
+        z: -42,
+        machine_x: -199,
+        machine_y: -98,
+        machine_z: -42,
+      }],
       fieldProbeTooDense: false,
       fieldProbePending: false,
       fieldProbeIndex: 0,
@@ -192,6 +201,7 @@ test("field probing keeps every travel and retract at the starting machine Z", a
     cancelOutlineFieldSpacingUpdate: () => {},
     commitOutlineFieldSpacingDraft: () => true,
     clearControlDrafts: () => {},
+    markGcodeContextOverlayDirty: () => {},
     updateFieldProbePreview: () => {},
     currentOutlineCapturePosition: () => ({ machine: { z: -41 } }),
     setOutlineFeedback: () => {},
@@ -209,17 +219,18 @@ test("field probing keeps every travel and retract at the starting machine Z", a
       return { x: point.x, y: point.y, z: -42, machine_x: point.x - 200, machine_y: point.y - 100, machine_z: -42 };
     },
   });
-  vm.runInContext(["axisValue", "finiteOr", "cloneOutlineOrigin", "runFieldProbe"].map(extractFunction).join("\n"), ctx);
+  vm.runInContext(["axisValue", "finiteOr", "cloneOutlineOrigin", "fieldProbePlanPointMatchesResult", "unprobedFieldProbePoints", "runFieldProbe"].map(extractFunction).join("\n"), ctx);
   await vm.runInContext("runFieldProbe()", ctx);
 
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1, "only the point without a matching sample is probed");
+  assert.equal(calls[0].point.id, "second");
   for (const { opts } of calls) {
     assert.equal(opts.safeZMM, -41);
     assert.equal(opts.retractZMM, -41);
     assert.equal("retractAboveMM" in opts, false);
   }
-  assert.ok(workAreaRenders.some((render) => render.pending && render.index === 0 && render.results === 0), "first target renders before its probe completes");
-  assert.ok(workAreaRenders.some((render) => render.pending && render.index === 1 && render.results === 1), "next target renders before its probe completes");
+  assert.ok(workAreaRenders.some((render) => render.pending && render.index === 1 && render.results === 1), "remaining target renders before its probe completes");
+  assert.equal(state.outline.fieldProbeResults.length, 2, "existing and new samples are retained");
 });
 
 test("field probing without a floor confirms and uses the current Z origin", async () => {
@@ -247,6 +258,7 @@ test("field probing without a floor confirms and uses the current Z origin", asy
     cancelOutlineFieldSpacingUpdate: () => {},
     commitOutlineFieldSpacingDraft: () => true,
     clearControlDrafts: () => {},
+    markGcodeContextOverlayDirty: () => {},
     updateFieldProbePreview: () => {},
     currentOutlineCapturePosition: () => ({ machine: { z: -35 } }),
     setOutlineFeedback: () => {},
@@ -267,7 +279,7 @@ test("field probing without a floor confirms and uses the current Z origin", asy
       machine_z: -38.75,
     }),
   });
-  vm.runInContext(["axisValue", "finiteOr", "cloneOutlineOrigin", "runFieldProbe"].map(extractFunction).join("\n"), ctx);
+  vm.runInContext(["axisValue", "finiteOr", "cloneOutlineOrigin", "fieldProbePlanPointMatchesResult", "unprobedFieldProbePoints", "runFieldProbe"].map(extractFunction).join("\n"), ctx);
   await vm.runInContext("runFieldProbe()", ctx);
 
   assert.equal(state.outline.fieldProbeResults.length, 1);

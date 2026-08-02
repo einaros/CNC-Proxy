@@ -2618,6 +2618,13 @@ function fieldProbePlanPointMatchesResult(plan, result) {
   return Math.hypot(Number(plan.x) - Number(result.x), Number(plan.y) - Number(result.y)) <= 0.05;
 }
 
+function unprobedFieldProbePoints(plan, results) {
+  const samples = Array.isArray(results) ? results : [];
+  return (Array.isArray(plan) ? plan : [])
+    .map((point, index) => ({ point, index }))
+    .filter(({ point }) => !samples.some((sample) => fieldProbePlanPointMatchesResult(point, sample)));
+}
+
 function outlineEditingMarkersVisible(outline, probes) {
   return !outline?.closed || !(probes || []).length;
 }
@@ -4450,6 +4457,11 @@ async function runFieldProbe() {
     setOutlineFeedback("Field Z probe needs at least one preview point inside the outline.", "error");
     return;
   }
+  const remaining = unprobedFieldProbePoints(o.fieldProbePreview, o.fieldProbeResults);
+  if (!remaining.length) {
+    setOutlineFeedback("All field Z probe points already have samples.", "ok");
+    return;
+  }
   const origin = cloneOutlineOrigin(o.origin || currentWorkOrigin()) || {};
   const floorZ = finiteOr(o.floorMachineZ, NaN);
   const liveOrigin = currentOutlineCapturePosition()?.origin;
@@ -4464,7 +4476,7 @@ async function runFieldProbe() {
   const referenceText = "machine Z " + fmtCoord(referenceZ) + " mm";
   if (!await confirmProbeAction({
     title: "Probe Field Z",
-    message: "Run " + o.fieldProbePreview.length + " field Z probes inside the captured outline?",
+    message: "Run " + remaining.length + " remaining field Z probe" + (remaining.length === 1 ? "" : "s") + " inside the captured outline?",
     warning: hasFloor
       ? "Z coordinates and exports will be relative to the current Z origin at " + referenceText + ", established by the recorded floor probe."
       : "No floor probe is recorded. Z coordinates and exports will be relative to the current Z origin at " + referenceText + ". Consider probing the floor first.",
@@ -4477,7 +4489,6 @@ async function runFieldProbe() {
     return;
   }
   o.fieldProbePending = true;
-  o.fieldProbeResults = [];
   o.fieldProbeComplete = false;
   markGcodeContextOverlayDirty();
   o.fieldReferenceMachineZ = referenceZ;
@@ -4488,12 +4499,13 @@ async function runFieldProbe() {
   renderOutlineCapture();
   renderWorkArea();
   try {
-    for (let i = 0; i < o.fieldProbePreview.length; i++) {
-      o.fieldProbeIndex = i;
-      o.feedback = "Probing field point " + (i + 1) + " of " + o.fieldProbePreview.length + "...";
+    for (let i = 0; i < remaining.length; i++) {
+      const pending = remaining[i];
+      o.fieldProbeIndex = pending.index;
+      o.feedback = "Probing remaining field point " + (i + 1) + " of " + remaining.length + "...";
       renderOutlineCapture();
       renderWorkArea();
-      const p = o.fieldProbePreview[i];
+      const p = pending.point;
       const probed = await probeZAtWorkPoint(p, {
         moveXY: true,
         origin,
@@ -4514,8 +4526,8 @@ async function runFieldProbe() {
       });
       renderWorkArea();
     }
-    o.fieldProbeComplete = true;
-    o.feedback = "Field Z probe completed with " + o.fieldProbeResults.length + " samples.";
+    o.fieldProbeComplete = unprobedFieldProbePoints(o.fieldProbePreview, o.fieldProbeResults).length === 0;
+    o.feedback = "Field Z probe completed; " + o.fieldProbePreview.length + " of " + o.fieldProbePreview.length + " points have samples.";
     o.feedbackKind = "ok";
   } catch (e) {
     o.feedback = "Field Z probe failed: " + e.message;
