@@ -1529,6 +1529,63 @@ test("resetting a selected probe removes only that point's current sample", asyn
   assert.deepEqual(messages, [{ text: "Probe value reset for field point 2.", kind: "ok" }]);
 });
 
+test("moving to a selected field point requires armed movement and sends the Safe Z setting", () => {
+  let sent = null;
+  const state = {
+    machine: { mpos: { x: 0, y: 0, z: -2 } },
+    ui: { machine: { safe_z_disabled: false, safe_z_mm: 4 } },
+    jog: {
+      link: "online",
+      armed: true,
+      targetPending: 0,
+      targetMotionPending: 0,
+      zStepPending: 0,
+      target: null,
+      observed: null,
+      mpos: { x: 0, y: 0, z: -2 },
+    },
+    outline: {
+      origin: { x: -200, y: -100, z: -40 },
+      fieldProbeSelectedID: "second",
+      fieldProbePreview: [
+        { id: "first", x: 1, y: 2 },
+        { id: "second", x: 3, y: 4 },
+      ],
+    },
+  };
+  const ctx = buildContext([
+    "selectedFieldProbePoint",
+    "moveToSelectedFieldProbePoint",
+  ], [], {
+    state,
+    tapMoveTargetBusy: () => false,
+    hasPendingOriginOperation: () => false,
+    currentTapFeed: () => 600,
+    cloneOutlineOrigin: (origin) => origin,
+    currentWorkOrigin: () => null,
+    workPointToMachinePoint: (point, origin) => ({ x: point.x + origin.x, y: point.y + origin.y }),
+    normalizeMachineSettings: (machine) => machine,
+    safeZForTapMove: (machine) => machine.safe_z_mm,
+    fmtCoord: (value) => String(value),
+    sendJog: (message) => { sent = message; return 17; },
+    setTapFeedback: () => {},
+    connectJog: () => {},
+    renderJog: () => {},
+    renderOutlineCapture: () => {},
+  });
+  vm.runInContext("moveToSelectedFieldProbePoint()", ctx);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), {
+    type: "target",
+    target: { x: -197, y: -96 },
+    feed_mm_min: 600,
+    safe_z_enabled: true,
+    safe_z_mm: 4,
+  });
+  assert.equal(state.jog.targetPending, 17);
+  assert.equal(state.jog.targetMotionPending, 17);
+  assert.equal(state.jog.fieldProbeMovePending, 17);
+});
+
 test("spot-gap spinner changes debounce expensive preview regeneration", () => {
   const input = {
     value: "8",
@@ -2619,7 +2676,7 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
     },
   };
   const ctx = buildContext(
-    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "completeCommandDisarm", "tapMoveArmSuccessText", "tapTargetLabel", "sendTapMove", "resetJogInputSender", "applyJogEvent"],
+    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "clearFieldProbeMove", "completeCommandDisarm", "tapMoveArmSuccessText", "tapTargetLabel", "sendTapMove", "resetJogInputSender", "applyJogEvent"],
     [],
     {
       state,
@@ -2639,6 +2696,7 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
       },
       renderJog: () => {},
       renderMachine: () => {},
+      renderOutlineCapture: () => {},
       clearTimeout: () => {},
     },
   );
@@ -2691,7 +2749,7 @@ test("a terminal target error releases Tap Move without disarming", () => {
     },
   };
   const ctx = buildContext(
-    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "completeCommandDisarm", "tapTargetLabel", "sendTapMove", "applyJogEvent"],
+    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "clearFieldProbeMove", "completeCommandDisarm", "tapTargetLabel", "sendTapMove", "applyJogEvent"],
     [],
     {
       state,
@@ -2711,6 +2769,7 @@ test("a terminal target error releases Tap Move without disarming", () => {
       },
       renderJog: () => {},
       renderMachine: () => {},
+      renderOutlineCapture: () => {},
       clearTimeout: () => {},
     },
   );

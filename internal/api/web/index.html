@@ -398,7 +398,7 @@
   .outline-probe-settings { grid-area: settings; display: flex; gap: 8px; min-width: 0; align-items: center; justify-self: start; }
   .outline-probe-settings label { display: grid; grid-template-columns: max-content 72px; gap: 8px; align-items: center; width: max-content; min-width: 0; height: 32px; color: var(--muted); }
   .outline-probe-settings input[type="number"] { width: 72px; min-width: 0; height: 32px; }
-  .outline-probe-settings button { height: 32px; min-height: 32px; white-space: nowrap; }
+  .outline-probe-settings button { min-width: 100px; height: 32px; min-height: 32px; white-space: nowrap; }
   .outline-export-controls { grid-area: exports; }
   .outline-export-controls button { min-width: 0; height: 36px; min-height: 36px; padding-inline: 8px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .outline-summary { grid-area: summary; min-width: 0; height: 32px; overflow: auto; align-content: center; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -1079,6 +1079,7 @@
               </div>
               <div class="outline-probe-settings">
                 <label><span>Spot Gap</span><input id="outline-field-spacing" type="number" min="0" step="0.1" inputmode="decimal"></label>
+                <button type="button" id="outline-field-move">Move to point</button>
                 <button type="button" id="outline-field-reset">Reset value</button>
               </div>
               <div id="outline-summary" class="outline-summary"></div>
