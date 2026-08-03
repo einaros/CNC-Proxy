@@ -6454,6 +6454,7 @@ function renderActiveGcode() {
   if (!title || !meta || !run) return;
 
   renderActiveGcodeControls(active);
+  document.querySelector(".active-gcode-workspace")?.classList.toggle("is-empty", !active.path);
 
   if (!active.path) {
     title.textContent = "No active gcode selected.";
@@ -6659,6 +6660,14 @@ function activeGcodeSourceSignature(active) {
   ]);
 }
 
+function clearMissingActiveGcode() {
+  state.activeGcode = {};
+  clearNotice("active-gcode");
+  clearNotice("active-gcode-geometry");
+  clearNotice("active-gcode-source");
+  renderActiveGcode();
+}
+
 async function ensureActiveGcodeGeometry(active) {
   const signature = activeGcodeSourceSignature(active);
   if (!signature) {
@@ -6679,6 +6688,12 @@ async function ensureActiveGcodeGeometry(active) {
     let start = 0;
     while (start < activeGcodeGeometry.total || start === 0) {
       const response = await request(`/api/gcode/active/segments?start=${start}&limit=${GCODE_SEGMENT_PAGE_SIZE}`);
+      if (response.status === 204) {
+        if (requestID !== activeGcodeGeometry.requestID || activeGcodeGeometry.requestedSignature !== signature) return;
+        activeGcodeGeometry.requestedSignature = "";
+        clearMissingActiveGcode();
+        return;
+      }
       const windowData = await response.json();
       if (requestID !== activeGcodeGeometry.requestID || activeGcodeGeometry.requestedSignature !== signature) return;
       const page = Array.isArray(windowData.segments) ? windowData.segments : [];
@@ -6769,6 +6784,11 @@ async function fetchActiveGcodeSourcePage(index) {
   document.getElementById("active-gcode-source-scroll")?.setAttribute("aria-busy", "true");
   try {
     const response = await request(`/api/gcode/active/source?start_line=${pageStartIndex + 1}&limit=${GCODE_SOURCE_PAGE_SIZE}`);
+    if (response.status === 204) {
+      if (requestID !== activeGcodeSource.requestID || signature !== activeGcodeSource.signature) return;
+      clearMissingActiveGcode();
+      return;
+    }
     const page = await response.json();
     if (requestID !== activeGcodeSource.requestID || signature !== activeGcodeSource.signature) return;
     activeGcodeSource.totalLines = Math.max(0, Number(page.total_lines) || 0);

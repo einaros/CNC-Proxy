@@ -448,6 +448,10 @@ func (s *Server) getActiveGcodeSegments(w http.ResponseWriter, r *http.Request) 
 	}
 	window, err := s.svc.ActiveGcodeSegments(start, limit)
 	if err != nil {
+		if errors.Is(err, service.ErrNoActiveGcode) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		s.mapError(w, err)
 		return
 	}
@@ -467,6 +471,10 @@ func (s *Server) getActiveGcodeSource(w http.ResponseWriter, r *http.Request) {
 	}
 	window, err := s.svc.ActiveGcodeSource(startLine, limit)
 	if err != nil {
+		if errors.Is(err, service.ErrNoActiveGcode) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		s.mapError(w, err)
 		return
 	}

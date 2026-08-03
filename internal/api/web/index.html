@@ -235,6 +235,8 @@
   .paused-job-controls input { min-width: 0; width: 100%; border: 1px solid var(--border); border-radius: 6px; background: #151a1f; color: var(--text); padding: 0 8px; }
   #active-gcode-resume { grid-column: 1 / -1; }
   .active-gcode-workspace { --active-gcode-left-width: 32%; display: grid; grid-template-columns: minmax(260px, var(--active-gcode-left-width)) 16px minmax(320px, 1fr); gap: 0; height: clamp(320px, 42vh, 560px); min-height: 320px; }
+  .active-gcode-workspace.is-empty { grid-template-columns: minmax(0, 1fr); }
+  .active-gcode-workspace.is-empty #active-gcode-splitter, .active-gcode-workspace.is-empty #gcode-preview-wrap { display: none; }
   #active-gcode-left { min-width: 0; min-height: 0; display: grid; grid-template-rows: 36px minmax(0, 1fr); background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .active-gcode-left-head { min-width: 0; border-bottom: 1px solid var(--border); background: rgba(25,31,37,.92); }
   .active-gcode-left-tabs { min-width: 0; height: 100%; display: grid; grid-template-columns: minmax(168px, 2fr) minmax(84px, 1fr); }
@@ -958,7 +960,7 @@
               </div>
             </div>
           </div>
-          <div class="active-gcode-workspace">
+          <div class="active-gcode-workspace is-empty">
             <div id="active-gcode-left">
               <div class="active-gcode-left-head">
                 <div class="active-gcode-left-tabs" role="tablist" aria-label="Active job details">
@@ -1444,6 +1446,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=mobile-command-sheets-1"></script>
+<script type="module" src="/app.js?v=empty-active-gcode-1"></script>
 </body>
 </html>

@@ -823,6 +823,79 @@ test("machine-reported active files reload the matching preview exactly once", (
   assert.equal(loads, 1);
 });
 
+test("missing active gcode clears stale toolpath geometry without an error", async () => {
+  const notices = [];
+  let renders = 0;
+  let jsonCalls = 0;
+  const state = { activeGcode: { path: "/sd/gcodes/stale.nc" }, files: new Map() };
+  const activeGcodeGeometry = {
+    requestID: 0,
+    signature: "",
+    requestedSignature: "",
+    total: 0,
+    segments: [],
+  };
+  const ctx = buildContext(
+    ["activeGcodeSourceSignature", "clearMissingActiveGcode", "ensureActiveGcodeGeometry"],
+    ["GCODE_SEGMENT_PAGE_SIZE"],
+    {
+      state,
+      activeGcodeGeometry,
+      request: async () => ({ status: 204, json: async () => { jsonCalls++; throw new Error("must not parse an empty response"); } }),
+      clearNotice: (key) => notices.push(key),
+      renderActiveGcode: () => { renders++; },
+    },
+  );
+
+  await vm.runInContext(`ensureActiveGcodeGeometry({
+    path: "/sd/gcodes/stale.nc",
+    entry: { size: 20, md5: "old" },
+    preview: { line_count: 2, plotted_segments: 1 },
+    updated_at: "old"
+  })`, ctx);
+
+  assert.equal(Object.keys(state.activeGcode).length, 0);
+  assert.equal(jsonCalls, 0);
+  assert.equal(renders, 1);
+  assert.deepEqual(notices, ["active-gcode", "active-gcode-geometry", "active-gcode-source"]);
+});
+
+test("missing active gcode clears stale source pages without an error", async () => {
+  const notices = [];
+  let renders = 0;
+  const state = { activeGcode: { path: "/sd/gcodes/stale.nc" } };
+  const activeGcodeSource = {
+    path: "/sd/gcodes/stale.nc",
+    signature: "stale-signature",
+    requestID: 4,
+    pages: new Map(),
+    loadingPages: new Set(),
+  };
+  const scroll = {
+    setAttribute: () => {},
+    removeAttribute: () => {},
+  };
+  const ctx = buildContext(
+    ["clearMissingActiveGcode", "fetchActiveGcodeSourcePage"],
+    ["GCODE_SOURCE_PAGE_SIZE"],
+    {
+      state,
+      activeGcodeSource,
+      request: async () => ({ status: 204 }),
+      clearNotice: (key) => notices.push(key),
+      renderActiveGcode: () => { renders++; },
+      document: { getElementById: () => scroll },
+    },
+  );
+
+  await vm.runInContext("fetchActiveGcodeSourcePage(0)", ctx);
+
+  assert.equal(Object.keys(state.activeGcode).length, 0);
+  assert.equal(renders, 1);
+  assert.deepEqual(notices, ["active-gcode", "active-gcode-geometry", "active-gcode-source"]);
+  assert.equal(activeGcodeSource.loadingPages.size, 0);
+});
+
 test("gcode canvas resolution follows display DPI until the pixel budget is reached", () => {
   const ctx = buildContext(["gcodeRenderPixelRatio"], [], { devicePixelRatio: 2.5 });
   assert.equal(vm.runInContext("gcodeRenderPixelRatio(1200, 500, 12000000)", ctx), 2.5);
