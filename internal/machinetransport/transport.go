@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,8 +18,9 @@ const (
 	KindTCP = "tcp"
 	KindUSB = "usb"
 
-	TCPPacketSize = 8192
-	USBPacketSize = 128
+	DefaultTCPPort = 2222
+	TCPPacketSize  = 8192
+	USBPacketSize  = 128
 )
 
 // Conn is the minimal machine-side byte stream used by the protocol client and
@@ -77,6 +79,66 @@ func ValidateKind(kind string) error {
 	}
 }
 
+// NormalizeTCPAddress accepts either a host or host:port. Carvera's machine
+// service uses TCP 2222, so a missing port is made explicit before the address
+// is persisted, displayed, or passed to net.Dial.
+func NormalizeTCPAddress(raw string) (string, error) {
+	addr := strings.TrimSpace(raw)
+	if addr == "" {
+		return "", nil
+	}
+	if strings.Contains(addr, "://") {
+		return "", fmt.Errorf("machine TCP address must be a host or host:port: %q", raw)
+	}
+
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		return normalizeTCPHostPort(host, port)
+	}
+
+	// A bracketed IPv6 literal without a port is not accepted by
+	// net.SplitHostPort, but it is otherwise unambiguous.
+	if strings.HasPrefix(addr, "[") && strings.HasSuffix(addr, "]") {
+		host := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+		if !isIPLiteral(host) {
+			return "", fmt.Errorf("machine TCP address has an invalid IP literal: %q", raw)
+		}
+		return net.JoinHostPort(host, strconv.Itoa(DefaultTCPPort)), nil
+	}
+
+	// Unbracketed IPv6 literals contain colons but no port. Recognize them
+	// before treating any remaining colon as a malformed host:port separator.
+	if isIPLiteral(addr) {
+		return net.JoinHostPort(addr, strconv.Itoa(DefaultTCPPort)), nil
+	}
+	if strings.Contains(addr, ":") {
+		return "", fmt.Errorf("machine TCP address must be a host or host:port: %q", raw)
+	}
+	if strings.ContainsAny(addr, " /\\\t\r\n") {
+		return "", fmt.Errorf("machine TCP address has an invalid host: %q", raw)
+	}
+	return net.JoinHostPort(addr, strconv.Itoa(DefaultTCPPort)), nil
+}
+
+func normalizeTCPHostPort(host, port string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" || strings.ContainsAny(host, " /\\\t\r\n") {
+		return "", fmt.Errorf("machine TCP address requires a valid host")
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p <= 0 || p > 65535 {
+		return "", fmt.Errorf("machine TCP port must be between 1 and 65535: %q", port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(p)), nil
+}
+
+func isIPLiteral(host string) bool {
+	// net.ParseIP does not accept an IPv6 zone suffix, while net.Dial does.
+	if zone := strings.LastIndex(host, "%"); zone >= 0 {
+		host = host[:zone]
+	}
+	return net.ParseIP(host) != nil
+}
+
 // Open connects to the configured machine transport.
 func Open(cfg Config) (*Opened, error) {
 	switch NormalizeKind(cfg.Kind) {
@@ -96,6 +158,13 @@ func openTCP(cfg Config) (*Opened, error) {
 	addr, err := cfg.TCPAddr()
 	if err != nil {
 		return nil, err
+	}
+	addr, err = NormalizeTCPAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+	if addr == "" {
+		return nil, errors.New("machine tcp transport requires a non-empty address")
 	}
 	timeout := cfg.DialTimeout
 	if timeout <= 0 {

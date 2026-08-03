@@ -2,9 +2,48 @@ package machinetransport
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestNormalizeTCPAddress(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr string
+	}{
+		{name: "empty discovery", in: "", want: ""},
+		{name: "bare IPv4", in: "192.168.1.42", want: "192.168.1.42:2222"},
+		{name: "bare hostname", in: "carvera.local", want: "carvera.local:2222"},
+		{name: "explicit port", in: "192.168.1.42:12222", want: "192.168.1.42:12222"},
+		{name: "bare IPv6", in: "2001:db8::42", want: "[2001:db8::42]:2222"},
+		{name: "bracketed IPv6", in: "[2001:db8::42]", want: "[2001:db8::42]:2222"},
+		{name: "IPv6 with port", in: "[2001:db8::42]:12222", want: "[2001:db8::42]:12222"},
+		{name: "bad port", in: "192.168.1.42:notaport", wantErr: "port"},
+		{name: "port too large", in: "192.168.1.42:70000", wantErr: "port"},
+		{name: "URL is not an address", in: "http://192.168.1.42", wantErr: "host or host:port"},
+		{name: "host with space", in: "shop carvera", wantErr: "invalid host"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormalizeTCPAddress(tc.in)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("NormalizeTCPAddress(%q) error = %v, want containing %q", tc.in, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeTCPAddress(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Fatalf("NormalizeTCPAddress(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestPacketSizeForKind(t *testing.T) {
 	if got := PacketSizeForKind(KindTCP); got != TCPPacketSize {

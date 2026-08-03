@@ -58,7 +58,7 @@ func main() {
 		printConfigSchema = flag.Bool("print-config-schema", false, "print proxy flag schema as JSON and exit")
 		tcpPort           = flag.Int("tcp-port", 2222, "TCP port to listen on for the controller")
 		machineTransport  = flag.String("machine-transport", machinetransport.KindTCP, "machine-side transport: tcp or usb")
-		machineAddr       = flag.String("machine", "", "machine TCP host:port; if empty in TCP mode, learned via UDP discovery")
+		machineAddr       = flag.String("machine", "", "machine TCP host or host:port (default port 2222); if empty in TCP mode, learned via UDP discovery")
 		usbDevice         = flag.String("usb-device", "", "USB/serial device for -machine-transport=usb (for example /dev/cu.usbserial-...)")
 		usbBaud           = flag.Int("usb-baud", 115200, "USB serial baud rate")
 		usbResetOnOpen    = flag.Bool("usb-reset-on-open", false, "toggle DTR when opening the USB serial device")

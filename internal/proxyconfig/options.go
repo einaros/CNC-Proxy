@@ -40,7 +40,7 @@ func Options() []Option {
 	return []Option{
 		{Name: "tcp-port", Label: "Controller TCP Port", Type: OptionInt, Default: "2222"},
 		{Name: "machine-transport", Label: "Machine Transport", Type: OptionString, Default: machinetransport.KindTCP, Choices: []string{machinetransport.KindTCP, machinetransport.KindUSB}},
-		{Name: "machine", Label: "TCP Machine Address", Type: OptionString, Default: "", Placeholder: "192.168.1.42:2222"},
+		{Name: "machine", Label: "TCP Machine Address", Type: OptionString, Default: "", Placeholder: "192.168.1.42 or 192.168.1.42:2222"},
 		{Name: "usb-device", Label: "USB Device", Type: OptionString, Default: "", Placeholder: "/dev/cu.usbserial-... or COM3"},
 		{Name: "usb-baud", Label: "USB Baud", Type: OptionInt, Default: "115200"},
 		{Name: "usb-reset-on-open", Label: "USB Reset On Open", Type: OptionBool, Default: "false"},

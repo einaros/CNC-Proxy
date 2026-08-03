@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uwin/cnc-proxy/internal/machinetransport"
 	"github.com/uwin/cnc-proxy/internal/proxyconfig"
 )
 
@@ -348,6 +349,11 @@ func normalizeConfigWithOptions(cfg Config, options []ProxyOption) Config {
 			cfg.Flags[opt.Name] = opt.Default
 			continue
 		}
+		if opt.Name == "machine" {
+			if normalized, err := machinetransport.NormalizeTCPAddress(cfg.Flags[opt.Name]); err == nil {
+				cfg.Flags[opt.Name] = normalized
+			}
+		}
 		cfg.Flags[opt.Name] = normalizeOptionValue(opt, cfg.Flags[opt.Name])
 	}
 	return cfg
@@ -472,6 +478,11 @@ func validateOption(opt ProxyOption, value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		value = opt.Default
+	}
+	if opt.Name == "machine" && value != "" {
+		if _, err := machinetransport.NormalizeTCPAddress(value); err != nil {
+			return err
+		}
 	}
 	if len(opt.Choices) > 0 {
 		for _, choice := range opt.Choices {

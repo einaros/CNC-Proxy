@@ -42,6 +42,31 @@ func TestDefaultConfigIncludesEveryProxyOption(t *testing.T) {
 	}
 }
 
+func TestMachineAddressDefaultsToCarveraTCPPort(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Flags["machine"] = "192.168.1.42"
+
+	path := filepath.Join(t.TempDir(), "tray.json")
+	if err := SaveProxyConfig(path, cfg); err != nil {
+		t.Fatalf("SaveProxyConfig: %v", err)
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := loaded.Flags["machine"]; got != "192.168.1.42:2222" {
+		t.Fatalf("machine = %q, want default TCP port", got)
+	}
+}
+
+func TestValidateProxyConfigRejectsMalformedMachineAddress(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Flags["machine"] = "192.168.1.42:notaport"
+	if err := ValidateProxyConfig(cfg); err == nil || !strings.Contains(err.Error(), "port") {
+		t.Fatalf("ValidateProxyConfig error = %v, want machine port error", err)
+	}
+}
+
 func TestJogDefaultsMatchProxy(t *testing.T) {
 	cfg := DefaultConfig()
 	jogDefaults := jog.DefaultConfig()

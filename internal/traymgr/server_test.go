@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -605,6 +606,77 @@ func TestServerPutProxyConfigDoesNotTouchManagerSettingsOrRestart(t *testing.T) 
 	case <-srv.restartCh:
 		t.Fatal("proxy save should not schedule manager restart")
 	default:
+	}
+}
+
+func TestServerPutProxyConfigAddsDefaultMachinePort(t *testing.T) {
+	cfg := DefaultConfig()
+	configPath := filepath.Join(t.TempDir(), "tray.json")
+	sup := NewSupervisor(cfg, "")
+	srv := NewServer(configPath, sup, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := []byte(`{"flags":{"machine":"192.168.1.42"}}`)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/proxy/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT /api/proxy/config status = %d: %s", resp.StatusCode, responseBody)
+	}
+	var got struct {
+		Config Config `json:"config"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	for source, value := range map[string]string{
+		"response":   got.Config.Flags["machine"],
+		"supervisor": sup.Config().Flags["machine"],
+	} {
+		if value != "192.168.1.42:2222" {
+			t.Fatalf("%s machine = %q, want default TCP port", source, value)
+		}
+	}
+	loaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Flags["machine"]; got != "192.168.1.42:2222" {
+		t.Fatalf("persisted machine = %q, want default TCP port", got)
+	}
+}
+
+func TestServerPutProxyConfigRejectsMalformedMachineAddress(t *testing.T) {
+	cfg := DefaultConfig()
+	configPath := filepath.Join(t.TempDir(), "tray.json")
+	sup := NewSupervisor(cfg, "")
+	srv := NewServer(configPath, sup, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := []byte(`{"flags":{"machine":"192.168.1.42:notaport"}}`)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/proxy/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(responseBody), "machine TCP port") {
+		t.Fatalf("PUT malformed machine status = %d body = %q, want 400 port error", resp.StatusCode, responseBody)
+	}
+	if got := sup.Config().Flags["machine"]; got != "" {
+		t.Fatalf("malformed save changed supervisor machine to %q", got)
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed save wrote config: %v", err)
 	}
 }
 
