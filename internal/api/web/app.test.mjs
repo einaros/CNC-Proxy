@@ -369,6 +369,10 @@ test("active job left tabs preserve both panels and expose the selected panel", 
     },
     "active-gcode-source": { hidden: false },
     "active-gcode-console": { hidden: true },
+    "active-gcode-left": {
+      consoleClass: false,
+      classList: { toggle(_name, enabled) { elements["active-gcode-left"].consoleClass = enabled; } },
+    },
     "active-gcode-source-position": {
       hiddenClass: false,
       classList: { toggle(_name, enabled) { elements["active-gcode-source-position"].hiddenClass = enabled; } },
@@ -392,6 +396,7 @@ test("active job left tabs preserve both panels and expose the selected panel", 
   assert.equal(elements["active-job-left-tab-console"].selected, "true");
   assert.equal(elements["active-job-left-tab-source"].tabIndex, -1);
   assert.equal(elements["active-job-left-tab-console"].tabIndex, 0);
+  assert.equal(elements["active-gcode-left"].consoleClass, true);
   assert.equal(elements["active-gcode-source-position"].hiddenClass, true);
   assert.equal(sourceRenders, 0);
   assert.equal(consoleRenders, 1, "showing the console refreshes its log in the now-visible viewport");
@@ -399,6 +404,7 @@ test("active job left tabs preserve both panels and expose the selected panel", 
   vm.runInContext(`showActiveJobLeftTab("source")`, ctx);
   assert.equal(elements["active-gcode-source"].hidden, false);
   assert.equal(elements["active-gcode-console"].hidden, true);
+  assert.equal(elements["active-gcode-left"].consoleClass, false);
   assert.equal(elements["active-gcode-source-position"].hiddenClass, false);
   assert.equal(sourceRenders, 1, "showing the source refreshes its virtualized rows");
 });

@@ -11043,6 +11043,7 @@ function showActiveJobLeftTab(name) {
     button?.setAttribute("aria-selected", String(active));
     if (button) button.tabIndex = active ? 0 : -1;
   }
+  document.getElementById("active-gcode-left")?.classList.toggle("is-console-active", name === "console");
   document.getElementById("active-gcode-source-position")?.classList.toggle("is-hidden", name !== "source");
   if (name === "source") scheduleActiveGcodeSourceRender();
   else renderGcodeLog();

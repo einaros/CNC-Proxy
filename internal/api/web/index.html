@@ -583,6 +583,7 @@
     .active-gcode-workspace { grid-template-columns: 1fr; height: auto; min-height: 0; }
     #active-gcode-splitter { display: none; }
     #active-gcode-left { height: 320px; }
+    #active-gcode-left.is-console-active { height: clamp(440px, 64dvh, 620px); }
     #gcode-preview-wrap { height: clamp(300px, 48vh, 460px); min-height: 300px; }
     #file-browser { grid-template-columns: 1fr; }
     .file-col-type, th:nth-child(2), td:nth-child(2) { display: none; }
@@ -667,6 +668,7 @@
     .active-gcode-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
     .active-gcode-stat > strong { font-size: 13px; }
     #active-gcode-left { height: min(42dvh, 360px); min-height: 260px; }
+    #active-gcode-left.is-console-active { height: clamp(480px, 68dvh, 620px); min-height: 480px; }
     #gcode-preview-wrap { height: min(48dvh, 420px); min-height: 280px; }
     #active-gcode-panel { padding: 10px; }
     .active-gcode-actions > button { min-height: 48px; }
@@ -1437,6 +1439,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=mobile-dashboard-1"></script>
+<script type="module" src="/app.js?v=mobile-console-1"></script>
 </body>
 </html>
