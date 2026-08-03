@@ -1301,7 +1301,9 @@ func TestActiveGcodePreviewIncludesEverySegment(t *testing.T) {
 	const segmentCount = 50100
 	var gcode strings.Builder
 	for i := 0; i < segmentCount; i++ {
-		fmt.Fprintf(&gcode, "G1 X%d\n", i&1)
+		// Start away from the assumed X0 origin so every instruction is a
+		// non-zero move and therefore produces a plotted segment.
+		fmt.Fprintf(&gcode, "G1 X%d\n", (i&1)+1)
 	}
 	preview, err := ParseGcodePreview(strings.NewReader(gcode.String()))
 	if err != nil {
@@ -2264,7 +2266,15 @@ func TestPausedJobAllowsVerifiedManualCommandsBeforeResume(t *testing.T) {
 		t.Fatalf("ResumeJob result = %+v", resumed)
 	}
 
-	got := m.Gcodes()
+	// Observing Run also starts the service's asynchronous active-file probe.
+	// Its read-only progress query may land anywhere in this command trace;
+	// only the operator-issued commands have a deterministic order here.
+	var got []string
+	for _, command := range m.Gcodes() {
+		if command != "progress" {
+			got = append(got, command)
+		}
+	}
 	want := []string{"suspend", "G53 G0 X1", "G53 G0 Z-5.0000", "M5", "resume"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("machine commands = %v, want %v", got, want)
