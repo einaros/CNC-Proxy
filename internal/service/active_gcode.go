@@ -19,17 +19,21 @@ import (
 )
 
 const (
-	maxPreviewSegments = 50000
-	previewArcSegment  = 0.5
-	previewArcError    = 0.01
+	previewArcSegment = 0.5
+	previewArcError   = 0.01
+
+	maxPreviewOverviewSegments = 4000
+	maxGcodeSegmentWindow      = 10000
+	maxGcodeSourceWindow       = 1000
 
 	activeGcodeProbeInterval = 5 * time.Second
 )
 
 type activeGcodeState struct {
-	Path       string
-	Preview    GcodePreview
-	SelectedAt time.Time
+	Path          string
+	Preview       GcodePreview
+	SourceOffsets []int64
+	SelectedAt    time.Time
 }
 
 // ActiveGcode is the currently selected file and its cached preview.
@@ -42,17 +46,32 @@ type ActiveGcode struct {
 	UpdatedAt time.Time     `json:"updated_at,omitempty"`
 }
 
-// GcodePreview is a bounded 3D/4-axis toolpath summary suitable for the web UI.
+// GcodePreview is a 3D/4-axis toolpath summary. Full geometry stays server-side
+// and is exposed through bounded windows; OverviewSegments is a small complete
+// path used by the recording dashboard.
 type GcodePreview struct {
-	LineCount       int            `json:"line_count"`
-	MoveCount       int            `json:"move_count"`
-	PlottedSegments int            `json:"plotted_segments"`
-	Truncated       bool           `json:"truncated"`
-	TotalDistance   float64        `json:"total_distance"`
-	Has4Axis        bool           `json:"has_4axis"`
-	Bounds          *GcodeBounds   `json:"bounds,omitempty"`
-	Tools           []int          `json:"tools,omitempty"`
-	Segments        []GcodeSegment `json:"segments,omitempty"`
+	LineCount        int            `json:"line_count"`
+	MoveCount        int            `json:"move_count"`
+	PlottedSegments  int            `json:"plotted_segments"`
+	Truncated        bool           `json:"truncated"`
+	TotalDistance    float64        `json:"total_distance"`
+	Has4Axis         bool           `json:"has_4axis"`
+	Bounds           *GcodeBounds   `json:"bounds,omitempty"`
+	Tools            []int          `json:"tools,omitempty"`
+	Segments         []GcodeSegment `json:"segments,omitempty"`
+	OverviewSegments []GcodeSegment `json:"overview_segments,omitempty"`
+}
+
+type GcodeSegmentWindow struct {
+	Start    int            `json:"start"`
+	Total    int            `json:"total"`
+	Segments []GcodeSegment `json:"segments"`
+}
+
+type GcodeSourceWindow struct {
+	StartLine  int      `json:"start_line"`
+	TotalLines int      `json:"total_lines"`
+	Lines      []string `json:"lines"`
 }
 
 type GcodeBounds struct {
@@ -117,9 +136,9 @@ func (s *Service) activeGcodeFromStoredPath(remotePath string) ActiveGcode {
 		rc, cacheEntry, err := s.ReadCache(remotePath)
 		if err == nil {
 			defer rc.Close()
-			preview, err := ParseGcodePreview(rc)
+			preview, offsets, err := parseGcodePreview(rc)
 			if err == nil {
-				active := activeGcodeState{Path: cacheEntry.Path, Preview: preview, SelectedAt: time.Now()}
+				active := activeGcodeState{Path: cacheEntry.Path, Preview: preview, SourceOffsets: offsets, SelectedAt: time.Now()}
 				s.activeMu.Lock()
 				if s.activeGcode.Path == "" || s.activeGcode.Path == active.Path {
 					s.activeGcode = active
@@ -162,11 +181,11 @@ func (s *Service) SelectActiveGcode(remotePath string) (ActiveGcode, error) {
 	if entry.IsDir {
 		return ActiveGcode{}, fmt.Errorf("%w: active gcode must be a file", ErrInvalidArgument)
 	}
-	preview, err := ParseGcodePreview(rc)
+	preview, offsets, err := parseGcodePreview(rc)
 	if err != nil {
 		return ActiveGcode{}, err
 	}
-	active := activeGcodeState{Path: entry.Path, Preview: preview, SelectedAt: time.Now()}
+	active := activeGcodeState{Path: entry.Path, Preview: preview, SourceOffsets: offsets, SelectedAt: time.Now()}
 	if err := s.store.SetActiveGcodePath(entry.Path); err != nil {
 		return ActiveGcode{}, err
 	}
@@ -178,7 +197,7 @@ func (s *Service) SelectActiveGcode(remotePath string) (ActiveGcode, error) {
 
 func (s *Service) activeGcodeSnapshot(active activeGcodeState, entry store.Entry) ActiveGcode {
 	entryCopy := entry
-	previewCopy := copyPreview(active.Preview)
+	previewCopy := copyPreviewSummary(active.Preview)
 	runnable, message := runnableGcode(entry)
 	return ActiveGcode{
 		Path:      active.Path,
@@ -321,15 +340,118 @@ func runnableGcode(entry store.Entry) (bool, string) {
 	}
 }
 
-func copyPreview(in GcodePreview) GcodePreview {
+func copyPreviewSummary(in GcodePreview) GcodePreview {
 	out := in
 	if in.Bounds != nil {
 		b := *in.Bounds
 		out.Bounds = &b
 	}
 	out.Tools = append([]int(nil), in.Tools...)
-	out.Segments = append([]GcodeSegment(nil), in.Segments...)
+	out.Segments = nil
+	out.OverviewSegments = previewOverview(in.Segments, maxPreviewOverviewSegments)
 	return out
+}
+
+func previewOverview(segments []GcodeSegment, limit int) []GcodeSegment {
+	if len(segments) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(segments) <= limit {
+		return append([]GcodeSegment(nil), segments...)
+	}
+	if limit == 1 {
+		return []GcodeSegment{segments[len(segments)-1]}
+	}
+	out := make([]GcodeSegment, limit)
+	for i := range out {
+		index := i * (len(segments) - 1) / (limit - 1)
+		out[i] = segments[index]
+	}
+	return out
+}
+
+func (s *Service) ActiveGcodeSegments(start, limit int) (GcodeSegmentWindow, error) {
+	if start < 0 || limit <= 0 || limit > maxGcodeSegmentWindow {
+		return GcodeSegmentWindow{}, fmt.Errorf("%w: segment window requires start >= 0 and limit between 1 and %d", ErrInvalidArgument, maxGcodeSegmentWindow)
+	}
+	active := s.ensureActiveGcodeLoaded()
+	if active.Path == "" {
+		return GcodeSegmentWindow{}, ErrNoActiveGcode
+	}
+	total := len(active.Preview.Segments)
+	if start > total {
+		start = total
+	}
+	end := min(total, start+limit)
+	return GcodeSegmentWindow{
+		Start: start, Total: total,
+		Segments: append([]GcodeSegment(nil), active.Preview.Segments[start:end]...),
+	}, nil
+}
+
+func (s *Service) ActiveGcodeSource(startLine, limit int) (GcodeSourceWindow, error) {
+	if startLine < 1 || limit <= 0 || limit > maxGcodeSourceWindow {
+		return GcodeSourceWindow{}, fmt.Errorf("%w: source window requires start_line >= 1 and limit between 1 and %d", ErrInvalidArgument, maxGcodeSourceWindow)
+	}
+	active := s.ensureActiveGcodeLoaded()
+	if active.Path == "" {
+		return GcodeSourceWindow{}, ErrNoActiveGcode
+	}
+	total := max(0, len(active.SourceOffsets)-1)
+	startIndex := min(total, startLine-1)
+	endIndex := min(total, startIndex+limit)
+	window := GcodeSourceWindow{StartLine: startIndex + 1, TotalLines: total, Lines: []string{}}
+	if startIndex == endIndex {
+		return window, nil
+	}
+
+	rc, _, err := s.ReadCache(active.Path)
+	if err != nil {
+		return GcodeSourceWindow{}, err
+	}
+	defer rc.Close()
+	seeker, ok := rc.(io.ReadSeeker)
+	if !ok {
+		return GcodeSourceWindow{}, ErrNotCached
+	}
+	startOffset := active.SourceOffsets[startIndex]
+	endOffset := active.SourceOffsets[endIndex]
+	if _, err := seeker.Seek(startOffset, io.SeekStart); err != nil {
+		return GcodeSourceWindow{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(seeker, endOffset-startOffset))
+	if err != nil {
+		return GcodeSourceWindow{}, err
+	}
+	window.Lines = splitSourceWindow(data, endIndex-startIndex)
+	return window, nil
+}
+
+func (s *Service) ensureActiveGcodeLoaded() activeGcodeState {
+	s.activeMu.Lock()
+	active := s.activeGcode
+	s.activeMu.Unlock()
+	if active.Path != "" && len(active.SourceOffsets) > 0 {
+		return active
+	}
+	_ = s.ActiveGcode()
+	s.activeMu.Lock()
+	active = s.activeGcode
+	s.activeMu.Unlock()
+	return active
+}
+
+func splitSourceWindow(data []byte, expected int) []string {
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
+	if len(lines) > expected {
+		lines = lines[:expected]
+	}
+	for len(lines) < expected {
+		lines = append(lines, "")
+	}
+	return lines
 }
 
 // RunActiveGcode sends the same controller-compatible `play <path>` command
@@ -923,28 +1045,37 @@ const (
 )
 
 // ParseGcodePreview scans the Carvera-supported explicit motion surface into a
-// bounded segment list: G0/G1/G2/G3, G38.2-G38.6, G17-G19 planes, G90/G91,
+// complete segment list: G0/G1/G2/G3, G38.2-G38.6, G17-G19 planes, G90/G91,
 // G90.1/G91.1 arc centers, inch/mm units, A-axis moves, G92 coordinate resets,
 // and firmware-supported G80-G83/G98/G99 drilling cycles.
 func ParseGcodePreview(r io.Reader) (GcodePreview, error) {
+	preview, _, err := parseGcodePreview(r)
+	return preview, err
+}
+
+func parseGcodePreview(r io.Reader) (GcodePreview, []int64, error) {
 	p := previewParser{
 		unit:     1,
 		absolute: true,
 		motion:   -1,
 		tools:    map[int]bool{},
 	}
+	offsets := []int64{0}
+	var offset int64
 	br := bufio.NewReaderSize(r, 64*1024)
 	for {
 		line, err := br.ReadString('\n')
 		if line != "" {
 			p.preview.LineCount++
 			p.parseLine(line, p.preview.LineCount)
+			offset += int64(len(line))
+			offsets = append(offsets, offset)
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return GcodePreview{}, err
+			return GcodePreview{}, nil, err
 		}
 	}
 	if p.haveBounds {
@@ -955,7 +1086,7 @@ func ParseGcodePreview(r io.Reader) (GcodePreview, error) {
 		p.preview.Tools = append(p.preview.Tools, tool)
 	}
 	sort.Ints(p.preview.Tools)
-	return p.preview, nil
+	return p.preview, offsets, nil
 }
 
 func (p *previewParser) parseLine(line string, lineNo int) {
@@ -1438,10 +1569,6 @@ func (p *previewParser) addSegment(seg GcodeSegment) {
 	seg.DistanceEnd = p.preview.TotalDistance
 	p.includeBounds(seg.From)
 	p.includeBounds(seg.To)
-	if len(p.preview.Segments) >= maxPreviewSegments {
-		p.preview.Truncated = true
-		return
-	}
 	p.preview.Segments = append(p.preview.Segments, seg)
 	p.preview.PlottedSegments = len(p.preview.Segments)
 }

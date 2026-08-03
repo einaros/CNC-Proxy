@@ -1211,11 +1211,22 @@ func TestSelectActiveGcodeParsesPreview(t *testing.T) {
 	if active.Preview == nil || active.Preview.LineCount != 5 || active.Preview.MoveCount != 3 || active.Preview.PlottedSegments != 2 {
 		t.Fatalf("preview = %+v", active.Preview)
 	}
+	if len(active.Preview.Segments) != 0 || len(active.Preview.OverviewSegments) != 2 {
+		t.Fatalf("snapshot geometry = full:%d overview:%d, want 0/2", len(active.Preview.Segments), len(active.Preview.OverviewSegments))
+	}
 	if len(active.Preview.Tools) != 1 || active.Preview.Tools[0] != 2 {
 		t.Fatalf("tools = %v, want [2]", active.Preview.Tools)
 	}
 	if active.Preview.Bounds == nil || active.Preview.Bounds.Max[0] != 10 || active.Preview.Bounds.Max[1] != 5 || active.Preview.Bounds.Min[2] != -1 {
 		t.Fatalf("bounds = %+v", active.Preview.Bounds)
+	}
+	segments, err := svc.ActiveGcodeSegments(1, 1)
+	if err != nil || segments.Total != 2 || segments.Start != 1 || len(segments.Segments) != 1 || segments.Segments[0].Line != 5 {
+		t.Fatalf("segment window = %+v, err %v", segments, err)
+	}
+	source, err := svc.ActiveGcodeSource(2, 2)
+	if err != nil || source.TotalLines != 5 || source.StartLine != 2 || !reflect.DeepEqual(source.Lines, []string{"G90", "G0 X0 Y0 Z5"}) {
+		t.Fatalf("source window = %+v, err %v", source, err)
 	}
 }
 
@@ -1286,17 +1297,18 @@ func TestParseGcodePreviewSkipsLeadInRapidsFromUnknownStart(t *testing.T) {
 	}
 }
 
-func TestActiveGcodePreviewIsBounded(t *testing.T) {
+func TestActiveGcodePreviewIncludesEverySegment(t *testing.T) {
+	const segmentCount = 50100
 	var gcode strings.Builder
-	for i := 0; i < maxPreviewSegments+100; i++ {
+	for i := 0; i < segmentCount; i++ {
 		fmt.Fprintf(&gcode, "G1 X%d\n", i&1)
 	}
 	preview, err := ParseGcodePreview(strings.NewReader(gcode.String()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !preview.Truncated || len(preview.Segments) != maxPreviewSegments {
-		t.Fatalf("preview truncated=%v segments=%d, want true/%d", preview.Truncated, len(preview.Segments), maxPreviewSegments)
+	if preview.Truncated || len(preview.Segments) != segmentCount {
+		t.Fatalf("preview truncated=%v segments=%d, want false/%d", preview.Truncated, len(preview.Segments), segmentCount)
 	}
 }
 

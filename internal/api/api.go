@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
@@ -79,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gcode", s.postGcode) // body: {line}
 	mux.HandleFunc("POST /api/origin/reference", s.setMachineOrigin)
 	mux.HandleFunc("GET /api/gcode/active", s.getActiveGcode)
+	mux.HandleFunc("GET /api/gcode/active/segments", s.getActiveGcodeSegments)
+	mux.HandleFunc("GET /api/gcode/active/source", s.getActiveGcodeSource)
 	mux.HandleFunc("POST /api/gcode/active", s.selectActiveGcode)  // body: {path}
 	mux.HandleFunc("POST /api/gcode/active/run", s.runActiveGcode) // runs selected path
 	mux.HandleFunc("POST /api/gcode/active/paused-command", s.runPausedJobCommand)
@@ -430,6 +433,56 @@ func (s *Server) traceOutline(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getActiveGcode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.ActiveGcode())
+}
+
+func (s *Server) getActiveGcodeSegments(w http.ResponseWriter, r *http.Request) {
+	start, err := queryInt(r, "start", 0)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit, err := queryInt(r, "limit", 5000)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	window, err := s.svc.ActiveGcodeSegments(start, limit)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, window)
+}
+
+func (s *Server) getActiveGcodeSource(w http.ResponseWriter, r *http.Request) {
+	startLine, err := queryInt(r, "start_line", 1)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit, err := queryInt(r, "limit", 500)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	window, err := s.svc.ActiveGcodeSource(startLine, limit)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, window)
+}
+
+func queryInt(r *http.Request, name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	return value, nil
 }
 
 func (s *Server) runPausedJobCommand(w http.ResponseWriter, r *http.Request) {

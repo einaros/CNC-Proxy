@@ -754,7 +754,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="workarea-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing work area visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `type="module"`, `/app.js?v=job-pause-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `type="module"`, `/app.js?v=full-gcode-1`} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -992,7 +992,7 @@ func TestWebUIServed(t *testing.T) {
 	if got := three.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("three.module.min.js Cache-Control = %q, want no-store", got)
 	}
-	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "renderDashboard", "drawDashboardPreview", "dashboardPreviewPath", "drawGcodePreview", "activeJobPreviewState", "gcodeCursorForPlayedLine", "syncActiveGcodeFromMachine", "ensureActiveGcodeSource", "renderActiveGcodeSource", "gcodeSourceLineForCursor", "gcodeSourceWindow", "syncActiveGcodeSourceLine", "showActiveJobLeftTab", "activeJobLeftTabs", "activeJobSplitBounds", "setActiveJobSplitPercent", "bindActiveJobSplitter", "activeJobOverlayOriginFrom", "activeJobContextOverlayData", "interpolateOutlinePathZ", "activeJobFieldProbeComplete", "field_probe_complete", "syncGcodeContextOverlay", "rebuildGcodeContextOverlay", "combineGcodeBounds", "gcodeRenderPixelRatio", "viewCubeTargetComponents", "gcodeOrbitAnglesForDirection", `projection: "orthographic"`, `gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 })`, "onGcodeViewCubePointerMove", "rotateGcodeOrbitByDrag", "gcodeCubeDragStep", "THREE.WebGLRenderer", "gcodeWorldCoordinates", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active", "/api/files/", "/api/tool/current", "/api/tool/change", "/api/tool/continue", "/api/tool/calibrate", "/api/probe/3d", "runProbe3D", "is3DProbeToolActive"} {
+	for _, want := range []string{"rememberCommand", "navigateCommandHistory", "renderAlarmPanel", "HALT_REASON", "controlPendingText", "controlSuccessText", "confirmControl", "bindDataControlButtons", "data-control-action", "renderFileSummary", "lineMatchesFilter", "selectActiveGcode", "runActiveGcode", "renderDashboard", "drawDashboardPreview", "dashboardPreviewPath", "drawGcodePreview", "activeJobPreviewState", "gcodeCursorForPlayedLine", "syncActiveGcodeFromMachine", "ensureActiveGcodeGeometry", "ensureActiveGcodeSource", "fetchActiveGcodeSourcePage", "renderActiveGcodeSource", "gcodeSourceLineForCursor", "gcodeSourceWindow", "syncActiveGcodeSourceLine", "showActiveJobLeftTab", "activeJobLeftTabs", "activeJobSplitBounds", "setActiveJobSplitPercent", "bindActiveJobSplitter", "activeJobOverlayOriginFrom", "activeJobContextOverlayData", "interpolateOutlinePathZ", "activeJobFieldProbeComplete", "field_probe_complete", "syncGcodeContextOverlay", "rebuildGcodeContextOverlay", "combineGcodeBounds", "gcodeRenderPixelRatio", "viewCubeTargetComponents", "gcodeOrbitAnglesForDirection", `projection: "orthographic"`, `gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 })`, "onGcodeViewCubePointerMove", "rotateGcodeOrbitByDrag", "gcodeCubeDragStep", "THREE.WebGLRenderer", "gcodeWorldCoordinates", "gcodeWorldPoint", "panGcodeCamera", "/api/gcode/active/segments", "/api/gcode/active/source", "/api/files/", "/api/tool/current", "/api/tool/change", "/api/tool/continue", "/api/tool/calibrate", "/api/probe/3d", "runProbe3D", "is3DProbeToolActive"} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing %s", want)
 		}
@@ -1963,6 +1963,31 @@ func TestActiveGcodeEndpoints(t *testing.T) {
 	}
 	if active.Path != "/sd/gcodes/my part.nc" || !active.Runnable || active.Preview == nil || active.Preview.MoveCount != 1 {
 		t.Fatalf("active = %+v", active)
+	}
+	if len(active.Preview.Segments) != 0 || len(active.Preview.OverviewSegments) != 1 {
+		t.Fatalf("active geometry = full:%d overview:%d", len(active.Preview.Segments), len(active.Preview.OverviewSegments))
+	}
+
+	segmentsResp := get(t, srv.URL+"/api/gcode/active/segments?start=0&limit=1")
+	var segmentWindow service.GcodeSegmentWindow
+	if err := json.NewDecoder(segmentsResp.Body).Decode(&segmentWindow); err != nil {
+		segmentsResp.Body.Close()
+		t.Fatal(err)
+	}
+	segmentsResp.Body.Close()
+	if segmentsResp.StatusCode != http.StatusOK || segmentWindow.Total != 1 || len(segmentWindow.Segments) != 1 {
+		t.Fatalf("segment window status=%d value=%+v", segmentsResp.StatusCode, segmentWindow)
+	}
+
+	sourceResp := get(t, srv.URL+"/api/gcode/active/source?start_line=2&limit=2")
+	var sourceWindow service.GcodeSourceWindow
+	if err := json.NewDecoder(sourceResp.Body).Decode(&sourceWindow); err != nil {
+		sourceResp.Body.Close()
+		t.Fatal(err)
+	}
+	sourceResp.Body.Close()
+	if sourceResp.StatusCode != http.StatusOK || sourceWindow.TotalLines != 3 || !reflect.DeepEqual(sourceWindow.Lines, []string{"G0 X0 Y0", "G1 X5 Y5"}) {
+		t.Fatalf("source window status=%d value=%+v", sourceResp.StatusCode, sourceWindow)
 	}
 	m.PutFile("/sd/gcodes/my part.nc", []byte("G1 X1\n"))
 

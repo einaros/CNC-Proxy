@@ -22,6 +22,9 @@ const NOTICE_ERROR_TIMEOUT_MS = 8000;
 const NOTICE_REPEAT_SUPPRESS_MS = 30000;
 const GCODE_SOURCE_ROW_HEIGHT = 20;
 const GCODE_SOURCE_OVERSCAN = 12;
+const GCODE_SOURCE_PAGE_SIZE = 500;
+const GCODE_SOURCE_MAX_PAGES = 8;
+const GCODE_SEGMENT_PAGE_SIZE = 5000;
 const ACTIVE_JOB_SPLIT_DEFAULT_PERCENT = 32;
 const ACTIVE_JOB_SPLIT_STEP_PERCENT = 2;
 const ACTIVE_JOB_SPLIT_MIN_LEFT_PX = 260;
@@ -182,16 +185,22 @@ const gcodeView = {
 const activeGcodeSource = {
   path: "",
   signature: "",
-  requestedSignature: "",
-  failedSignature: "",
-  failedMachineState: "",
-  retryAfter: 0,
   requestID: 0,
-  lines: [],
+  totalLines: 0,
+  pages: new Map(),
+  loadingPages: new Set(),
   currentLine: 0,
   userScrollingUntil: 0,
   renderQueued: false,
   resizeObserver: null,
+};
+
+const activeGcodeGeometry = {
+  signature: "",
+  requestedSignature: "",
+  requestID: 0,
+  total: 0,
+  segments: [],
 };
 
 const GCODE_KIND_COLORS = {
@@ -6451,6 +6460,7 @@ function renderActiveGcode() {
     meta.textContent = "-";
     run.disabled = false;
     setSoftDisabled(run, true);
+    ensureActiveGcodeGeometry(null);
     ensureActiveGcodeSource(null);
     drawGcodePreview(null);
     renderActiveJobProgress(null);
@@ -6460,14 +6470,16 @@ function renderActiveGcode() {
   }
 
   title.textContent = relPath(active.path);
+  ensureActiveGcodeGeometry(active);
   ensureActiveGcodeSource(active);
   const preview = active.preview || {};
-  const live = activeJobPreviewState(state.machine, preview, active.path);
+  const geometryReady = activeGcodeGeometry.signature === activeGcodeSourceSignature(active);
+  const renderedPreview = { ...preview, segments: geometryReady ? activeGcodeGeometry.segments : [] };
+  const live = activeJobPreviewState(state.machine, renderedPreview, active.path);
   const tools = Array.isArray(preview.tools) && preview.tools.length ? " tools T" + preview.tools.join(", T") : "";
   const entry = active.entry || state.files.get(active.path) || {};
   const sync = SYNC_LABEL[entry.sync] || entry.sync || "";
   const bounds = preview.bounds ? previewBoundsText(preview.bounds) : "no plotted bounds";
-  const truncated = preview.truncated ? " preview truncated" : "";
   meta.textContent = [
     fmtSize(entry.size || 0, false),
     sync,
@@ -6477,7 +6489,6 @@ function renderActiveGcode() {
     preview.has_4axis ? "4-axis" : "3-axis",
     bounds,
     tools,
-    truncated,
   ].filter(Boolean).join(" | ");
   const machineReady = state.machine?.state === "Idle";
   run.disabled = !!state.activeGcodePending;
@@ -6491,7 +6502,7 @@ function renderActiveGcode() {
     clearNotice("active-gcode");
   }
   renderActiveJobProgress(live, preview);
-  drawGcodePreview(preview, live);
+  drawGcodePreview(renderedPreview, live);
   renderDashboard();
 }
 
@@ -6523,7 +6534,9 @@ function renderDashboard() {
   const machine = state.machine || {};
   const active = state.activeGcode || {};
   const preview = active.preview || {};
-  const live = active.path ? activeJobPreviewState(machine, preview, active.path) : null;
+  const overview = Array.isArray(preview.overview_segments) ? preview.overview_segments : [];
+  const dashboardPreview = { ...preview, segments: overview };
+  const live = active.path ? activeJobPreviewState(machine, dashboardPreview, active.path) : null;
   const setText = (id, value) => {
     const element = document.getElementById(id);
     if (element) element.textContent = value;
@@ -6558,7 +6571,7 @@ function renderDashboard() {
   setText("dashboard-progress-label", live ? `${live.percent}% · line ${live.playedLines}${lineCount ? " / " + lineCount : ""}` : "Progress");
   setText("dashboard-elapsed", live ? fmtDuration(live.elapsedMs) : "-");
   setText("dashboard-remaining", live && Number.isFinite(live.remainingMs) ? fmtDuration(live.remainingMs) : "-");
-  drawDashboardPreview(preview, live);
+  drawDashboardPreview(dashboardPreview, live);
 }
 
 function dashboardPreviewPath(segments, bounds, endExclusive, maxSegments = 4000) {
@@ -6644,6 +6657,46 @@ function activeGcodeSourceSignature(active) {
   ]);
 }
 
+async function ensureActiveGcodeGeometry(active) {
+  const signature = activeGcodeSourceSignature(active);
+  if (!signature) {
+    activeGcodeGeometry.requestID++;
+    activeGcodeGeometry.signature = "";
+    activeGcodeGeometry.requestedSignature = "";
+    activeGcodeGeometry.total = 0;
+    activeGcodeGeometry.segments = [];
+    return;
+  }
+  if (activeGcodeGeometry.signature === signature || activeGcodeGeometry.requestedSignature === signature) return;
+  const requestID = ++activeGcodeGeometry.requestID;
+  activeGcodeGeometry.requestedSignature = signature;
+  activeGcodeGeometry.signature = "";
+  activeGcodeGeometry.total = Math.max(0, Number(active?.preview?.plotted_segments) || 0);
+  activeGcodeGeometry.segments = [];
+  try {
+    let start = 0;
+    while (start < activeGcodeGeometry.total || start === 0) {
+      const response = await request(`/api/gcode/active/segments?start=${start}&limit=${GCODE_SEGMENT_PAGE_SIZE}`);
+      const windowData = await response.json();
+      if (requestID !== activeGcodeGeometry.requestID || activeGcodeGeometry.requestedSignature !== signature) return;
+      const page = Array.isArray(windowData.segments) ? windowData.segments : [];
+      activeGcodeGeometry.total = Math.max(0, Number(windowData.total) || 0);
+      activeGcodeGeometry.segments.push(...page);
+      start += page.length;
+      if (!page.length || start >= activeGcodeGeometry.total) break;
+    }
+    if (requestID !== activeGcodeGeometry.requestID) return;
+    activeGcodeGeometry.signature = signature;
+    activeGcodeGeometry.requestedSignature = "";
+    clearNotice("active-gcode-geometry");
+    renderActiveGcode();
+  } catch (error) {
+    if (requestID !== activeGcodeGeometry.requestID) return;
+    activeGcodeGeometry.requestedSignature = "";
+    setNotice("Toolpath loading failed: " + error.message, "error", "active-gcode-geometry");
+  }
+}
+
 function splitGcodeSourceLines(text) {
   if (!text) return [];
   const lines = String(text).split(/\r\n|\n|\r/);
@@ -6658,70 +6711,36 @@ async function ensureActiveGcodeSource(active) {
     return;
   }
   const signature = activeGcodeSourceSignature(active);
-  if (activeGcodeSource.signature === signature || activeGcodeSource.requestedSignature === signature) return;
-  if (
-    activeGcodeSource.failedSignature === signature &&
-    Date.now() < activeGcodeSource.retryAfter &&
-    !(activeGcodeSource.failedMachineState !== "Idle" && state.machine?.state === "Idle")
-  ) return;
-
-  const requestID = ++activeGcodeSource.requestID;
+  if (activeGcodeSource.signature === signature) return;
+  activeGcodeSource.requestID++;
   const pathChanged = activeGcodeSource.path !== path;
   activeGcodeSource.path = path;
-  activeGcodeSource.requestedSignature = signature;
-  activeGcodeSource.failedSignature = "";
-  activeGcodeSource.failedMachineState = "";
   if (pathChanged || (activeGcodeSource.signature && activeGcodeSource.signature !== signature)) {
-    activeGcodeSource.signature = "";
-    activeGcodeSource.lines = [];
+    activeGcodeSource.pages.clear();
+    activeGcodeSource.loadingPages.clear();
     activeGcodeSource.currentLine = 0;
     const scroll = document.getElementById("active-gcode-source-scroll");
     if (scroll) scroll.scrollTop = 0;
     renderActiveGcodeSource();
   }
-  const scroll = document.getElementById("active-gcode-source-scroll");
-  scroll?.setAttribute("aria-busy", "true");
-  try {
-    const response = await request(apiFileURL(path));
-    const text = await response.text();
-    if (requestID !== activeGcodeSource.requestID || activeGcodeSource.path !== path) return;
-    activeGcodeSource.lines = splitGcodeSourceLines(text);
-    activeGcodeSource.signature = signature;
-    activeGcodeSource.requestedSignature = "";
-    activeGcodeSource.failedSignature = "";
-    activeGcodeSource.failedMachineState = "";
-    activeGcodeSource.retryAfter = 0;
-    clearNotice("active-gcode-source");
-    renderActiveGcodeSource();
-    scrollActiveGcodeSourceToLine(activeGcodeSource.currentLine, true);
-  } catch (error) {
-    if (requestID !== activeGcodeSource.requestID || activeGcodeSource.path !== path) return;
-    activeGcodeSource.requestedSignature = "";
-    activeGcodeSource.failedSignature = signature;
-    activeGcodeSource.failedMachineState = String(state.machine?.state || "");
-    activeGcodeSource.retryAfter = Date.now() + 30000;
-    setNotice("Gcode source unavailable: " + error.message, "error", "active-gcode-source");
-    renderActiveGcodeSource();
-  } finally {
-    if (requestID === activeGcodeSource.requestID) {
-      document.getElementById("active-gcode-source-scroll")?.removeAttribute("aria-busy");
-    }
-  }
+  activeGcodeSource.signature = signature;
+  activeGcodeSource.totalLines = Math.max(0, Number(active?.preview?.line_count) || 0);
+  clearNotice("active-gcode-source");
+  renderActiveGcodeSource();
+  fetchActiveGcodeSourcePage(0);
 }
 
 function resetActiveGcodeSource() {
-  if (!activeGcodeSource.path && !activeGcodeSource.lines.length && !activeGcodeSource.requestedSignature) {
+  if (!activeGcodeSource.path && !activeGcodeSource.pages.size) {
     renderActiveGcodeSource();
     return;
   }
   activeGcodeSource.requestID++;
   activeGcodeSource.path = "";
   activeGcodeSource.signature = "";
-  activeGcodeSource.requestedSignature = "";
-  activeGcodeSource.failedSignature = "";
-  activeGcodeSource.failedMachineState = "";
-  activeGcodeSource.retryAfter = 0;
-  activeGcodeSource.lines = [];
+  activeGcodeSource.totalLines = 0;
+  activeGcodeSource.pages.clear();
+  activeGcodeSource.loadingPages.clear();
   activeGcodeSource.currentLine = 0;
   clearNotice("active-gcode-source");
   const scroll = document.getElementById("active-gcode-source-scroll");
@@ -6730,6 +6749,49 @@ function resetActiveGcodeSource() {
     scroll.removeAttribute("aria-busy");
   }
   renderActiveGcodeSource();
+}
+
+async function fetchActiveGcodeSourcePage(index) {
+  if (!activeGcodeSource.path || !activeGcodeSource.signature) return;
+  const pageStartIndex = Math.max(0, Math.floor(Math.max(0, index) / GCODE_SOURCE_PAGE_SIZE) * GCODE_SOURCE_PAGE_SIZE);
+  if (activeGcodeSource.pages.has(pageStartIndex)) {
+    const page = activeGcodeSource.pages.get(pageStartIndex);
+    activeGcodeSource.pages.delete(pageStartIndex);
+    activeGcodeSource.pages.set(pageStartIndex, page);
+    return;
+  }
+  if (activeGcodeSource.loadingPages.has(pageStartIndex)) return;
+  const requestID = activeGcodeSource.requestID;
+  const signature = activeGcodeSource.signature;
+  activeGcodeSource.loadingPages.add(pageStartIndex);
+  document.getElementById("active-gcode-source-scroll")?.setAttribute("aria-busy", "true");
+  try {
+    const response = await request(`/api/gcode/active/source?start_line=${pageStartIndex + 1}&limit=${GCODE_SOURCE_PAGE_SIZE}`);
+    const page = await response.json();
+    if (requestID !== activeGcodeSource.requestID || signature !== activeGcodeSource.signature) return;
+    activeGcodeSource.totalLines = Math.max(0, Number(page.total_lines) || 0);
+    activeGcodeSource.pages.set(pageStartIndex, Array.isArray(page.lines) ? page.lines : []);
+    while (activeGcodeSource.pages.size > GCODE_SOURCE_MAX_PAGES) {
+      activeGcodeSource.pages.delete(activeGcodeSource.pages.keys().next().value);
+    }
+    clearNotice("active-gcode-source");
+    renderActiveGcodeSource();
+  } catch (error) {
+    if (requestID === activeGcodeSource.requestID) {
+      setNotice("Gcode source unavailable: " + error.message, "error", "active-gcode-source");
+    }
+  } finally {
+    activeGcodeSource.loadingPages.delete(pageStartIndex);
+    if (!activeGcodeSource.loadingPages.size) {
+      document.getElementById("active-gcode-source-scroll")?.removeAttribute("aria-busy");
+    }
+  }
+}
+
+function activeGcodeSourceLine(index) {
+  const pageStartIndex = Math.floor(index / GCODE_SOURCE_PAGE_SIZE) * GCODE_SOURCE_PAGE_SIZE;
+  const page = activeGcodeSource.pages.get(pageStartIndex);
+  return page?.[index - pageStartIndex];
 }
 
 function gcodeSourceWindow(lineCount, scrollTop, viewportHeight, rowHeight = GCODE_SOURCE_ROW_HEIGHT, overscan = GCODE_SOURCE_OVERSCAN) {
@@ -6759,19 +6821,23 @@ function renderActiveGcodeSource() {
   const position = document.getElementById("active-gcode-source-position");
   if (!scroll || !spacer || !container || !empty || !position) return;
 
-  const lines = activeGcodeSource.lines;
-  spacer.style.height = `${lines.length * GCODE_SOURCE_ROW_HEIGHT}px`;
+  const totalLines = activeGcodeSource.totalLines;
+  spacer.style.height = `${totalLines * GCODE_SOURCE_ROW_HEIGHT}px`;
   position.textContent = activeGcodeSource.currentLine > 0
-    ? `Ln ${activeGcodeSource.currentLine} / ${lines.length || "—"}`
-    : (lines.length ? `${lines.length} lines` : "-");
+    ? `Ln ${activeGcodeSource.currentLine} / ${totalLines || "—"}`
+    : (totalLines ? `${totalLines} lines` : "-");
   empty.textContent = activeGcodeSource.path ? "No gcode source loaded" : "No gcode loaded";
-  empty.hidden = lines.length > 0 || !!activeGcodeSource.requestedSignature;
+  empty.hidden = totalLines > 0 || activeGcodeSource.loadingPages.size > 0;
 
   const windowRange = gcodeSourceWindow(
-    lines.length,
+    totalLines,
     scroll.scrollTop,
     scroll.clientHeight,
   );
+  for (let index = windowRange.start; index < windowRange.end; index += GCODE_SOURCE_PAGE_SIZE) {
+    fetchActiveGcodeSourcePage(index);
+  }
+  if (windowRange.end > windowRange.start) fetchActiveGcodeSourcePage(windowRange.end - 1);
   const fragment = document.createDocumentFragment();
   for (let index = windowRange.start; index < windowRange.end; index++) {
     const lineNumber = index + 1;
@@ -6787,7 +6853,7 @@ function renderActiveGcodeSource() {
     number.setAttribute("aria-hidden", "true");
     const code = document.createElement("span");
     code.className = "active-gcode-source-code";
-    code.textContent = lines[index] || " ";
+    code.textContent = activeGcodeSourceLine(index) || " ";
     row.append(number, code);
     fragment.appendChild(row);
   }
@@ -6816,7 +6882,7 @@ function syncActiveGcodeSourceLine(live = null) {
 
 function scrollActiveGcodeSourceToLine(line, force = false) {
   const scroll = document.getElementById("active-gcode-source-scroll");
-  const lineCount = activeGcodeSource.lines.length;
+  const lineCount = activeGcodeSource.totalLines;
   if (!scroll || line <= 0 || lineCount <= 0) return;
   const targetLine = Math.min(lineCount, Math.max(1, Math.trunc(line)));
   const top = (targetLine - 1) * GCODE_SOURCE_ROW_HEIGHT;
@@ -6825,6 +6891,7 @@ function scrollActiveGcodeSourceToLine(line, force = false) {
   const visibleBottom = scroll.scrollTop + scroll.clientHeight - margin;
   if (!force && top >= visibleTop && top + GCODE_SOURCE_ROW_HEIGHT <= visibleBottom) return;
   scroll.scrollTop = Math.max(0, top - Math.max(0, (scroll.clientHeight - GCODE_SOURCE_ROW_HEIGHT) / 2));
+  fetchActiveGcodeSourcePage(targetLine - 1);
   renderActiveGcodeSource();
 }
 
