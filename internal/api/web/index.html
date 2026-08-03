@@ -588,10 +588,45 @@
     .machine-settings-travel-fields, .machine-settings-motion-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 600px) {
-    main { padding-inline: 10px; }
-    #machine { gap: 8px; }
-    header { padding-inline: 10px; }
-    .command-popout > summary, #command-actions > #ctl-halt { padding-inline: 9px; }
+    :root { --control-h: 44px; }
+    body { font-size: 14px; }
+    header { gap: 8px; padding: 8px 10px; }
+    main { padding: 10px 10px calc(88px + env(safe-area-inset-bottom)); }
+    #command-toolbar { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+    #command-actions { min-width: 0; gap: 6px; overflow: hidden; }
+    #command-menu { flex: 1 1 auto; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+    #command-actions > #ctl-halt { flex: 0 0 auto; }
+    #machine { min-width: max-content; gap: 6px; justify-self: end; }
+    #machine-status-toolbar { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(208px, 1.6fr) repeat(3, minmax(108px, 1fr)); width: 100%; padding: 4px; overflow-x: auto; scroll-snap-type: x proximity; }
+    .machine-status-item { min-height: 40px; scroll-snap-align: start; }
+    .connection-status { width: 36px; height: 36px; }
+    .badge { min-height: 32px; display: inline-flex; align-items: center; }
+    .tabs { grid-template-columns: repeat(3, minmax(92px, 1fr)); }
+    .tab { min-height: 44px; }
+    .command-popout > summary, #command-actions > #ctl-halt { min-height: 44px; padding-inline: 10px; }
+    .command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); left: 10px !important; width: auto !important; max-height: min(72dvh, 620px) !important; border-radius: 10px; transform: translateY(6px); }
+    .command-panel::before { display: none; }
+    .active-gcode-head { gap: 10px; }
+    .active-gcode-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .active-gcode-stat > strong { font-size: 13px; }
+    #active-gcode-left { height: min(42dvh, 360px); min-height: 260px; }
+    #gcode-preview-wrap { height: min(48dvh, 420px); min-height: 280px; }
+    #active-gcode-panel { padding: 10px; }
+    #active-gcode-run { min-height: 48px; }
+    #control-view #jog { padding: 8px; }
+    .control-command-drawer > summary { min-height: 44px; }
+    .control-drawer-section > summary { min-height: 44px; }
+    .tap-move-toolbar button, .tap-safe-z-toggle, .origin-action-grid button { min-height: 44px; }
+    .workarea-frame { height: min(58dvh, 460px); min-height: 300px; }
+    .toolbar { gap: 8px; }
+    #drop { min-height: 56px; display: grid; place-items: center; padding: 10px; }
+    #filter { min-height: 44px; }
+    #folder-actions { grid-template-columns: minmax(0, 1fr) repeat(2, auto); align-items: center; }
+    #folder-actions button { min-height: 44px; }
+    #status-bar { max-height: 42dvh; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); align-items: stretch; }
+    #notice-clear { min-height: 44px; align-self: flex-start; }
+    dialog { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); margin: 8px; }
+    .machine-settings-modal-head { position: sticky; top: 0; z-index: 1; background: var(--panel); }
     #log-tools, .log-left, .log-right, #gcode-form { display: grid; grid-template-columns: 1fr; align-items: stretch; }
     .log-left label { justify-content: start; }
     .table-scroll { overflow: visible; border: 0; background: transparent; }
@@ -606,10 +641,11 @@
     #files td:nth-child(4)::before { content: "Modified"; }
     #files td:nth-child(5)::before { content: "Status"; }
     #files td:nth-child(2)::before, #files td:nth-child(3)::before, #files td:nth-child(4)::before, #files td:nth-child(5)::before { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
-    #files .actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; text-align: left; margin-top: 10px; }
+    #files .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; justify-content: stretch; text-align: left; margin-top: 12px; }
     #files .actions > * { margin: 0; }
+    #files .actions button, #files .actions a { width: 100%; min-height: 44px; }
     #folder-sidebar { display: none; }
-    .action-row, #alarm-actions, #folder-actions { display: grid; grid-template-columns: 1fr; }
+    .action-row, #alarm-actions { display: grid; grid-template-columns: 1fr; }
     .action-row input[type="number"] { width: 100%; }
   }
   @media (max-width: 440px) {

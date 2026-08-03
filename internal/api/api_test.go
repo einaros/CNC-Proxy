@@ -881,6 +881,14 @@ func TestWebUIServed(t *testing.T) {
 		`.machine-settings-travel-fields, .machine-settings-motion-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }`,
 		`@media (max-width: 440px)`,
 		`.machine-settings-travel-fields, .machine-settings-origin-fields, .machine-settings-motion-fields { grid-template-columns: 1fr; }`,
+		`:root { --control-h: 44px; }`,
+		`#command-toolbar { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }`,
+		`#command-menu { flex: 1 1 auto; gap: 6px; overflow-x: auto; scrollbar-width: none; }`,
+		`grid-template-columns: minmax(208px, 1.6fr) repeat(3, minmax(108px, 1fr))`,
+		`.command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom));`,
+		`.active-gcode-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }`,
+		`#files .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));`,
+		`dialog { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); margin: 8px; }`,
 	} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing stable Machine settings layout marker %s", want)
