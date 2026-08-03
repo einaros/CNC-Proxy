@@ -80,7 +80,8 @@
   .command-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: var(--gap-xs); align-items: center; min-width: 0; }
   .command-panel form { margin: 0; }
   #command-actions > #ctl-halt { flex: 0 0 auto; min-width: 84px; font-weight: 650; }
-  main { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; padding: clamp(14px, 2vw, 22px) clamp(14px, 2vw, 22px) 76px; }
+  main { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; padding: clamp(14px, 2vw, 22px); }
+  body.has-status-message main { padding-bottom: 76px; }
   main > *, .view > .page-section { width: 100%; min-width: 0; }
   #status-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; display: flex; gap: 10px; align-items: flex-end; padding: 8px 20px calc(8px + env(safe-area-inset-bottom)); background: rgba(16,19,22,.96); border-top: 1px solid var(--border); box-shadow: 0 -10px 24px rgba(0,0,0,.22); }
   #status-bar[hidden] { display: none !important; }
@@ -641,7 +642,8 @@
     :root { --control-h: 44px; }
     body { font-size: 14px; }
     header { gap: 8px; padding: 8px 10px; backdrop-filter: none; }
-    main { padding: 8px 8px calc(88px + env(safe-area-inset-bottom)); }
+    main { padding: 8px; }
+    body.has-status-message main { padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
     #command-toolbar { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: "actions actions" "machine status"; gap: 8px; align-items: center; }
     #command-actions { grid-area: actions; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 6px; overflow: visible; }
     #command-menu { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; overflow: visible; }
@@ -1457,6 +1459,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=collapsible-header-1"></script>
+<script type="module" src="/app.js?v=notification-spacing-1"></script>
 </body>
 </html>

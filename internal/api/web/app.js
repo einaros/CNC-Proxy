@@ -1016,7 +1016,9 @@ function renderNoticeBar() {
   const list = document.getElementById("notice");
   if (!bar || !list) return;
   const notices = [...state.notices.values()].sort((a, b) => b.seq - a.seq);
-  bar.hidden = notices.length === 0;
+  const visible = notices.length > 0;
+  bar.hidden = !visible;
+  document.body.classList.toggle("has-status-message", visible);
   list.innerHTML = "";
   for (const notice of notices.slice(0, 1)) {
     const row = document.createElement("div");

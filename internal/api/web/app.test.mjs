@@ -523,6 +523,39 @@ test("header toggle preserves a visible restore control and closes open menus", 
   assert.equal(attributes["aria-label"], "Hide top bars");
 });
 
+test("the notification gutter exists only while the bottom status bar is visible", () => {
+  const classes = new Set();
+  const bar = { hidden: false };
+  const list = { innerHTML: "", appendChild() {} };
+  const state = { notices: new Map() };
+  const ctx = buildContext(["renderNoticeBar"], [], {
+    state,
+    document: {
+      body: {
+        classList: {
+          toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name),
+        },
+      },
+      getElementById: (id) => id === "status-bar" ? bar : id === "notice" ? list : null,
+      createElement: () => ({ className: "", textContent: "", append() {} }),
+    },
+  });
+
+  vm.runInContext("renderNoticeBar()", ctx);
+  assert.equal(bar.hidden, true);
+  assert.ok(!classes.has("has-status-message"));
+
+  state.notices.set("test", { kind: "ok", text: "Done", seq: 1 });
+  vm.runInContext("renderNoticeBar()", ctx);
+  assert.equal(bar.hidden, false);
+  assert.ok(classes.has("has-status-message"));
+
+  state.notices.clear();
+  vm.runInContext("renderNoticeBar()", ctx);
+  assert.equal(bar.hidden, true);
+  assert.ok(!classes.has("has-status-message"));
+});
+
 test("active-job context maps captured geometry into the current work coordinates and requires a complete probe plan", () => {
   const ctx = buildContext([
     "axisValue",
