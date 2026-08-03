@@ -882,6 +882,7 @@ func TestWebUIServed(t *testing.T) {
 		`@media (max-width: 440px)`,
 		`.machine-settings-travel-fields, .machine-settings-origin-fields, .machine-settings-motion-fields { grid-template-columns: 1fr; }`,
 		`:root { --control-h: 44px; }`,
+		`.badge { display: inline-flex; align-items: center; justify-content: center;`,
 		`#command-toolbar { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: "actions actions" "machine status"; gap: 8px; align-items: center; }`,
 		`#command-menu { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; overflow: visible; }`,
 		`#machine-status-toolbar .machine-status-item:not(.machine-status-position) { display: none; }`,
