@@ -182,6 +182,28 @@ const gcodeView = {
   pixelRatio: 0,
 };
 
+const dashboardGcodeView = {
+  key: "",
+  canvas: null,
+  empty: null,
+  renderer: null,
+  scene: null,
+  camera: null,
+  pathGroup: null,
+  contextGroup: null,
+  progressLine: null,
+  marker: null,
+  target: new THREE.Vector3(),
+  orbit: { ...gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 }), radius: 120 },
+  segments: [],
+  has4Axis: false,
+  renderQueued: false,
+  resizeObserver: null,
+  width: 0,
+  height: 0,
+  pixelRatio: 0,
+};
+
 const activeGcodeSource = {
   path: "",
   signature: "",
@@ -6584,8 +6606,8 @@ function renderDashboard() {
   const machine = state.machine || {};
   const active = state.activeGcode || {};
   const preview = active.preview || {};
-  const overview = Array.isArray(preview.overview_segments) ? preview.overview_segments : [];
-  const dashboardPreview = { ...preview, segments: overview };
+  const geometryReady = activeGcodeGeometry.signature === activeGcodeSourceSignature(active);
+  const dashboardPreview = { ...preview, segments: geometryReady ? activeGcodeGeometry.segments : [] };
   const live = active.path ? activeJobPreviewState(machine, dashboardPreview, active.path) : null;
   const setText = (id, value) => {
     const element = document.getElementById(id);
@@ -6623,76 +6645,63 @@ function renderDashboard() {
   setText("dashboard-progress-label", live ? `${live.percent}% · line ${live.playedLines}${lineCount ? " / " + lineCount : ""}` : "Progress");
   setText("dashboard-elapsed", live ? fmtDuration(live.elapsedMs) : "-");
   setText("dashboard-remaining", live && Number.isFinite(live.remainingMs) ? fmtDuration(live.remainingMs) : "-");
-  drawDashboardPreview(dashboardPreview, live);
+  drawDashboardGcodePreview(dashboardPreview, live);
 }
 
-function dashboardPreviewPath(segments, bounds, endExclusive, maxSegments = 4000) {
-  if (!Array.isArray(segments) || !segments.length || !bounds?.min || !bounds?.max || endExclusive <= 0) return "";
-  const minX = Number(bounds.min[0]);
-  const minY = Number(bounds.min[1]);
-  const maxX = Number(bounds.max[0]);
-  const maxY = Number(bounds.max[1]);
-  if (![minX, minY, maxX, maxY].every(Number.isFinite)) return "";
-  const width = Math.max(0.001, maxX - minX);
-  const height = Math.max(0.001, maxY - minY);
-  const scale = Math.min(92 / width, 56 / height);
-  const offsetX = 4 + (92 - width * scale) / 2;
-  const offsetY = 4 + (56 - height * scale) / 2;
-  const point = (position) => {
-    const x = offsetX + (Number(position?.[0]) - minX) * scale;
-    const y = 64 - (offsetY + (Number(position?.[1]) - minY) * scale);
-    return Number.isFinite(x) && Number.isFinite(y) ? `${x.toFixed(2)} ${y.toFixed(2)}` : null;
-  };
-  const end = Math.min(segments.length, Math.max(0, Math.trunc(endExclusive)));
-  const step = Math.max(1, Math.ceil(end / Math.max(1, maxSegments)));
-  const indexes = [];
-  for (let index = 0; index < end; index += step) indexes.push(index);
-  if (end > 0 && indexes.at(-1) !== end - 1) indexes.push(end - 1);
-  const commands = [];
-  for (const index of indexes) {
-    const from = point(segments[index]?.from);
-    const to = point(segments[index]?.to);
-    if (from && to) commands.push(`M ${from} L ${to}`);
-  }
-  return commands.join(" ");
-}
-
-function dashboardPreviewPoint(position, bounds) {
-  if (!position || !bounds?.min || !bounds?.max) return null;
-  const minX = Number(bounds.min[0]);
-  const minY = Number(bounds.min[1]);
-  const maxX = Number(bounds.max[0]);
-  const maxY = Number(bounds.max[1]);
-  const x = Number(position[0]);
-  const y = Number(position[1]);
-  if (![minX, minY, maxX, maxY, x, y].every(Number.isFinite)) return null;
-  const width = Math.max(0.001, maxX - minX);
-  const height = Math.max(0.001, maxY - minY);
-  const scale = Math.min(92 / width, 56 / height);
-  const offsetX = 4 + (92 - width * scale) / 2;
-  const offsetY = 4 + (56 - height * scale) / 2;
-  return { x: offsetX + (x - minX) * scale, y: 64 - (offsetY + (y - minY) * scale) };
-}
-
-function drawDashboardPreview(preview, live = null) {
+function drawDashboardGcodePreview(preview, live = null) {
   const segments = Array.isArray(preview?.segments) ? preview.segments : [];
-  const path = document.getElementById("dashboard-preview-path");
-  const complete = document.getElementById("dashboard-preview-complete");
-  const marker = document.getElementById("dashboard-preview-marker");
-  const empty = document.getElementById("dashboard-preview-empty");
-  if (!path || !complete || !marker || !empty) return;
-  const hasPreview = segments.length > 0 && !!preview?.bounds;
-  empty.hidden = hasPreview;
-  path.setAttribute("d", hasPreview ? dashboardPreviewPath(segments, preview.bounds, segments.length) : "");
-  const cursor = hasPreview && live ? Math.max(0, Math.min(segments.length, Number(live.cursor) || 0)) : 0;
-  complete.setAttribute("d", cursor ? dashboardPreviewPath(segments, preview.bounds, cursor) : "");
-  const fallback = cursor > 0 ? segments[cursor - 1]?.to : null;
-  const point = dashboardPreviewPoint(live?.position || fallback, preview?.bounds);
-  marker.hidden = !point;
-  if (point) {
-    marker.setAttribute("cx", point.x.toFixed(2));
-    marker.setAttribute("cy", point.y.toFixed(2));
+  const hasToolpath = segments.length > 0 && !!preview?.bounds;
+  if (!hasToolpath) {
+    clearDashboardGcodeScene();
+    setDashboardGcodePreviewEmpty("No plotted moves");
+    return;
   }
+  if (!ensureDashboardGcodeViewer()) return;
+
+  const origin = activeJobOverlayOrigin();
+  const context = activeJobContextOverlayData(state.outline, origin);
+  const contextKey = activeJobContextOverlayKey(origin);
+  const sceneBounds = combineGcodeBounds(preview.bounds, context.bounds);
+  const key = [
+    activeGcodeGeometry.signature,
+    segments.length,
+    preview.has_4axis ? "4" : "3",
+    contextKey,
+  ].join("|");
+  if (dashboardGcodeView.key !== key) {
+    dashboardGcodeView.key = key;
+    dashboardGcodeView.segments = segments;
+    dashboardGcodeView.has4Axis = !!preview.has_4axis;
+    populateGcodePathScene(dashboardGcodeView, { ...preview, bounds: sceneBounds }, segments);
+    clearThreeGroup(dashboardGcodeView.contextGroup);
+    rebuildGcodeContextOverlayForGroup(dashboardGcodeView.contextGroup, context);
+    fitDashboardGcodeCamera(sceneBounds);
+  }
+
+  const cursor = live
+    ? Math.max(0, Math.min(segments.length, Number(live.cursor) || 0))
+    : segments.length;
+  if (dashboardGcodeView.progressLine) {
+    dashboardGcodeView.progressLine.geometry.setDrawRange(0, cursor * 2);
+  }
+  const markerPosition = live?.position || segments[Math.max(0, cursor - 1)]?.to;
+  if (markerPosition) {
+    dashboardGcodeView.marker.position.copy(gcodeWorldPoint(markerPosition, dashboardGcodeView.has4Axis));
+    dashboardGcodeView.marker.scale.setScalar(Math.max(0.8, dashboardGcodeView.orbit.radius * 0.008));
+    dashboardGcodeView.marker.visible = true;
+  } else {
+    dashboardGcodeView.marker.visible = false;
+  }
+  if (dashboardGcodeView.canvas) {
+    dashboardGcodeView.canvas.setAttribute(
+      "aria-label",
+      live?.position
+        ? `Active job 3D preview; live spindle at X ${fmtCoord(live.position[0])}, Y ${fmtCoord(live.position[1])}, Z ${fmtCoord(live.position[2])}`
+        : "Active job 3D preview",
+    );
+  }
+  setDashboardGcodePreviewEmpty("");
+  scheduleDashboardGcodeRender();
 }
 
 function activeGcodeSourceSignature(active) {
@@ -7206,7 +7215,10 @@ function syncGcodeContextOverlay() {
 }
 
 function rebuildGcodeContextOverlay(data) {
-  const group = gcodeView.contextGroup;
+  rebuildGcodeContextOverlayForGroup(gcodeView.contextGroup, data);
+}
+
+function rebuildGcodeContextOverlayForGroup(group, data) {
   if (!group) return;
   const outlineColor = data.closed ? 0x44c27b : 0x57a6d6;
   if (data.surface?.points?.length && data.surface.faces?.length) {
@@ -7461,6 +7473,140 @@ function ensureGcodeViewer() {
   return true;
 }
 
+function ensureDashboardGcodeViewer() {
+  if (dashboardGcodeView.renderer) return true;
+  const canvas = document.getElementById("dashboard-preview");
+  if (!canvas) return false;
+  dashboardGcodeView.canvas = canvas;
+  dashboardGcodeView.empty = document.getElementById("dashboard-preview-empty");
+  try {
+    dashboardGcodeView.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  } catch {
+    setDashboardGcodePreviewEmpty("3D preview unavailable");
+    return false;
+  }
+  dashboardGcodeView.pixelRatio = gcodeRenderPixelRatio();
+  dashboardGcodeView.renderer.setPixelRatio(dashboardGcodeView.pixelRatio);
+  dashboardGcodeView.renderer.setClearColor(0x202832, 1);
+  dashboardGcodeView.scene = new THREE.Scene();
+  dashboardGcodeView.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100000);
+  dashboardGcodeView.pathGroup = new THREE.Group();
+  dashboardGcodeView.contextGroup = new THREE.Group();
+  dashboardGcodeView.scene.add(dashboardGcodeView.pathGroup);
+  dashboardGcodeView.scene.add(dashboardGcodeView.contextGroup);
+  dashboardGcodeView.marker = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xd99a3a }),
+  );
+  dashboardGcodeView.marker.visible = false;
+  dashboardGcodeView.scene.add(dashboardGcodeView.marker);
+  if (globalThis.ResizeObserver) {
+    dashboardGcodeView.resizeObserver = new ResizeObserver(scheduleDashboardGcodeRender);
+    dashboardGcodeView.resizeObserver.observe(canvas);
+  }
+  window.addEventListener("resize", scheduleDashboardGcodeRender);
+  return true;
+}
+
+function clearDashboardGcodeScene() {
+  dashboardGcodeView.key = "";
+  dashboardGcodeView.segments = [];
+  if (!dashboardGcodeView.renderer) return;
+  clearThreeGroup(dashboardGcodeView.pathGroup);
+  clearThreeGroup(dashboardGcodeView.contextGroup);
+  disposeObject(dashboardGcodeView.progressLine);
+  dashboardGcodeView.progressLine = null;
+  dashboardGcodeView.marker.visible = false;
+  scheduleDashboardGcodeRender();
+}
+
+function setDashboardGcodePreviewEmpty(text) {
+  const empty = dashboardGcodeView.empty || document.getElementById("dashboard-preview-empty");
+  if (!empty) return;
+  empty.textContent = text || "";
+  empty.hidden = !text;
+}
+
+function fitDashboardGcodeCamera(bounds) {
+  if (!bounds?.min || !bounds?.max || !dashboardGcodeView.camera) return;
+  const min = bounds.min;
+  const max = bounds.max;
+  const center = [0, 1, 2].map((index) => (Number(min[index]) + Number(max[index])) / 2);
+  dashboardGcodeView.target.set(...gcodeWorldCoordinates([...center, 0], false));
+  const radius = Math.max(
+    Math.abs(Number(max[0]) - Number(min[0])),
+    Math.abs(Number(max[1]) - Number(min[1])),
+    Math.abs(Number(max[2]) - Number(min[2])),
+    1,
+  );
+  const direction = gcodeOrbitAnglesForDirection({ x: 1, y: 1, z: 1 });
+  dashboardGcodeView.orbit.theta = direction.theta;
+  dashboardGcodeView.orbit.phi = direction.phi;
+  dashboardGcodeView.orbit.radius = radius * 2.4 + 20;
+  updateDashboardGcodeCamera();
+}
+
+function updateDashboardGcodeCamera() {
+  const view = dashboardGcodeView;
+  if (!view.camera) return;
+  const sinPhi = Math.sin(view.orbit.phi);
+  view.camera.up.set(0, 1, 0);
+  view.camera.position.set(
+    view.target.x + view.orbit.radius * sinPhi * Math.sin(view.orbit.theta),
+    view.target.y + view.orbit.radius * Math.cos(view.orbit.phi),
+    view.target.z + view.orbit.radius * sinPhi * Math.cos(view.orbit.theta),
+  );
+  view.camera.lookAt(view.target);
+  syncDashboardGcodeProjection();
+  scheduleDashboardGcodeRender();
+}
+
+function syncDashboardGcodeProjection() {
+  const view = dashboardGcodeView;
+  if (!view.camera) return;
+  const aspect = view.height > 0 ? view.width / view.height : 1;
+  const radius = view.orbit.radius;
+  const halfH = Math.tan(THREE.MathUtils.degToRad(GCODE_FOV) / 2) * radius;
+  view.camera.near = Math.max(0.01, radius / 1000);
+  view.camera.far = Math.max(1000, radius * 100);
+  view.camera.top = halfH;
+  view.camera.bottom = -halfH;
+  view.camera.left = -halfH * aspect;
+  view.camera.right = halfH * aspect;
+  view.camera.updateProjectionMatrix();
+}
+
+function scheduleDashboardGcodeRender() {
+  if (!dashboardGcodeView.renderer || dashboardGcodeView.renderQueued) return;
+  dashboardGcodeView.renderQueued = true;
+  requestAnimationFrame(() => {
+    dashboardGcodeView.renderQueued = false;
+    renderDashboardGcodeScene();
+  });
+}
+
+function renderDashboardGcodeScene() {
+  const view = dashboardGcodeView;
+  if (!view.renderer || !view.camera || !view.canvas) return;
+  const rect = view.canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width));
+  const height = Math.max(1, Math.round(rect.height));
+  const pixelRatio = gcodeRenderPixelRatio(width, height);
+  const sizeChanged = view.width !== width || view.height !== height;
+  const ratioChanged = Math.abs(view.pixelRatio - pixelRatio) > 0.001;
+  if (ratioChanged) {
+    view.pixelRatio = pixelRatio;
+    view.renderer.setPixelRatio(pixelRatio);
+  }
+  if (sizeChanged || ratioChanged) {
+    view.width = width;
+    view.height = height;
+    view.renderer.setSize(width, height, false);
+    syncDashboardGcodeProjection();
+  }
+  view.renderer.render(view.scene, view.camera);
+}
+
 function bindGcodeOrbitControls(canvas) {
   const setPanKey = () => {
     const on = gcodeView.panKeys.size > 0;
@@ -7547,13 +7693,17 @@ function isTypingTarget(el) {
 }
 
 function rebuildGcodeScene(preview, segments) {
+  populateGcodePathScene(gcodeView, preview, segments);
+}
+
+function populateGcodePathScene(view, preview, segments) {
   // Toolpath and outline/probe context have separate cache keys and lifecycles.
   // Context is rebuilt by syncGcodeContextOverlay and must survive path rebuilds.
-  clearThreeGroup(gcodeView.pathGroup);
-  disposeObject(gcodeView.progressLine);
-  gcodeView.progressLine = null;
+  clearThreeGroup(view.pathGroup);
+  disposeObject(view.progressLine);
+  view.progressLine = null;
   const bounds = preview.bounds || {};
-  addGcodeGrid(bounds);
+  addGcodeGridToView(view, bounds);
   const byKind = { rapid: [], cut: [], arc: [], probe: [] };
   const progress = new Float32Array(segments.length * 6);
   for (let i = 0; i < segments.length; i++) {
@@ -7579,17 +7729,21 @@ function rebuildGcodeScene(preview, segments) {
       transparent: true,
       opacity: kind === "rapid" ? 0.42 : 0.82,
     });
-    gcodeView.pathGroup.add(new THREE.LineSegments(geometry, material));
+    view.pathGroup.add(new THREE.LineSegments(geometry, material));
   }
   const progressGeometry = new THREE.BufferGeometry();
   progressGeometry.setAttribute("position", new THREE.BufferAttribute(progress, 3));
   progressGeometry.setDrawRange(0, progress.length / 3);
   const progressMaterial = new THREE.LineBasicMaterial({ color: 0xf2f6fa, transparent: true, opacity: 0.95 });
-  gcodeView.progressLine = new THREE.LineSegments(progressGeometry, progressMaterial);
-  gcodeView.scene.add(gcodeView.progressLine);
+  view.progressLine = new THREE.LineSegments(progressGeometry, progressMaterial);
+  view.scene.add(view.progressLine);
 }
 
 function addGcodeGrid(bounds) {
+  addGcodeGridToView(gcodeView, bounds);
+}
+
+function addGcodeGridToView(view, bounds) {
   const min = bounds.min || [0, 0, 0];
   const max = bounds.max || [1, 1, 1];
   const spanX = Math.max(Math.abs(Number(max[0]) - Number(min[0])), 1);
@@ -7604,12 +7758,12 @@ function addGcodeGrid(bounds) {
     0,
   ], false);
   grid.position.set(...center);
-  gcodeView.pathGroup.add(grid);
+  view.pathGroup.add(grid);
   // Origin marker with axis legends sits at the work origin (machine 0,0,0).
-  gcodeView.pathGroup.add(buildGcodeOriginAxes(Math.max(5, size * 0.12)));
+  view.pathGroup.add(buildGcodeOriginAxes(Math.max(5, size * 0.12), view.renderer));
 }
 
-function buildGcodeOriginAxes(len) {
+function buildGcodeOriginAxes(len, renderer = gcodeView.renderer) {
   const group = new THREE.Group();
   const axes = [
     // Machine X+ is world +x, machine Y+ is world -z, machine Z+ is world +y.
@@ -7634,7 +7788,7 @@ function buildGcodeOriginAxes(len) {
       head.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tipDir);
       head.position.copy(tipDir.multiplyScalar(len - headLen / 2));
       group.add(head);
-      const label = makeGcodeAxisLabel(sign > 0 ? axis.plus : axis.minus, axis.color);
+      const label = makeGcodeAxisLabel(sign > 0 ? axis.plus : axis.minus, axis.color, renderer);
       label.position.copy(axis.dir.clone().multiplyScalar(sign * (len + len * 0.22)));
       label.scale.setScalar(len * 0.34);
       group.add(label);
@@ -7643,7 +7797,7 @@ function buildGcodeOriginAxes(len) {
   return group;
 }
 
-function makeGcodeAxisLabel(text, color) {
+function makeGcodeAxisLabel(text, color, renderer = gcodeView.renderer) {
   const size = 256;
   const c = document.createElement("canvas");
   c.width = size;
@@ -7660,7 +7814,7 @@ function makeGcodeAxisLabel(text, color) {
   ctx.fillText(text, size / 2, size / 2);
   const texture = new THREE.CanvasTexture(c);
   texture.colorSpace = THREE.SRGBColorSpace;
-  if (gcodeView.renderer) texture.anisotropy = gcodeView.renderer.capabilities.getMaxAnisotropy();
+  if (renderer) texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
   sprite.renderOrder = 10;
   return sprite;

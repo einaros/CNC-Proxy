@@ -283,26 +283,70 @@ test("active job progress never drives a preview for a different file", () => {
   assert.equal(live, null);
 });
 
-test("summary dashboard preview shows the whole job and its completed prefix", () => {
-  const ctx = buildContext(["dashboardPreviewPath", "dashboardPreviewPoint"]);
+test("summary dashboard uses the full Active job 3D scene and live cursor", () => {
   const segments = [
-    { from: [0, 0, 0, 0], to: [10, 0, 0, 0] },
-    { from: [10, 0, 0, 0], to: [10, 5, 0, 0] },
-    { from: [10, 5, 0, 0], to: [0, 5, 0, 0] },
+    { from: [0, 0, 0, 0], to: [10, 0, 0, 0], line: 1 },
+    { from: [10, 0, 0, 0], to: [10, 5, 2, 0], line: 2 },
+    { from: [10, 5, 2, 0], to: [0, 5, 4, 0], line: 3 },
   ];
-  const bounds = { min: [0, 0, 0], max: [10, 5, 0] };
-  const paths = JSON.parse(vm.runInContext(
-    `JSON.stringify([
-      dashboardPreviewPath(${JSON.stringify(segments)}, ${JSON.stringify(bounds)}, 3),
-      dashboardPreviewPath(${JSON.stringify(segments)}, ${JSON.stringify(bounds)}, 2),
-      dashboardPreviewPoint([10, 5, 0, 0], ${JSON.stringify(bounds)})
-    ])`,
+  const bounds = { min: [0, 0, 0], max: [10, 5, 4] };
+  let populated = null;
+  let fitted = null;
+  let drawRange = null;
+  let markerPosition = null;
+  let markerScale = null;
+  let emptyText = null;
+  let renderCount = 0;
+  const attributes = {};
+  const dashboardGcodeView = {
+    key: "",
+    segments: [],
+    has4Axis: false,
+    progressLine: null,
+    contextGroup: {},
+    marker: {
+      visible: false,
+      position: { copy: (value) => { markerPosition = value; } },
+      scale: { setScalar: (value) => { markerScale = value; } },
+    },
+    orbit: { radius: 100 },
+    canvas: { setAttribute: (name, value) => { attributes[name] = value; } },
+  };
+  const ctx = buildContext(["drawDashboardGcodePreview"], [], {
+    state: { outline: {} },
+    activeGcodeGeometry: { signature: "full-geometry-signature" },
+    dashboardGcodeView,
+    clearDashboardGcodeScene: () => assert.fail("nonempty scene was cleared"),
+    setDashboardGcodePreviewEmpty: (text) => { emptyText = text; },
+    ensureDashboardGcodeViewer: () => true,
+    activeJobOverlayOrigin: () => ({ x: 0, y: 0, z: 0 }),
+    activeJobContextOverlayData: () => ({ bounds: null }),
+    activeJobContextOverlayKey: () => "outline-context",
+    combineGcodeBounds: (pathBounds) => pathBounds,
+    populateGcodePathScene: (view, preview, fullSegments) => {
+      populated = JSON.parse(JSON.stringify({ bounds: preview.bounds, segments: fullSegments }));
+      view.progressLine = { geometry: { setDrawRange: (start, count) => { drawRange = [start, count]; } } };
+    },
+    clearThreeGroup: () => {},
+    rebuildGcodeContextOverlayForGroup: () => {},
+    fitDashboardGcodeCamera: (sceneBounds) => { fitted = JSON.parse(JSON.stringify(sceneBounds)); },
+    gcodeWorldPoint: (position) => ({ position: Array.from(position) }),
+    fmtCoord: (value) => String(value),
+    scheduleDashboardGcodeRender: () => { renderCount++; },
+  });
+
+  vm.runInContext(
+    `drawDashboardGcodePreview(${JSON.stringify({ bounds, segments, has_4axis: false })}, { cursor: 2, position: [10, 5, 2, 0] })`,
     ctx,
-  ));
-  assert.match(paths[0], /M 4\.00 55\.00 L 96\.00 55\.00/);
-  assert.equal((paths[0].match(/ M |^M /g) || []).length, 3);
-  assert.equal((paths[1].match(/ M |^M /g) || []).length, 2);
-  assert.deepEqual(paths[2], { x: 96, y: 9 });
+  );
+  assert.deepEqual(populated, { bounds, segments }, "the dashboard receives every loaded geometry segment");
+  assert.deepEqual(fitted, bounds);
+  assert.deepEqual(drawRange, [0, 4], "the completed prefix uses the same segment cursor as Active job");
+  assert.deepEqual(markerPosition, { position: [10, 5, 2, 0] });
+  assert.equal(markerScale, 0.8);
+  assert.equal(emptyText, "");
+  assert.equal(renderCount, 1);
+  assert.match(attributes["aria-label"], /Active job 3D preview; live spindle/);
 });
 
 test("gcode source lines preserve instruction numbering across newline styles", () => {
@@ -903,11 +947,11 @@ test("toolpath rebuilds preserve the outline context while a full scene clear re
     segments: [{ line: 1 }],
     cursor: 1,
   };
-  const ctx = buildContext(["rebuildGcodeScene", "clearGcodeScene"], [], {
+  const ctx = buildContext(["rebuildGcodeScene", "populateGcodePathScene", "clearGcodeScene"], [], {
     gcodeView,
     clearThreeGroup: (group) => cleared.push(group),
     disposeObject: (object) => disposed.push(object),
-    addGcodeGrid: () => {},
+    addGcodeGridToView: () => {},
     scheduleGcodeRender: () => {},
     THREE: { BufferGeometry, BufferAttribute, LineBasicMaterial, LineSegments },
   });
