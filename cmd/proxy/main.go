@@ -236,7 +236,9 @@ func main() {
 	})
 
 	authCfg := httpauth.Config{User: *authUser, Token: *authToken}
-	apiSrv := hardenedAPIServer(*apiAddr, httpauth.Middleware(authCfg, api.NewWithOptions(svc, api.Options{
+	apiAuthCfg := authCfg
+	apiAuthCfg.SuppressAPIChallenge = true
+	apiSrv := hardenedAPIServer(*apiAddr, httpauth.Middleware(apiAuthCfg, api.NewWithOptions(svc, api.Options{
 		Jog:            jogMgr,
 		MaxUploadBytes: mib(*apiUploadMB),
 		MaxJSONBytes:   kib(*apiJSONKB),

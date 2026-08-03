@@ -1333,7 +1333,7 @@ func serverWithJogState(t *testing.T, auth bool) (*httptest.Server, *carveratest
 	cfg.DeadmanTimeout = 120 * time.Millisecond
 	h := NewWithOptions(svc, Options{Jog: jog.New(arb, cfg)}).Handler()
 	if auth {
-		h = httpauth.Middleware(httpauth.Config{User: "operator", Token: "secret"}, h)
+		h = httpauth.Middleware(httpauth.Config{User: "operator", Token: "secret", SuppressAPIChallenge: true}, h)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -1364,9 +1364,23 @@ func TestJogWebSocketAuth(t *testing.T) {
 	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated dial err=%v resp=%v", err, resp)
 	}
+	if challenge := resp.Header.Get("WWW-Authenticate"); challenge != "" {
+		t.Fatalf("unauthenticated background dial challenge = %q, want none", challenge)
+	}
+
+	loginReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/machine/status", nil)
+	loginReq.SetBasicAuth("operator", "secret")
+	loginResp := do(t, loginReq)
+	loginResp.Body.Close()
+	cookies := loginResp.Cookies()
+	if loginResp.StatusCode != http.StatusOK || len(cookies) != 1 {
+		t.Fatalf("login status=%d cookies=%d, want 200/1", loginResp.StatusCode, len(cookies))
+	}
+	cookieHeader := make(http.Header)
+	cookieHeader.Set("Cookie", cookies[0].String())
 
 	c, _, err := websocket.Dial(ctx, wsURL(srv.URL), &websocket.DialOptions{
-		HTTPHeader: basicAuthHeader("operator", "secret"),
+		HTTPHeader: cookieHeader,
 	})
 	if err != nil {
 		t.Fatal(err)
