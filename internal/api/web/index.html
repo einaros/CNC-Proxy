@@ -18,6 +18,12 @@
   body { height: 100dvh; margin: 0; display: flex; flex-direction: column; overflow: hidden; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
   button, input, select, textarea { font: inherit; }
   header { position: sticky; top: 0; z-index: 60; display: grid; gap: var(--gap-xs); padding: 8px 20px; background: rgba(24,29,31,.96); border-bottom: 1px solid var(--border); backdrop-filter: blur(10px); box-shadow: 0 10px 24px rgba(0,0,0,.18); }
+  #view-navigation { display: grid; grid-template-columns: minmax(0, 1fr) 38px; gap: var(--gap-xs); min-width: 0; }
+  #header-toggle { width: 38px; min-width: 38px; padding: 0; font-size: 16px; }
+  body.header-collapsed header { position: fixed; top: 8px; right: 8px; left: auto; display: block; padding: 0; background: transparent; border: 0; box-shadow: none; backdrop-filter: none; }
+  body.header-collapsed #command-toolbar, body.header-collapsed .tabs { display: none; }
+  body.header-collapsed #view-navigation { display: block; }
+  body.header-collapsed #header-toggle { width: 44px; min-width: 44px; height: 44px; min-height: 44px; background: rgba(24,29,31,.94); box-shadow: 0 8px 22px rgba(0,0,0,.28); }
   #machine { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
   .badge { display: inline-flex; align-items: center; justify-content: center; padding: 2px 10px; border-radius: 999px; font-weight: 650; font-size: 12px; }
   .state-Idle { background: rgba(68,194,123,.15); color: var(--ok); }
@@ -883,12 +889,15 @@
       </div>
     </div>
   </div>
-  <nav class="tabs" role="tablist" aria-label="Views">
-    <button type="button" id="tab-dashboard" class="tab" role="tab" aria-selected="false" aria-controls="dashboard-view" tabindex="-1">Dashboard</button>
-    <button type="button" id="tab-active-job" class="tab active" role="tab" aria-selected="true" aria-controls="active-job-view">Active job</button>
-    <button type="button" id="tab-control" class="tab" role="tab" aria-selected="false" aria-controls="control-view" tabindex="-1">Control</button>
-    <button type="button" id="tab-files" class="tab" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
-  </nav>
+  <div id="view-navigation">
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button type="button" id="tab-dashboard" class="tab" role="tab" aria-selected="false" aria-controls="dashboard-view" tabindex="-1">Dashboard</button>
+      <button type="button" id="tab-active-job" class="tab active" role="tab" aria-selected="true" aria-controls="active-job-view">Active job</button>
+      <button type="button" id="tab-control" class="tab" role="tab" aria-selected="false" aria-controls="control-view" tabindex="-1">Control</button>
+      <button type="button" id="tab-files" class="tab" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
+    </nav>
+    <button type="button" id="header-toggle" aria-expanded="true" aria-label="Hide top bars" title="Hide top bars">▴</button>
+  </div>
 </header>
 <main>
   <section class="page-section">
@@ -1446,6 +1455,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=empty-active-gcode-1"></script>
+<script type="module" src="/app.js?v=collapsible-header-1"></script>
 </body>
 </html>

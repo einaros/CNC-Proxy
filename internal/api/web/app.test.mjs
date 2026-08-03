@@ -488,6 +488,41 @@ test("closing a command sheet restores focus only for explicit dismissal", () =>
   assert.equal(focusCount, 1, "outside-click dismissal does not move focus");
 });
 
+test("header toggle preserves a visible restore control and closes open menus", () => {
+  const classes = new Set();
+  const attributes = {};
+  const button = {
+    textContent: "▴",
+    title: "",
+    setAttribute: (name, value) => { attributes[name] = value; },
+  };
+  const popout = { open: true };
+  const ctx = buildContext(["setHeaderCollapsed"], [], {
+    document: {
+      body: {
+        classList: {
+          toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name),
+        },
+      },
+      getElementById: () => button,
+      querySelectorAll: () => [popout],
+    },
+  });
+
+  vm.runInContext("setHeaderCollapsed(true)", ctx);
+  assert.ok(classes.has("header-collapsed"));
+  assert.equal(button.textContent, "▾");
+  assert.equal(attributes["aria-expanded"], "false");
+  assert.equal(attributes["aria-label"], "Show top bars");
+  assert.equal(popout.open, false);
+
+  vm.runInContext("setHeaderCollapsed(false)", ctx);
+  assert.ok(!classes.has("header-collapsed"));
+  assert.equal(button.textContent, "▴");
+  assert.equal(attributes["aria-expanded"], "true");
+  assert.equal(attributes["aria-label"], "Hide top bars");
+});
+
 test("active-job context maps captured geometry into the current work coordinates and requires a complete probe plan", () => {
   const ctx = buildContext([
     "axisValue",

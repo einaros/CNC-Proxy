@@ -1031,6 +1031,21 @@ function renderNoticeBar() {
   }
 }
 
+function setHeaderCollapsed(collapsed) {
+  const button = document.getElementById("header-toggle");
+  document.body.classList.toggle("header-collapsed", !!collapsed);
+  if (!button) return;
+  const expanded = !collapsed;
+  const label = expanded ? "Hide top bars" : "Show top bars";
+  button.textContent = expanded ? "▴" : "▾";
+  button.setAttribute("aria-expanded", String(expanded));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  if (collapsed) {
+    document.querySelectorAll(".command-popout[open]").forEach((popout) => { popout.open = false; });
+  }
+}
+
 async function request(url, opts = {}) {
   const resp = await fetch(url, { credentials: "same-origin", cache: "no-store", ...opts });
   if (!resp.ok) {
@@ -11198,6 +11213,7 @@ function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("notice-clear").onclick = () => clearNotice();
+  document.getElementById("header-toggle").onclick = () => setHeaderCollapsed(!document.body.classList.contains("header-collapsed"));
   const viewTabs = ["dashboard", "active-job", "control", "files"];
   for (const [index, name] of viewTabs.entries()) {
     const tab = document.getElementById("tab-" + name);
