@@ -181,6 +181,8 @@
   .dashboard-metric > span { color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
   .dashboard-metric > strong, .dashboard-metric > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); font: 650 14px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
   .dashboard-metric > b { color: var(--muted); font-size: 12px; font-weight: 500; }
+  .dashboard-position-metric > strong, .dashboard-position-metric > b { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: normal; font-variant-numeric: tabular-nums; }
+  .dashboard-position-metric > strong { font-size: clamp(12px, 1.4vw, 14px); }
   .dashboard-job { grid-template-rows: auto auto minmax(240px, 1fr); }
   #dashboard-job-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
   .dashboard-progress { display: grid; grid-template-columns: minmax(0, 1fr) repeat(2, minmax(92px, auto)); gap: 8px 16px; align-items: end; }
@@ -917,7 +919,7 @@
       <div class="dashboard-machine">
         <div class="dashboard-heading"><h2>Machine</h2><span id="dashboard-state" class="badge state-Unknown">Unknown</span></div>
         <div class="dashboard-metrics">
-          <div class="dashboard-metric"><span>Machine position</span><strong id="dashboard-mpos">-</strong><b id="dashboard-wpos">-</b></div>
+          <div class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos">-</strong><b id="dashboard-mpos">-</b></div>
           <div class="dashboard-metric"><span>Feed</span><strong id="dashboard-feed">-</strong><b id="dashboard-feed-detail">-</b></div>
           <div class="dashboard-metric"><span>Spindle</span><strong id="dashboard-spindle">-</strong><b id="dashboard-spindle-detail">-</b></div>
           <div class="dashboard-metric"><span>Temperatures</span><strong id="dashboard-spindle-temp">-</strong><b id="dashboard-power-temp">-</b></div>

@@ -6565,8 +6565,8 @@ function renderDashboard() {
     machineState.textContent = machine.state || "Unknown";
     machineState.className = "badge state-" + (machine.state || "Unknown");
   }
-  setText("dashboard-mpos", fmtPos(machine.mpos, !!machine.motion_estimated));
-  setText("dashboard-wpos", "Work " + fmtPos(machine.wpos, !!machine.motion_estimated));
+  setText("dashboard-wpos", fmtPos(machine.wpos, !!machine.motion_estimated));
+  setText("dashboard-mpos", "Machine " + fmtPos(machine.mpos, !!machine.motion_estimated));
   const feed = fmtDashboardFeed(machine.feed);
   setText("dashboard-feed", feed.current);
   setText("dashboard-feed-detail", feed.detail);
