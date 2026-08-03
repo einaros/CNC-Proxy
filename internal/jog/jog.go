@@ -233,6 +233,22 @@ type statusResult struct {
 	err     error
 }
 
+// statusReconnectError marks a jog connection as unusable after it has failed
+// to produce any valid status for the arbiter's full freshness window. It
+// implements net.Error so JogLease.Release discards the owner connection and
+// lets the normal poller establish a new machine conversation.
+type statusReconnectError struct {
+	cause error
+}
+
+func (e statusReconnectError) Error() string {
+	return "machine status stopped responding; movement was disarmed so the proxy can reconnect"
+}
+
+func (e statusReconnectError) Unwrap() error   { return e.cause }
+func (e statusReconnectError) Timeout() bool   { return false }
+func (e statusReconnectError) Temporary() bool { return false }
+
 type plannedSegment struct {
 	start time.Time
 	end   time.Time
@@ -1128,6 +1144,10 @@ func (s *Session) handleStatusResult(res statusResult) {
 		// was rejected. Keep queue admission time-bounded and retry the poll with
 		// backoff; a real Alarm status remains terminal below.
 		now := s.mgr.now()
+		if s.statusLeaseExpired(now) {
+			s.failLease(CodeStaleStatus, statusReconnectError{cause: res.err})
+			return
+		}
 		s.scheduleStatusRetry(now)
 		s.emitStatusWaiting(now)
 		return
@@ -1138,9 +1158,24 @@ func (s *Session) handleStatusResult(res statusResult) {
 		// Stop extending the bounded queue once that observation becomes stale,
 		// but retry in place so one damaged WiFi frame cannot disarm Movement.
 		now := s.mgr.now()
+		if s.statusLeaseExpired(now) {
+			s.failLease(CodeStaleStatus, statusReconnectError{cause: err})
+			return
+		}
 		s.scheduleStatusRetry(now)
 		s.emitStatusWaiting(now)
 	}
+}
+
+func (s *Session) statusLeaseExpired(now time.Time) bool {
+	s.mu.Lock()
+	lastStatusAt := s.lastStatusAt
+	s.mu.Unlock()
+	if lastStatusAt.IsZero() {
+		return true
+	}
+	age := now.Sub(lastStatusAt)
+	return age >= 0 && age > s.mgr.arb.StateMaxAge()
 }
 
 func (s *Session) scheduleStatusRetry(now time.Time) {

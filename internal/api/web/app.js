@@ -1254,8 +1254,9 @@ function syncJogAvailabilityFromMachine(m) {
     availability = { available: true, message: "Ready to arm jog." };
   }
   state.jog.availability = availability;
-  if (isTransientJogBlock(state.jog.error)) {
+  if (availability.available && isTransientJogBlock(state.jog.errorCode || state.jog.error)) {
     state.jog.error = "";
+    state.jog.errorCode = "";
   }
 }
 

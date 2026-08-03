@@ -1233,6 +1233,70 @@ func TestStatusRetryBackoffPreventsPollHammering(t *testing.T) {
 	waitForStatusQueryCount(t, fm, queries+1)
 }
 
+func TestPersistentJogStatusTimeoutReleasesLeaseAndAllowsReconnect(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	clock := newManualClock(base)
+	mgr.now = clock.Now
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = minStatusEvery
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	armedGeneration := mgr.arb.ConnectionGeneration()
+
+	fm.SetDropStatusReplies(true)
+	s.requestStatus()
+	if ev := readEvent(t, s, "error"); ev.Code != CodeStatusWaiting {
+		t.Fatalf("first status timeout = %+v, want retryable status_waiting", ev)
+	}
+	if !s.hasLease() {
+		t.Fatal("one status timeout must not release the jog lease")
+	}
+
+	// Once the last good sample is older than the arbiter's freshness bound,
+	// keeping the exclusive jog lease would permanently block the normal owner
+	// poller from dropping and redialing the timed-out TCP connection.
+	clock.Set(base.Add(mgr.arb.StateMaxAge() + time.Millisecond))
+	s.requestStatus()
+	if ev := readEvent(t, s, "error"); ev.Code != CodeStaleStatus {
+		t.Fatalf("expired status retry = %+v, want terminal stale_status", ev)
+	}
+	if s.hasLease() {
+		t.Fatal("persistent status timeout retained the exclusive jog lease")
+	}
+
+	// No process restart is required: after replies resume, the next owner-mode
+	// transaction can acquire the arbiter and establish a fresh conversation.
+	fm.SetDropStatusReplies(false)
+	err = mgr.arb.WithMachine(false, func(c *client.Conn) error {
+		payload, err := c.QueryState(500 * time.Millisecond)
+		if err != nil {
+			return err
+		}
+		if !mgr.arb.Tracker().ObserveStatusPayload(payload) {
+			t.Fatalf("reconnect returned malformed status %q", payload)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("owner transaction after automatic jog release: %v", err)
+	}
+	if got := mgr.arb.ConnectionGeneration(); got <= armedGeneration {
+		t.Fatalf("connection generation after recovery = %d, want greater than armed generation %d", got, armedGeneration)
+	}
+	if !mgr.arb.Tracker().Fresh(mgr.arb.StateMaxAge()) {
+		t.Fatal("machine tracker did not recover without a proxy restart")
+	}
+}
+
 func TestGamepadJogRetriesUncorrelatedBusyDiagnosticWithoutDisarming(t *testing.T) {
 	mgr, fm, cleanup := newJogManager(t)
 	defer cleanup()

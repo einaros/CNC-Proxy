@@ -585,6 +585,31 @@ test("the mobile work area actions menu exposes state and restores focus on dism
   assert.equal(focusCount, 1);
 });
 
+test("fresh machine status clears a terminal stale jog recovery error", () => {
+  const state = {
+    jog: {
+      caps: { enabled: true },
+      armed: false,
+      error: "machine status stopped responding; movement was disarmed so the proxy can reconnect",
+      errorCode: "stale_status",
+      availability: null,
+    },
+  };
+  const ctx = buildContext(
+    ["hasMPos", "isTransientJogBlock", "syncJogAvailabilityFromMachine"],
+    [],
+    { state },
+  );
+
+  vm.runInContext(`syncJogAvailabilityFromMachine({ state: "Idle", stale: true, age_ms: 12000, mpos: { x: 0, y: 0, z: 0 } })`, ctx);
+  assert.equal(state.jog.errorCode, "stale_status", "the error remains until recovery is observed");
+
+  vm.runInContext(`syncJogAvailabilityFromMachine({ state: "Idle", stale: false, age_ms: 20, mpos: { x: 0, y: 0, z: 0 } })`, ctx);
+  assert.equal(state.jog.error, "");
+  assert.equal(state.jog.errorCode, "");
+  assert.equal(state.jog.availability.available, true);
+});
+
 test("active-job context maps captured geometry into the current work coordinates and requires a complete probe plan", () => {
   const ctx = buildContext([
     "axisValue",
