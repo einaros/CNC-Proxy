@@ -56,6 +56,8 @@ type FakeMachine struct {
 	holdActive          bool              // feed hold freezes simulated motion/program time
 	holdStarted         time.Time
 	holdResumeState     string
+	suspendActive       bool // player suspend freezes program time but permits manual motion
+	suspendStarted      time.Time
 	absolute            bool    // simulated modal distance mode for ordinary G0/G1 moves
 	arcAbsolute         bool    // simulated modal arc-center mode, G90.1/G91.1
 	plane               int     // simulated modal arc plane, G17/G18/G19
@@ -144,6 +146,8 @@ func (m *FakeMachine) SetStatus(s string) {
 	m.holdActive = false
 	m.holdStarted = time.Time{}
 	m.holdResumeState = ""
+	m.suspendActive = false
+	m.suspendStarted = time.Time{}
 }
 
 // SetStatusReplyDelay delays replies to `?` status polls. It is a test hook for
@@ -700,6 +704,8 @@ func (m *FakeMachine) applyControlLocked(ctrl byte, now time.Time) string {
 		m.holdActive = false
 		m.holdStarted = time.Time{}
 		m.holdResumeState = ""
+		m.suspendActive = false
+		m.suspendStarted = time.Time{}
 		m.setStatusStateLocked("Alarm")
 		m.upsertStatusFieldLocked("H", "1")
 		return "ALARM: Abort during cycle\r\n"
@@ -718,6 +724,8 @@ func (m *FakeMachine) clearAlarmLocked() {
 	m.holdActive = false
 	m.holdStarted = time.Time{}
 	m.holdResumeState = ""
+	m.suspendActive = false
+	m.suspendStarted = time.Time{}
 	m.setStatusStateLocked("Idle")
 	m.removeStatusFieldLocked("H")
 }
@@ -731,6 +739,8 @@ func (m *FakeMachine) homeLocked(now time.Time) {
 	m.cycleSticky = fakeCycleSticky{}
 	m.motionMode = fakeMotionRapid
 	m.motionCode = 0
+	m.suspendActive = false
+	m.suspendStarted = time.Time{}
 	bracketed, _, fields, ok := parseFakeStatus(m.status)
 	if !ok {
 		m.status = "<Idle|MPos:0.0000,0.0000,0.0000|WPos:0.0000,0.0000,0.0000|C:2,4,0,1|T:0,0.000>"
@@ -743,6 +753,8 @@ func (m *FakeMachine) homeLocked(now time.Time) {
 
 func (m *FakeMachine) startProgramLocked(path string, content []byte, now time.Time) {
 	m.advanceMotionLocked(now)
+	m.suspendActive = false
+	m.suspendStarted = time.Time{}
 	m.program = nil
 	startMotionCount := len(m.motion)
 	lines := fakeExecutableProgramLines(string(content))
@@ -1019,6 +1031,42 @@ func (m *FakeMachine) handleManaged(c net.Conn, line string) {
 		m.gcodes = append(m.gcodes, line)
 		m.mu.Unlock()
 		m.send(c, protocol.CmdNormalInfo, "Rebooting machine in 3 seconds...\n")
+	case strings.EqualFold(line, "suspend"):
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		now := time.Now()
+		m.advanceMotionLocked(now)
+		m.advanceProgramLocked(now)
+		_, state, _, ok := parseFakeStatus(m.status)
+		if !ok || state != "Run" {
+			m.mu.Unlock()
+			m.send(c, protocol.CmdNormalInfo, "error: There is no running file to suspend.\r\n")
+			return
+		}
+		m.suspendActive = true
+		m.suspendStarted = now
+		m.setStatusStateLocked("Pause")
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, "Suspended, resume to continue playing\r\n")
+	case strings.EqualFold(line, "resume"):
+		m.mu.Lock()
+		m.gcodes = append(m.gcodes, line)
+		if !m.suspendActive {
+			m.mu.Unlock()
+			m.send(c, protocol.CmdNormalInfo, "error: There is no suspended file to resume.\r\n")
+			return
+		}
+		now := time.Now()
+		pausedFor := now.Sub(m.suspendStarted)
+		if m.program != nil {
+			m.program.start = m.program.start.Add(pausedFor)
+			m.program.end = m.program.end.Add(pausedFor)
+		}
+		m.suspendActive = false
+		m.suspendStarted = time.Time{}
+		m.setStatusStateLocked("Run")
+		m.mu.Unlock()
+		m.send(c, protocol.CmdNormalInfo, "Resuming playing\r\n")
 	case strings.EqualFold(line, "M999"):
 		m.mu.Lock()
 		m.gcodes = append(m.gcodes, line)
@@ -1577,6 +1625,9 @@ func (m *FakeMachine) applyToolGcodeLocked(line string) bool {
 		return false
 	}
 	switch {
+	case mcode == 5:
+		m.stopSpindleLocked()
+		return true
 	case mcode == 841 || (mcode == 494 && (subcode == 0 || subcode == 1)):
 		m.probeLaserActive = true
 		return true
@@ -1612,6 +1663,22 @@ func (m *FakeMachine) applyToolGcodeLocked(line string) bool {
 	default:
 		return false
 	}
+}
+
+func (m *FakeMachine) stopSpindleLocked() {
+	bracketed, state, fields, ok := parseFakeStatus(m.status)
+	if !ok {
+		return
+	}
+	if i := findFakeStatusField(fields, "S"); i >= 0 {
+		parts := strings.Split(fields[i].value, ",")
+		for len(parts) < 3 {
+			parts = append(parts, "0")
+		}
+		parts[0], parts[1] = "0", "0"
+		fields[i].value = strings.Join(parts, ",")
+	}
+	m.status = formatFakeStatus(bracketed, state, fields)
 }
 
 func (m *FakeMachine) applyRelativeMoveLocked(delta map[byte]float64, feedMMMin float64) {
@@ -2185,6 +2252,10 @@ func (m *FakeMachine) statusAtLocked(now time.Time) string {
 		return m.status
 	}
 	m.advanceMotionLocked(now)
+	if m.suspendActive {
+		m.setStatusStateLocked("Pause")
+		return m.status
+	}
 	m.advanceProgramLocked(now)
 	return m.status
 }

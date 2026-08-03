@@ -754,7 +754,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(body), `id="workarea-plot"`) || !strings.Contains(string(body), `id="status-connection"`) {
 		t.Errorf("index missing work area visualization or connection status")
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `type="module"`, `/app.js?v=summary-dashboard-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `id="notice-clear"`, `.status-item`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `type="module"`, `/app.js?v=job-pause-1`} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -2121,6 +2121,57 @@ func TestPostControl(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("unknown action: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestPostControlJobPauseAndResume(t *testing.T) {
+	srv, m, tr := serverWithMachine(t)
+	m.SetStatus("<Run|MPos:0,0,-10|WPos:0,0,-10|S:12000,12000,100|P:1,10,1>")
+	tr.Observe(machine.Run)
+
+	resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": "pause_job"})
+	if resp.StatusCode != http.StatusAccepted {
+		resp.Body.Close()
+		t.Fatalf("pause status = %d, want 202", resp.StatusCode)
+	}
+	var paused service.JobControlResult
+	if err := json.NewDecoder(resp.Body).Decode(&paused); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !paused.Verified || paused.State != machine.Pause {
+		t.Fatalf("pause result = %+v", paused)
+	}
+
+	resp = postJSON(t, srv.URL+"/api/gcode/active/paused-command", service.PausedJobCommandRequest{Action: "stop_spindle"})
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("stop spindle status = %d, want 200", resp.StatusCode)
+	}
+	var stopped service.PausedJobCommandResult
+	if err := json.NewDecoder(resp.Body).Decode(&stopped); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !stopped.Verified {
+		t.Fatalf("stop spindle result = %+v", stopped)
+	}
+
+	resp = postJSON(t, srv.URL+"/api/control", map[string]string{"action": "resume_job"})
+	if resp.StatusCode != http.StatusAccepted {
+		resp.Body.Close()
+		t.Fatalf("resume status = %d, want 202", resp.StatusCode)
+	}
+	var resumed service.JobControlResult
+	if err := json.NewDecoder(resp.Body).Decode(&resumed); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !resumed.Verified || resumed.State != machine.Run {
+		t.Fatalf("resume result = %+v", resumed)
 	}
 }
 

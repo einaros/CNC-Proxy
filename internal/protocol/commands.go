@@ -334,3 +334,70 @@ func IsStatusQuery(line string) bool {
 	_, requiresIdle := ClassifyGcode(line)
 	return !requiresIdle
 }
+
+// CanRunWhilePaused reports whether a state-changing MDI line belongs to the
+// small manual-motion/spindle subset the firmware player's suspend mode is
+// designed to permit. Filesystem commands, probing, homing, tool changes,
+// persistent settings, and unknown console commands remain Idle-only.
+func CanRunWhilePaused(line string) bool {
+	line = normalizeLine(line)
+	if line == "" {
+		return false
+	}
+	if strings.HasPrefix(line, "$j=") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "$j="))
+	} else if strings.HasPrefix(line, "$j ") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "$j"))
+	}
+
+	allowedG := map[int]bool{
+		0: true, 1: true, 2: true, 3: true,
+		17: true, 18: true, 19: true, 20: true, 21: true,
+		53: true, 90: true, 91: true, 94: true,
+	}
+	allowedM := map[int]bool{3: true, 4: true, 5: true, 7: true, 8: true, 9: true, 220: true}
+	seenCommand := false
+	seenModalWord := false
+	for i := 0; i < len(line); {
+		c := line[i]
+		if c == ';' || c == '(' {
+			break
+		}
+		if c < 'a' || c > 'z' {
+			i++
+			continue
+		}
+		i++
+		start := i
+		if i < len(line) && (line[i] == '+' || line[i] == '-') {
+			i++
+		}
+		for i < len(line) && ((line[i] >= '0' && line[i] <= '9') || line[i] == '.') {
+			i++
+		}
+		value := line[start:i]
+		switch c {
+		case 'g', 'm':
+			if value == "" {
+				return false
+			}
+			n, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return false
+			}
+			base := int(n)
+			if (c == 'g' && !allowedG[base]) || (c == 'm' && !allowedM[base]) {
+				return false
+			}
+			seenCommand = true
+		case 'x', 'y', 'z', 'a', 'b', 'c', 'f', 's', 'i', 'j', 'k', 'r':
+			if value == "" {
+				return false
+			}
+			seenModalWord = true
+		default:
+			return false
+		}
+	}
+	return seenCommand || seenModalWord
+}

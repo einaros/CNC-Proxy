@@ -74,6 +74,25 @@ func TestClassifyGcode(t *testing.T) {
 	}
 }
 
+func TestCanRunWhilePaused(t *testing.T) {
+	for _, line := range []string{
+		"G53 G0 Z-3", "G91 G0 X-10", "G1 Y5 F300", "M5", "M3 S12000",
+		"M220 S80", "$J=G91 X1 F100", "X1", "S0", "N20 G90",
+	} {
+		if !CanRunWhilePaused(line) {
+			t.Errorf("CanRunWhilePaused(%q) = false, want true", line)
+		}
+	}
+	for _, line := range []string{
+		"", "play /sd/gcodes/job.nc", "rm /sd/gcodes/job.nc", "G30", "G38.2 Z-5 F50",
+		"G28", "$H", "$X", "M6 T2", "T2", "M500", "G10 L20 P0 Z0", "M400",
+	} {
+		if CanRunWhilePaused(line) {
+			t.Errorf("CanRunWhilePaused(%q) = true, want false", line)
+		}
+	}
+}
+
 func TestUnescapeRoundTrip(t *testing.T) {
 	for _, s := range []string{"a b c", "f?o*o!~", "/sd/gcodes/my part.nc", "plain"} {
 		if got := Unescape(Escape(s)); got != s {

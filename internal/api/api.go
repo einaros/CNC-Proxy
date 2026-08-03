@@ -79,8 +79,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gcode", s.postGcode) // body: {line}
 	mux.HandleFunc("POST /api/origin/reference", s.setMachineOrigin)
 	mux.HandleFunc("GET /api/gcode/active", s.getActiveGcode)
-	mux.HandleFunc("POST /api/gcode/active", s.selectActiveGcode)      // body: {path}
-	mux.HandleFunc("POST /api/gcode/active/run", s.runActiveGcode)     // runs selected path
+	mux.HandleFunc("POST /api/gcode/active", s.selectActiveGcode)  // body: {path}
+	mux.HandleFunc("POST /api/gcode/active/run", s.runActiveGcode) // runs selected path
+	mux.HandleFunc("POST /api/gcode/active/paused-command", s.runPausedJobCommand)
 	mux.HandleFunc("POST /api/tool/current", s.setCurrentTool)         // body: {tool_id}
 	mux.HandleFunc("POST /api/tool/change", s.changeTool)              // body: {tool_id}
 	mux.HandleFunc("POST /api/tool/continue", s.continueToolChange)    // runs M490.2
@@ -92,7 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/probe/3d", s.probe3D)                    // controller-style wired M480 3D probe
 	mux.HandleFunc("POST /api/outline/trace", s.traceOutline)          // serialized probe-laser outline trace
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
-	mux.HandleFunc("POST /api/control", s.postControl)                 // body: {action: hold|resume|halt|recover|unlock|home|reset}
+	mux.HandleFunc("POST /api/control", s.postControl)                 // realtime, job-player, or recovery action
 	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
 	mux.HandleFunc("PUT /api/ui/settings", s.putUISettings)
 	mux.HandleFunc("POST /api/machine/learn", s.learnMachineParameters)
@@ -319,6 +320,8 @@ func (s *Server) mapError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrToolChangeUnavailable):
 		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrJobControlUnavailable):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrMachineStatusStale):
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, service.ErrMachineParametersUnavailable):
@@ -427,6 +430,19 @@ func (s *Server) traceOutline(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getActiveGcode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.ActiveGcode())
+}
+
+func (s *Server) runPausedJobCommand(w http.ResponseWriter, r *http.Request) {
+	var body service.PausedJobCommandRequest
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	result, err := s.svc.RunPausedJobCommand(body)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) selectActiveGcode(w http.ResponseWriter, r *http.Request) {
@@ -564,11 +580,9 @@ func (s *Server) learnMachineParameters(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, res)
 }
 
-// postControl injects a realtime control action, or runs an explicit alarm
-// recovery action. Hold/resume/halt are out-of-band and intentionally work even
-// while the machine is moving. Recover/unlock/home/reset are normal serialized
-// firmware commands, but bypass generic idle-gated gcode because they are only
-// useful once the machine is in Alarm.
+// postControl injects a realtime control action, transitions the firmware job
+// player, or runs an explicit alarm recovery action. Realtime hold/resume/halt
+// remain out-of-band. Job pause/resume and recovery are serialized commands.
 func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action string `json:"action"`
@@ -577,6 +591,24 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(body.Action))
+	if action == "pause_job" || action == "pause" || action == "suspend" {
+		result, err := s.svc.PauseJob()
+		if err != nil {
+			s.mapError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+		return
+	}
+	if action == "resume_job" {
+		result, err := s.svc.ResumeJob()
+		if err != nil {
+			s.mapError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+		return
+	}
 	if action == "recover" || action == "unlock" || action == "home" || action == "reset" {
 		result, err := s.svc.RecoverAlarm(action)
 		if err != nil {
@@ -588,14 +620,14 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 	}
 	var c byte
 	switch action {
-	case "hold", "feedhold", "pause":
+	case "hold", "feedhold":
 		c = service.ControlFeedHold
 	case "resume":
 		c = service.ControlResume
 	case "halt", "stop", "estop":
 		c = service.ControlHalt
 	default:
-		writeErr(w, http.StatusBadRequest, "action must be one of: hold, resume, halt, recover, unlock, home, reset")
+		writeErr(w, http.StatusBadRequest, "action must be one of: hold, resume, halt, pause_job, resume_job, recover, unlock, home, reset")
 		return
 	}
 	if err := s.svc.SendControl(c); err != nil {

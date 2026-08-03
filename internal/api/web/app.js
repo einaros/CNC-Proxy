@@ -6444,6 +6444,8 @@ function renderActiveGcode() {
   const run = document.getElementById("active-gcode-run");
   if (!title || !meta || !run) return;
 
+  renderActiveGcodeControls(active);
+
   if (!active.path) {
     title.textContent = "No active gcode selected.";
     meta.textContent = "-";
@@ -6491,6 +6493,30 @@ function renderActiveGcode() {
   renderActiveJobProgress(live, preview);
   drawGcodePreview(preview, live);
   renderDashboard();
+}
+
+function renderActiveGcodeControls(active) {
+  const machineState = state.machine?.state || "";
+  const pending = !!state.activeGcodePending;
+  const run = document.getElementById("active-gcode-run");
+  const pause = document.getElementById("active-gcode-pause");
+  const paused = document.getElementById("paused-job-controls");
+  const raise = document.getElementById("paused-job-raise");
+  const stopSpindle = document.getElementById("paused-job-stop-spindle");
+  const resume = document.getElementById("active-gcode-resume");
+  if (!run || !pause || !paused || !raise || !stopSpindle || !resume) return;
+
+  const running = machineState === "Run";
+  const suspended = machineState === "Pause";
+  run.hidden = running || suspended;
+  pause.hidden = !running;
+  paused.hidden = !suspended;
+  pause.disabled = pending;
+  raise.disabled = pending;
+  stopSpindle.disabled = pending;
+  resume.disabled = pending;
+  run.disabled = pending;
+  if (!pending) setSoftDisabled(run, !active?.runnable || machineState !== "Idle");
 }
 
 function renderDashboard() {
@@ -8148,6 +8174,65 @@ async function runActiveGcode() {
     appendGcodeLine({ seq: "local-" + Date.now(), dir: "recv", source: "api", text: "error: " + e.message });
     setActiveFeedback("Run failed: " + e.message, "error");
     setNotice("Run failed: " + e.message, "error", "active-gcode-run");
+  } finally {
+    state.activeGcodePending = "";
+    renderActiveGcode();
+  }
+}
+
+async function runActiveJobControl(action) {
+  if (state.activeGcodePending) return;
+  if (action === "pause_job" && !confirm("Pause the running job and enable manual paused controls?")) return;
+  if (action === "resume_job") {
+    const spindle = state.machine?.spindle;
+    if (spindle && Number(spindle.target_rpm || 0) === 0 && Number(spindle.current_rpm || 0) === 0 &&
+        !confirm("The spindle is stopped. Resume will restore the saved job state; continue?")) return;
+  }
+  state.activeGcodePending = action;
+  setActiveFeedback(action === "pause_job" ? "Pausing job..." : "Restoring the paused job...", "");
+  renderActiveGcode();
+  try {
+    const response = await request("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const result = await response.json();
+    setActiveFeedback(result.message, result.verified ? "ok" : "error");
+    await pollMachine();
+  } catch (error) {
+    setActiveFeedback((action === "pause_job" ? "Pause failed: " : "Resume failed: ") + error.message, "error");
+  } finally {
+    state.activeGcodePending = "";
+    renderActiveGcode();
+  }
+}
+
+async function runPausedJobCommand(action) {
+  if (state.activeGcodePending) return;
+  const body = { action };
+  if (action === "raise_z") {
+    const distance = Number(document.getElementById("paused-job-raise-distance")?.value);
+    if (!Number.isFinite(distance) || distance <= 0 || distance > 50) {
+      setActiveFeedback("Raise distance must be greater than 0 and at most 50 mm.", "error");
+      return;
+    }
+    body.distance_mm = distance;
+  }
+  state.activeGcodePending = action;
+  setActiveFeedback(action === "raise_z" ? "Raising Z while the job is paused..." : "Stopping spindle while the job is paused...", "");
+  renderActiveGcode();
+  try {
+    const response = await request("/api/gcode/active/paused-command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    setActiveFeedback(result.message, result.verified ? "ok" : "error");
+    await pollMachine();
+  } catch (error) {
+    setActiveFeedback("Paused command failed: " + error.message, "error");
   } finally {
     state.activeGcodePending = "";
     renderActiveGcode();
@@ -11250,6 +11335,10 @@ function init() {
   document.getElementById("tool-set-select").onchange = (e) => handleToolSelect("set", e.target.value);
   document.getElementById("tool-change-select").onchange = (e) => handleToolSelect("change", e.target.value);
   bindButtonAction(document.getElementById("active-gcode-run"), runActiveGcode);
+  bindButtonAction(document.getElementById("active-gcode-pause"), () => runActiveJobControl("pause_job"));
+  bindButtonAction(document.getElementById("active-gcode-resume"), () => runActiveJobControl("resume_job"));
+  bindButtonAction(document.getElementById("paused-job-raise"), () => runPausedJobCommand("raise_z"));
+  bindButtonAction(document.getElementById("paused-job-stop-spindle"), () => runPausedJobCommand("stop_spindle"));
   const gcodeSourceScroll = document.getElementById("active-gcode-source-scroll");
   const markGcodeSourceInteraction = () => {
     activeGcodeSource.userScrollingUntil = Date.now() + 2000;

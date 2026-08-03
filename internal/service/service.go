@@ -1779,6 +1779,11 @@ const gcodeReplyCap = 30 * time.Second
 const recoveryStatusTimeout = 2 * time.Second
 
 const (
+	jobControlVerifyTimeout = 30 * time.Second
+	jobControlPollInterval  = 150 * time.Millisecond
+)
+
+const (
 	traceStatusPollInterval = 250 * time.Millisecond
 	traceStatusMinTimeout   = 5 * time.Second
 	traceStatusMaxTimeout   = 2 * time.Minute
@@ -1809,9 +1814,11 @@ type RecoveryResult struct {
 //
 //   - requiresIdle: read-only queries (M114, version, $G, bare M220, …) run
 //     regardless of machine state — observing state while a program runs is
-//     legitimate. Motion, modal/state changes, dual-nature SETs, and SD I/O
-//     require a fresh Idle machine and return session.ErrNotIdle otherwise
-//     (HTTP 503, retryable), so the proxy can never disturb a running program.
+//     legitimate. Motion, modal/state changes, dual-nature SETs, and SD I/O are
+//     accepted only from a fresh Idle state, or from Pause after the firmware
+//     player has saved the running job's state. Other states return
+//     session.ErrNotIdle (HTTP 503, retryable), so an ordinary command can never
+//     disturb a running program.
 //   - resp: whether the firmware will reply at all. Reply-expected commands are
 //     read to quiescence; fire-and-forget commands (which the firmware never
 //     acks over WiFi) are written and only briefly drained for a late error.
@@ -1824,7 +1831,20 @@ func (s *Service) SendGcode(line string) (string, error) {
 	s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, line)
 	resp, requireIdle := protocol.ClassifyGcode(line)
 	var out string
-	err := s.arb.WithMachine(requireIdle, func(c *client.Conn) error {
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		if requireIdle {
+			st, _ := s.arb.Tracker().Current()
+			if !s.arb.Tracker().Fresh(s.arb.StateMaxAge()) {
+				var err error
+				st, err = s.queryRecoveryStatus(c)
+				if err != nil {
+					return err
+				}
+			}
+			if st.State != machine.Idle && (st.State != machine.Pause || !protocol.CanRunWhilePaused(line)) {
+				return session.ErrNotIdle
+			}
+		}
 		o, e := c.SendGcodeLine(line, client.GcodeOpts{
 			ExpectReply: resp == protocol.ReplyExpected,
 			Cap:         gcodeReplyCap,
@@ -1841,6 +1861,202 @@ func (s *Service) SendGcode(line string) (string, error) {
 		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "ok")
 	}
 	return out, err
+}
+
+// JobControlResult reports a job-player transition that was verified by a
+// status response solicited on the same serialized machine connection.
+type JobControlResult struct {
+	Action   string        `json:"action"`
+	Command  string        `json:"command"`
+	State    machine.State `json:"state"`
+	Verified bool          `json:"verified"`
+	Message  string        `json:"message"`
+}
+
+// PausedJobCommandRequest describes a bounded manual action that is only valid
+// while the firmware player is suspended.
+type PausedJobCommandRequest struct {
+	Action     string  `json:"action"`
+	DistanceMM float64 `json:"distance_mm,omitempty"`
+}
+
+// PausedJobCommandResult reports the observed result of a paused-job action.
+type PausedJobCommandResult struct {
+	Action   string             `json:"action"`
+	Command  string             `json:"command"`
+	State    machine.State      `json:"state"`
+	MPos     machine.AxisValues `json:"mpos,omitempty"`
+	Verified bool               `json:"verified"`
+	Message  string             `json:"message"`
+}
+
+// PauseJob uses the firmware player's suspend command. Unlike realtime feed
+// hold, suspend saves the running job's position and modal state and explicitly
+// permits manual MDI before resume restores that saved state.
+func (s *Service) PauseJob() (JobControlResult, error) {
+	res := JobControlResult{Action: "pause_job", Command: "suspend"}
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			return err
+		}
+		if st.State != machine.Run {
+			return fmt.Errorf("%w: machine state is %s, want Run", ErrJobControlUnavailable, st.State)
+		}
+		s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "job pause (suspend)")
+		out, err := c.SendConsoleCommand("suspend", client.GcodeOpts{ExpectReply: true, Cap: gcodeReplyCap})
+		if out != "" {
+			s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+		}
+		if err != nil {
+			return err
+		}
+		st, err = s.waitForMachineState(c, jobControlVerifyTimeout, machine.Pause)
+		res.State = st.State
+		return err
+	})
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return res, err
+	}
+	res.Verified = true
+	res.Message = "Job paused. Manual commands are available until resume."
+	return res, nil
+}
+
+// ResumeJob asks the firmware player to restore the position and modal state
+// saved by suspend, then verifies that execution has returned to Run.
+func (s *Service) ResumeJob() (JobControlResult, error) {
+	res := JobControlResult{Action: "resume_job", Command: "resume"}
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			return err
+		}
+		if st.State != machine.Pause {
+			return fmt.Errorf("%w: machine state is %s, want Pause", ErrJobControlUnavailable, st.State)
+		}
+		s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, "job resume (resume)")
+		out, err := c.SendConsoleCommand("resume", client.GcodeOpts{ExpectReply: true, Cap: gcodeReplyCap})
+		if out != "" {
+			s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, out)
+		}
+		if err != nil {
+			return err
+		}
+		st, err = s.waitForMachineState(c, jobControlVerifyTimeout, machine.Run)
+		res.State = st.State
+		return err
+	})
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return res, err
+	}
+	res.Verified = true
+	res.Message = "Job resumed and the machine returned to Run."
+	return res, nil
+}
+
+// RunPausedJobCommand performs one of the deliberately small, observable
+// operations exposed beside the paused job. Arbitrary expert MDI remains
+// available through SendGcode, which is independently gated to Idle/Pause.
+func (s *Service) RunPausedJobCommand(req PausedJobCommandRequest) (PausedJobCommandResult, error) {
+	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
+	res := PausedJobCommandResult{Action: req.Action}
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			return err
+		}
+		if st.State != machine.Pause {
+			return fmt.Errorf("%w: machine state is %s, want Pause", ErrJobControlUnavailable, st.State)
+		}
+
+		var verified func(machine.Status) bool
+		switch req.Action {
+		case "stop_spindle":
+			res.Command = "M5"
+			verified = func(status machine.Status) bool {
+				return status.State == machine.Pause && status.Spindle != nil &&
+					math.Abs(status.Spindle.CurrentRPM) < 1 && math.Abs(status.Spindle.TargetRPM) < 1
+			}
+		case "raise_z":
+			if !finite(req.DistanceMM) || req.DistanceMM <= 0 || req.DistanceMM > 50 {
+				return fmt.Errorf("%w: raise distance must be greater than 0 and at most 50 mm", ErrInvalidArgument)
+			}
+			z, ok := st.MPos["z"]
+			if !ok || !finite(z) {
+				return fmt.Errorf("%w: machine Z position is unavailable", ErrJobControlUnavailable)
+			}
+			target := s.SafeZTargetMM(z + req.DistanceMM)
+			if target <= z+0.001 {
+				return fmt.Errorf("%w: Z is already at the configured safe ceiling", ErrJobControlUnavailable)
+			}
+			res.Command = fmt.Sprintf("G53 G0 Z%.4f", target)
+			verified = func(status machine.Status) bool {
+				actual, ok := status.MPos["z"]
+				return ok && status.State == machine.Pause && math.Abs(actual-target) <= 0.05
+			}
+		default:
+			return fmt.Errorf("%w: paused command action must be one of: raise_z, stop_spindle", ErrInvalidArgument)
+		}
+
+		s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, res.Command)
+		if _, err := c.SendGcodeLine(res.Command, client.GcodeOpts{ExpectReply: false, Cap: gcodeReplyCap}); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(jobControlVerifyTimeout)
+		for {
+			st, err = s.queryRecoveryStatus(c)
+			if err == nil && verified(st) {
+				res.State = st.State
+				res.MPos = st.MPos
+				return nil
+			}
+			if !time.Now().Before(deadline) {
+				if err != nil {
+					return fmt.Errorf("%w: command verification failed: %v", ErrJobControlUnavailable, err)
+				}
+				return fmt.Errorf("%w: command result was not observed", ErrJobControlUnavailable)
+			}
+			time.Sleep(jobControlPollInterval)
+		}
+	})
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return res, err
+	}
+	res.Verified = true
+	if req.Action == "raise_z" {
+		res.Message = fmt.Sprintf("Z raised to %.3f mm while the job remains paused.", res.MPos["z"])
+	} else {
+		res.Message = "Spindle stopped while the job remains paused."
+	}
+	s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, res.Message)
+	return res, nil
+}
+
+func (s *Service) waitForMachineState(c *client.Conn, timeout time.Duration, wanted ...machine.State) (machine.Status, error) {
+	deadline := time.Now().Add(timeout)
+	var last machine.Status
+	for {
+		st, err := s.queryRecoveryStatus(c)
+		if err == nil {
+			last = st
+			for _, state := range wanted {
+				if st.State == state {
+					return st, nil
+				}
+			}
+		}
+		if !time.Now().Before(deadline) {
+			if err != nil {
+				return last, fmt.Errorf("%w: status verification failed: %v", ErrJobControlUnavailable, err)
+			}
+			return last, fmt.Errorf("%w: machine remained in %s", ErrJobControlUnavailable, last.State)
+		}
+		time.Sleep(jobControlPollInterval)
+	}
 }
 
 // ResolveMachineOrigin resolves a UI reference against server-owned learned
@@ -3218,5 +3434,6 @@ var (
 	ErrActiveGcodeUnavailable       = errors.New("service: active gcode is not runnable")
 	ErrProbeUnavailable             = errors.New("service: probe unavailable")
 	ErrToolChangeUnavailable        = errors.New("service: tool change is not awaiting confirmation")
+	ErrJobControlUnavailable        = errors.New("service: job control unavailable")
 	ErrDirectoryNotEmpty            = errors.New("service: directory not empty")
 )

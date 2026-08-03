@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -2204,6 +2205,69 @@ func TestSendGcodeMotionRequiresIdle(t *testing.T) {
 	}
 	if g := m.Gcodes(); len(g) != 1 || g[0] != "G91 G0 X-10" {
 		t.Errorf("machine gcodes = %v, want the move", g)
+	}
+}
+
+func TestPausedJobAllowsVerifiedManualCommandsBeforeResume(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	m.SetStatus("<Run|MPos:0,0,-10|WPos:0,0,-10|S:12000,12000,100|P:10,25,5>")
+	tr.Observe(machine.Run)
+
+	paused, err := svc.PauseJob()
+	if err != nil {
+		t.Fatalf("PauseJob: %v", err)
+	}
+	if !paused.Verified || paused.State != machine.Pause {
+		t.Fatalf("PauseJob result = %+v", paused)
+	}
+
+	if _, err := svc.SendGcode("G53 G0 X1"); err != nil {
+		t.Fatalf("generic MDI during Pause: %v", err)
+	}
+	if _, err := svc.SendGcode("rm /sd/gcodes/job.nc"); !errors.Is(err, session.ErrNotIdle) {
+		t.Fatalf("filesystem command during Pause = %v, want ErrNotIdle", err)
+	}
+
+	raised, err := svc.RunPausedJobCommand(PausedJobCommandRequest{Action: "raise_z", DistanceMM: 5})
+	if err != nil {
+		t.Fatalf("raise paused Z: %v", err)
+	}
+	if !raised.Verified || math.Abs(raised.MPos["z"]-(-5)) > 0.05 {
+		t.Fatalf("raise result = %+v", raised)
+	}
+
+	stopped, err := svc.RunPausedJobCommand(PausedJobCommandRequest{Action: "stop_spindle"})
+	if err != nil {
+		t.Fatalf("stop paused spindle: %v", err)
+	}
+	if !stopped.Verified || stopped.State != machine.Pause {
+		t.Fatalf("stop result = %+v", stopped)
+	}
+
+	resumed, err := svc.ResumeJob()
+	if err != nil {
+		t.Fatalf("ResumeJob: %v", err)
+	}
+	if !resumed.Verified || resumed.State != machine.Run {
+		t.Fatalf("ResumeJob result = %+v", resumed)
+	}
+
+	got := m.Gcodes()
+	want := []string{"suspend", "G53 G0 X1", "G53 G0 Z-5.0000", "M5", "resume"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("machine commands = %v, want %v", got, want)
+	}
+}
+
+func TestJobPauseRejectsNonRunningMachine(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	m.SetStatus("<Idle|MPos:0,0,-10|WPos:0,0,-10>")
+	tr.Observe(machine.Idle)
+	if _, err := svc.PauseJob(); !errors.Is(err, ErrJobControlUnavailable) {
+		t.Fatalf("PauseJob while Idle = %v, want ErrJobControlUnavailable", err)
+	}
+	if len(m.Gcodes()) != 0 {
+		t.Fatalf("pause command reached Idle machine: %v", m.Gcodes())
 	}
 }
 
