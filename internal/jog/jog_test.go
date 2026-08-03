@@ -147,6 +147,37 @@ func TestManagerSingleActiveSession(t *testing.T) {
 	}
 }
 
+func TestManagerDisarmActiveWaitsForLeaseRelease(t *testing.T) {
+	mgr, _, cleanup := newJogManager(t)
+	defer cleanup()
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+	armed := drainUntil(t, s, "state")
+	if armed.Armed == nil || !*armed.Armed || !s.hasLease() {
+		t.Fatalf("armed state = %+v lease=%t, want active lease", armed, s.hasLease())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := mgr.DisarmActive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	disarmed := drainUntil(t, s, "state")
+	if disarmed.Seq != 0 || disarmed.Armed == nil || *disarmed.Armed || s.hasLease() {
+		t.Fatalf("external disarm state = %+v lease=%t, want released lease", disarmed, s.hasLease())
+	}
+	if err := mgr.arb.WithMachine(true, func(*client.Conn) error { return nil }); err != nil {
+		t.Fatalf("machine operation after DisarmActive: %v", err)
+	}
+}
+
 func TestActiveSessionAvailabilityIgnoresItself(t *testing.T) {
 	mgr, _, cleanup := newJogManager(t)
 	defer cleanup()

@@ -20,6 +20,7 @@ import (
 	"github.com/uwin/cnc-proxy/internal/carveratest"
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/httpauth"
+	"github.com/uwin/cnc-proxy/internal/jog"
 	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
@@ -108,6 +109,108 @@ func TestWriteThenReadAndStat(t *testing.T) {
 	got, _ := io.ReadAll(rf)
 	if string(got) != string(content) {
 		t.Errorf("read back = %q", got)
+	}
+}
+
+func TestWebDAVSaveDisarmsMovementAndAllowsSync(t *testing.T) {
+	m, err := carveratest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	status := "<Idle|MPos:0,0,0|WPos:0,0,0>"
+	m.SetStatus(status)
+
+	st, _ := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	tracker := machine.NewTracker()
+	if !tracker.ObserveStatusPayload(status) {
+		t.Fatal("status precondition failed")
+	}
+	arb := session.New(session.Config{
+		Tracker:     tracker,
+		StateMaxAge: time.Second,
+		Dial: func() (*client.Conn, error) {
+			return client.Dial(m.Addr(), 2*time.Second, client.WithUploadStartDelay(0))
+		},
+	})
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jogCfg := jog.DefaultConfig()
+	jogCfg.Tick = 20 * time.Millisecond
+	jogCfg.StatusInterval = 40 * time.Millisecond
+	jogMgr := jog.New(arb, jogCfg)
+	jogSession, err := jogMgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jogSession.Close()
+	waitForDAVJogEvent(t, jogSession, "hello")
+	jogSession.Arm(1)
+	waitForDAVJogEvent(t, jogSession, "ack")
+	armed := waitForDAVJogEvent(t, jogSession, "state")
+	if armed.Armed == nil || !*armed.Armed {
+		t.Fatalf("jog state before WebDAV save = %+v, want armed", armed)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	eng := synceng.New(synceng.Config{Store: st, Arbiter: arb, OpTimeout: 3 * time.Second, BaseBackoff: time.Millisecond})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		eng.Run(ctx, 10*time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	srv := httptest.NewServer(NewWithOptions(svc, Options{MovementDisarmer: jogMgr}).Handler(""))
+	defer srv.Close()
+	content := []byte("G90\nG0 X5 Y5\n")
+	resp, err := http.DefaultClient.Do(mustReq(t, http.MethodPut, srv.URL+"/auto-disarm.nc", bytes.NewReader(content)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT status = %d, want successful save", resp.StatusCode)
+	}
+	disarmed := waitForDAVJogEvent(t, jogSession, "state")
+	if disarmed.Seq != 0 || disarmed.Armed == nil || *disarmed.Armed {
+		t.Fatalf("jog state after WebDAV save = %+v, want server-initiated disarm", disarmed)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, ok := m.File("/sd/gcodes/auto-disarm.nc")
+		if ok && bytes.Equal(got, content) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("saved WebDAV file did not sync after automatic disarm; machine content=%q present=%t", got, ok)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForDAVJogEvent(t *testing.T, session *jog.Session, eventType string) jog.Event {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event, ok := <-session.Events():
+			if !ok {
+				t.Fatalf("jog events closed before %q", eventType)
+			}
+			if event.Type == eventType {
+				return event
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for jog event %q", eventType)
+		}
 	}
 }
 

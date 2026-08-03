@@ -1,13 +1,16 @@
 package davfs
 
 import (
+	"context"
 	"encoding/xml"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path"
 	"runtime"
+	"time"
 
 	"golang.org/x/net/webdav"
 
@@ -136,20 +139,21 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 // deferred-sync behavior: the write completes locally and syncs to the machine
 // later. The WebDAV client sees an immediate success.
 type writeFile struct {
-	svc     *service.Service
-	name    string
-	tmp     *os.File
-	tmpPath string
-	cr      *contentRange
-	closed  bool
+	svc              *service.Service
+	name             string
+	tmp              *os.File
+	tmpPath          string
+	cr               *contentRange
+	movementDisarmer MovementDisarmer
+	closed           bool
 }
 
-func newWriteFile(svc *service.Service, name string, cr *contentRange) (*writeFile, error) {
+func newWriteFile(svc *service.Service, name string, cr *contentRange, movementDisarmer MovementDisarmer) (*writeFile, error) {
 	tmp, err := os.CreateTemp("", "davfs-upload-*")
 	if err != nil {
 		return nil, err
 	}
-	wf := &writeFile{svc: svc, name: name, tmp: tmp, tmpPath: tmp.Name(), cr: cr}
+	wf := &writeFile{svc: svc, name: name, tmp: tmp, tmpPath: tmp.Name(), cr: cr, movementDisarmer: movementDisarmer}
 	// A WebDAV client may abandon a write without calling Close (crash, dropped
 	// connection). A finalizer reclaims the temp file so they can't accumulate.
 	runtime.SetFinalizer(wf, func(f *writeFile) {
@@ -218,14 +222,30 @@ func (f *writeFile) Close() error {
 		return err
 	}
 	var upErr error
+	syncQueued := false
 	if f.cr != nil {
-		_, _, upErr = f.svc.UploadRange(f.name, f.cr.start, f.cr.end, f.cr.total, f.tmp)
+		_, syncQueued, upErr = f.svc.UploadRange(f.name, f.cr.start, f.cr.end, f.cr.total, f.tmp)
 	} else {
 		_, upErr = f.svc.Upload(f.name, f.tmp)
+		syncQueued = upErr == nil
 	}
 	closeErr := f.tmp.Close()
 	if upErr != nil {
 		return upErr
 	}
+	if syncQueued {
+		f.disarmMovement()
+	}
 	return closeErr
+}
+
+func (f *writeFile) disarmMovement() {
+	if f.movementDisarmer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := f.movementDisarmer.DisarmActive(ctx); err != nil {
+		log.Printf("webdav: saved %s but could not disarm movement for sync: %v", f.name, err)
+	}
 }

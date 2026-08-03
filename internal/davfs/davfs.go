@@ -41,11 +41,28 @@ import (
 
 // FS implements webdav.FileSystem backed by the service.
 type FS struct {
-	svc *service.Service
+	svc              *service.Service
+	movementDisarmer MovementDisarmer
+}
+
+// MovementDisarmer releases an interactive movement lease after a WebDAV save
+// queues machine sync work.
+type MovementDisarmer interface {
+	DisarmActive(context.Context) error
+}
+
+// Options configures optional WebDAV integrations.
+type Options struct {
+	MovementDisarmer MovementDisarmer
 }
 
 // New returns a WebDAV filesystem over the service.
-func New(svc *service.Service) *FS { return &FS{svc: svc} }
+func New(svc *service.Service) *FS { return NewWithOptions(svc, Options{}) }
+
+// NewWithOptions returns a WebDAV filesystem with optional integrations.
+func NewWithOptions(svc *service.Service, opts Options) *FS {
+	return &FS{svc: svc, movementDisarmer: opts.MovementDisarmer}
+}
 
 // Handler returns a ready-to-serve WebDAV HTTP handler.
 func (fs *FS) Handler(prefix string) http.Handler {
@@ -317,7 +334,7 @@ func (fs *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileM
 		if method == "LOCK" {
 			return newDiscardFile(name), nil
 		}
-		return newWriteFile(fs.svc, svcPath(name), contentRangeFromContext(ctx))
+		return newWriteFile(fs.svc, svcPath(name), contentRangeFromContext(ctx), fs.movementDisarmer)
 	}
 	// Read or directory open.
 	if isRoot(name) {

@@ -251,7 +251,9 @@ func main() {
 		}
 	}()
 
-	davSrv := hardenedDAVServer(*davAddr, httpauth.Middleware(authCfg, limitRequestBody(mib(*apiUploadMB), davfs.New(svc).Handler(""))))
+	davSrv := hardenedDAVServer(*davAddr, httpauth.Middleware(authCfg, limitRequestBody(mib(*apiUploadMB), davfs.NewWithOptions(svc, davfs.Options{
+		MovementDisarmer: jogMgr,
+	}).Handler(""))))
 	go func() {
 		log.Printf("webdav: listening on %s (mount this address)", *davAddr)
 		if err := davSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

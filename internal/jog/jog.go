@@ -217,6 +217,7 @@ type MotionEvent struct {
 type command struct {
 	typ      string
 	seq      int64
+	complete chan struct{}
 	action   string
 	axis     string
 	distance float64
@@ -368,6 +369,19 @@ func (m *Manager) clearActive(s *Session) {
 	m.mu.Unlock()
 }
 
+// DisarmActive releases the machine lease held by the current jog session.
+// It waits for the session loop to process the disarm so callers may safely
+// begin work that needs the arbiter operation lock after this method returns.
+func (m *Manager) DisarmActive(ctx context.Context) error {
+	m.mu.Lock()
+	active := m.active
+	m.mu.Unlock()
+	if active == nil {
+		return nil
+	}
+	return active.disarmAndWait(ctx)
+}
+
 // Error is a stable jog error with an API code.
 type Error struct {
 	Code    string
@@ -435,6 +449,26 @@ func (s *Session) Arm(seq int64) { s.enqueue(command{typ: "arm", seq: seq}) }
 
 // Disarm releases the machine lease.
 func (s *Session) Disarm(seq int64) { s.enqueue(command{typ: "disarm", seq: seq}) }
+
+func (s *Session) disarmAndWait(ctx context.Context) error {
+	complete := make(chan struct{})
+	cmd := command{typ: "disarm", complete: complete}
+	select {
+	case s.cmds <- cmd:
+	case <-s.ctx.Done():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-complete:
+		return nil
+	case <-s.ctx.Done():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // Control sends an out-of-band realtime control.
 func (s *Session) Control(seq int64, action string) {
@@ -554,12 +588,17 @@ func (s *Session) run() {
 }
 
 func (s *Session) handleCommand(cmd command) {
+	if cmd.complete != nil {
+		defer close(cmd.complete)
+	}
 	switch cmd.typ {
 	case "arm":
 		s.handleArm(cmd.seq)
 	case "disarm":
 		s.release(nil)
-		s.emit(Event{Type: "ack", Seq: cmd.seq})
+		if cmd.seq != 0 {
+			s.emit(Event{Type: "ack", Seq: cmd.seq})
+		}
 		s.emitState(cmd.seq)
 	case "control":
 		if err := s.sendControl(cmd.action); err != nil {

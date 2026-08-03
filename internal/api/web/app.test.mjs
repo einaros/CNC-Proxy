@@ -516,6 +516,97 @@ test("control sections start collapsed on mobile and retain desktop defaults", (
   assert.equal(elements["gamepad-section"].open, false);
 });
 
+test("leaving Control requests a Movement disarm and releases live input", () => {
+  const calls = [];
+  const state = {
+    activeTab: "control",
+    jog: {
+      armed: true,
+      armPending: 0,
+      armPendingAction: "",
+      armQueuedAction: "",
+      disarmAfterPendingArm: false,
+      tapFeedback: "",
+      tapFeedbackKind: "",
+    },
+  };
+  const ctx = buildContext(["requestMovementDisarm", "disarmMovementOnControlExit"], [], {
+    state,
+    releaseJogInput: (force) => calls.push(["release", force]),
+    sendTapMoveArmAction: (action) => { calls.push(["arm-action", action]); return true; },
+    tapMoveArmFailureText: () => "failed",
+    renderJog: () => calls.push(["render"]),
+  });
+
+  assert.equal(vm.runInContext(`disarmMovementOnControlExit("dashboard")`, ctx), true);
+  assert.deepEqual(calls, [["release", true], ["arm-action", "disarm"]]);
+  calls.length = 0;
+  assert.equal(vm.runInContext(`disarmMovementOnControlExit("control")`, ctx), false);
+  assert.deepEqual(calls, []);
+});
+
+test("leaving Control while Arm is pending disarms immediately after its acknowledgement", () => {
+  const state = {
+    activeTab: "dashboard",
+    jog: {
+      armed: false,
+      armPending: 9,
+      armPendingAction: "arm",
+      armQueuedAction: "",
+      disarmAfterPendingArm: true,
+      sent: new Map(),
+      error: "",
+      errorCode: "",
+    },
+  };
+  let disarmRequests = 0;
+  const ctx = buildContext(["applyJogEvent"], [], {
+    state,
+    performance: { now: () => 100 },
+    document: { getElementById: () => ({ textContent: "" }) },
+    resetJogInputSender: () => {},
+    tapMoveArmSuccessText: () => "Tap move armed.",
+    requestMovementDisarm: () => { disarmRequests++; },
+    completeCommandDisarm: () => {},
+    renderJog: () => {},
+    renderOutlineCapture: () => {},
+    renderMachine: () => {},
+  });
+
+  vm.runInContext(`applyJogEvent({ type: "ack", seq: 9 })`, ctx);
+  assert.equal(state.jog.armed, true);
+  assert.equal(state.jog.armPending, 0);
+  assert.equal(state.jog.disarmAfterPendingArm, false);
+  assert.equal(disarmRequests, 1);
+});
+
+test("a server-initiated Movement disarm clears pending motion and reports its result", () => {
+  const state = {
+    jog: {
+      armed: true,
+      armPending: 0,
+      availability: null,
+      tapFeedback: "",
+      tapFeedbackKind: "",
+    },
+  };
+  let cleared = 0;
+  const ctx = buildContext(["applyJogEvent"], [], {
+    state,
+    resetJogInputSender: () => {},
+    clearDisarmedMovementState: () => { cleared++; },
+    renderJog: () => {},
+    renderOutlineCapture: () => {},
+    renderMachine: () => {},
+  });
+
+  vm.runInContext(`applyJogEvent({ type: "state", seq: 0, armed: false })`, ctx);
+  assert.equal(state.jog.armed, false);
+  assert.equal(cleared, 1);
+  assert.equal(state.jog.tapFeedback, "Movement disarmed.");
+  assert.equal(state.jog.tapFeedbackKind, "ok");
+});
+
 test("closing a command sheet restores focus only for explicit dismissal", () => {
   let focusCount = 0;
   const summary = { tagName: "SUMMARY", focus: () => { focusCount++; } };
@@ -3079,7 +3170,7 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
     },
   };
   const ctx = buildContext(
-    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "clearFieldProbeMove", "completeCommandDisarm", "tapMoveArmSuccessText", "tapTargetLabel", "sendTapMove", "resetJogInputSender", "applyJogEvent"],
+    ["tapMoveTargetBusy", "cancelWorkCoordinateMove", "clearFieldProbeMove", "completeCommandDisarm", "tapMoveArmSuccessText", "tapTargetLabel", "sendTapMove", "resetJogInputSender", "clearDisarmedMovementState", "applyJogEvent"],
     [],
     {
       state,

@@ -103,6 +103,7 @@ const state = {
     armPending: 0,
     armPendingAction: "",
     armQueuedAction: "",
+    disarmAfterPendingArm: false,
     targetPending: 0,
     targetMotionPending: 0,
     fieldProbeMovePending: 0,
@@ -9537,6 +9538,7 @@ function connectJog() {
     state.jog.ws = null;
     state.jog.link = "offline";
     state.jog.armed = false;
+    state.jog.disarmAfterPendingArm = false;
     state.jog.sent.clear();
     resetJogInputSender();
     completeCommandDisarm(state.jog.commandDisarm?.seq, "Tap Move disconnected before the command.");
@@ -9709,6 +9711,37 @@ function sendTapMoveArmAction(action) {
   state.jog.tapFeedbackKind = "";
   renderJog();
   return true;
+}
+
+function requestMovementDisarm() {
+  if (state.jog.armQueuedAction === "arm") {
+    state.jog.armQueuedAction = "";
+    state.jog.tapFeedback = "Movement remains disarmed.";
+    state.jog.tapFeedbackKind = "ok";
+    renderJog();
+    return true;
+  }
+  releaseJogInput(true);
+  if (state.jog.armPending) {
+    if (state.jog.armPendingAction === "arm") {
+      state.jog.disarmAfterPendingArm = true;
+      state.jog.tapFeedback = "Waiting to disarm Movement.";
+      state.jog.tapFeedbackKind = "";
+      renderJog();
+    }
+    return true;
+  }
+  if (!state.jog.armed) return false;
+  if (sendTapMoveArmAction("disarm")) return true;
+  state.jog.tapFeedback = tapMoveArmFailureText("disarm", "jog service is not connected");
+  state.jog.tapFeedbackKind = "error";
+  renderJog();
+  return false;
+}
+
+function disarmMovementOnControlExit(nextTab) {
+  if (state.activeTab !== "control" || nextTab === "control") return false;
+  return requestMovementDisarm();
 }
 
 function flushQueuedTapMoveArm() {
@@ -10789,6 +10822,14 @@ function bindWorkAreaInteractions() {
   });
 }
 
+function clearDisarmedMovementState() {
+  resetJogInputSender();
+  state.jog.targetPending = 0;
+  state.jog.targetMotionPending = 0;
+  cancelWorkCoordinateMove();
+  clearFieldProbeMove();
+}
+
 function applyJogEvent(ev) {
   let machineChanged = false;
   if (ev.type === "hello" && ev.capabilities) {
@@ -10800,9 +10841,17 @@ function applyJogEvent(ev) {
     }
     flushQueuedTapMoveArm();
   } else if (ev.type === "state") {
+    const wasArmed = state.jog.armed;
     const armed = !!ev.armed;
     if (state.jog.armed !== armed) resetJogInputSender();
     state.jog.armed = armed;
+    if (wasArmed && !armed) {
+      clearDisarmedMovementState();
+      if (!ev.seq && !state.jog.armPending) {
+        state.jog.tapFeedback = "Movement disarmed.";
+        state.jog.tapFeedbackKind = "ok";
+      }
+    }
     if (ev.availability) {
       state.jog.availability = ev.availability;
       if (ev.availability.available) {
@@ -10881,6 +10930,7 @@ function applyJogEvent(ev) {
     if (ev.seq && ev.seq === state.jog.armPending) {
       const action = state.jog.armPendingAction;
       const armed = action === "arm";
+      const disarmAfterArm = armed && state.jog.disarmAfterPendingArm;
       if (state.jog.armed !== armed) resetJogInputSender();
       state.jog.armed = armed;
       state.jog.armPending = 0;
@@ -10890,13 +10940,14 @@ function applyJogEvent(ev) {
         // part of disarm. Mirror that lifecycle locally so a target whose
         // completion was never observed cannot keep tap movement busy after
         // the operator disarms and arms again.
-        state.jog.targetPending = 0;
-        state.jog.targetMotionPending = 0;
-        cancelWorkCoordinateMove();
-        clearFieldProbeMove();
+        clearDisarmedMovementState();
       }
       state.jog.tapFeedback = tapMoveArmSuccessText(action);
       state.jog.tapFeedbackKind = "ok";
+      if (disarmAfterArm) {
+        state.jog.disarmAfterPendingArm = false;
+        requestMovementDisarm();
+      }
     }
     completeCommandDisarm(ev.seq);
     if (ev.seq && (ev.seq === state.jog.targetPending || ev.seq === state.jog.targetMotionPending)) {
@@ -10944,6 +10995,7 @@ function applyJogEvent(ev) {
       const action = state.jog.armPendingAction;
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
+      state.jog.disarmAfterPendingArm = false;
       state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
@@ -10993,6 +11045,7 @@ function applyJogEvent(ev) {
       const action = state.jog.armPendingAction;
       state.jog.armPending = 0;
       state.jog.armPendingAction = "";
+      state.jog.disarmAfterPendingArm = false;
       state.jog.tapFeedback = tapMoveArmFailureText(action, ev.message || jogErrorText(ev.code));
       state.jog.tapFeedbackKind = "error";
     }
@@ -11250,6 +11303,7 @@ function connectFilesSSE() {
 function showTab(name) {
   const tabs = ["dashboard", "active-job", "control", "files"];
   if (!tabs.includes(name)) name = "active-job";
+  disarmMovementOnControlExit(name);
   state.activeTab = name;
   document.body.dataset.activeTab = name;
   for (const tab of tabs) {
