@@ -3,6 +3,10 @@
 /cnc-proxy
 /fakemachine
 /tray
+/deploy
+/discoverybeacon
+/wininstaller
+/winpack
 # Catch-all for any binary built in the repo root from a cmd/ package.
 /cmd/*/proxy
 /cmd/*/fakemachine
@@ -18,6 +22,7 @@ coverage.out
 /.cnc-proxy/
 /data/
 /dist/
+/output/
 
 # Machine-specific Claude Code settings (contains local IPs, /tmp paths, and
 # per-session permission grants). The shared .claude/settings.json IS tracked.

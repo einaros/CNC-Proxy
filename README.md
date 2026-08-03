@@ -70,6 +70,17 @@ Commands: `cmd/proxy` (the service), `cmd/fakemachine` (test machine),
 Docker Desktop deployments), and `cmd/tray` (status companion: a dependency-free
 status CLI by default, or a native menu-bar app with `-tags tray`).
 
+## Source checkout
+
+The Makera controller and firmware are read-only reference sources linked as
+Git submodules. Clone with their pinned revisions:
+
+```sh
+git clone --recurse-submodules <repository-url>
+```
+
+For an existing checkout, run `git submodule update --init --recursive`.
+
 ## Build
 
 ```sh
