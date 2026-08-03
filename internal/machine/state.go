@@ -43,12 +43,19 @@ type Triple struct {
 	Override float64 `json:"override"`
 }
 
-// Spindle describes the S: status field. Additional values beyond the first
-// three are firmware/model-specific and remain available through Fields.
+// Spindle describes the S: status field as emitted by Carvera firmware. The
+// optional extended values are present on newer machine models; pointers keep
+// a reported zero distinct from a model that does not report the field.
 type Spindle struct {
-	CurrentRPM float64 `json:"current_rpm"`
-	TargetRPM  float64 `json:"target_rpm"`
-	Override   float64 `json:"override"`
+	CurrentRPM   float64  `json:"current_rpm"`
+	TargetRPM    float64  `json:"target_rpm"`
+	Override     float64  `json:"override"`
+	VacuumMode   *float64 `json:"vacuum_mode,omitempty"`
+	SpindleTempC *float64 `json:"spindle_temp_c,omitempty"`
+	PowerTempC   *float64 `json:"power_temp_c,omitempty"`
+	BlowingMode  *float64 `json:"blowing_mode,omitempty"`
+	BedCleanMode *float64 `json:"bed_clean_mode,omitempty"`
+	ExternalMode *float64 `json:"external_mode,omitempty"`
 }
 
 // ToolStatus describes the T: status field when present.
@@ -95,6 +102,12 @@ func (s Status) copy() Status {
 	}
 	if s.Spindle != nil {
 		v := *s.Spindle
+		v.VacuumMode = copyFloat64(s.Spindle.VacuumMode)
+		v.SpindleTempC = copyFloat64(s.Spindle.SpindleTempC)
+		v.PowerTempC = copyFloat64(s.Spindle.PowerTempC)
+		v.BlowingMode = copyFloat64(s.Spindle.BlowingMode)
+		v.BedCleanMode = copyFloat64(s.Spindle.BedCleanMode)
+		v.ExternalMode = copyFloat64(s.Spindle.ExternalMode)
 		cp.Spindle = &v
 	}
 	if s.Tool != nil {
@@ -255,7 +268,30 @@ func parseSpindle(s string) *Spindle {
 	if len(vals) < 3 {
 		return nil
 	}
-	return &Spindle{CurrentRPM: vals[0], TargetRPM: vals[1], Override: vals[2]}
+	spindle := &Spindle{CurrentRPM: vals[0], TargetRPM: vals[1], Override: vals[2]}
+	optional := []**float64{
+		&spindle.VacuumMode,
+		&spindle.SpindleTempC,
+		&spindle.PowerTempC,
+		&spindle.BlowingMode,
+		&spindle.BedCleanMode,
+		&spindle.ExternalMode,
+	}
+	for i, target := range optional {
+		if index := i + 3; index < len(vals) {
+			value := vals[index]
+			*target = &value
+		}
+	}
+	return spindle
+}
+
+func copyFloat64(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func parseTool(s string) *ToolStatus {

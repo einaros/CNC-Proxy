@@ -283,6 +283,28 @@ test("active job progress never drives a preview for a different file", () => {
   assert.equal(live, null);
 });
 
+test("summary dashboard preview shows the whole job and its completed prefix", () => {
+  const ctx = buildContext(["dashboardPreviewPath", "dashboardPreviewPoint"]);
+  const segments = [
+    { from: [0, 0, 0, 0], to: [10, 0, 0, 0] },
+    { from: [10, 0, 0, 0], to: [10, 5, 0, 0] },
+    { from: [10, 5, 0, 0], to: [0, 5, 0, 0] },
+  ];
+  const bounds = { min: [0, 0, 0], max: [10, 5, 0] };
+  const paths = JSON.parse(vm.runInContext(
+    `JSON.stringify([
+      dashboardPreviewPath(${JSON.stringify(segments)}, ${JSON.stringify(bounds)}, 3),
+      dashboardPreviewPath(${JSON.stringify(segments)}, ${JSON.stringify(bounds)}, 2),
+      dashboardPreviewPoint([10, 5, 0, 0], ${JSON.stringify(bounds)})
+    ])`,
+    ctx,
+  ));
+  assert.match(paths[0], /M 4\.00 55\.00 L 96\.00 55\.00/);
+  assert.equal((paths[0].match(/ M |^M /g) || []).length, 3);
+  assert.equal((paths[1].match(/ M |^M /g) || []).length, 2);
+  assert.deepEqual(paths[2], { x: 96, y: 9 });
+});
+
 test("gcode source lines preserve instruction numbering across newline styles", () => {
   const ctx = buildContext(["splitGcodeSourceLines"]);
   const lines = JSON.parse(vm.runInContext(

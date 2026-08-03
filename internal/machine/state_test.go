@@ -56,6 +56,9 @@ func TestParseStatusPayloadRichFields(t *testing.T) {
 	if st.Spindle == nil || st.Spindle.CurrentRPM != 1000 || st.Spindle.TargetRPM != 12000 || st.Spindle.Override != 80 {
 		t.Fatalf("spindle = %+v", st.Spindle)
 	}
+	if st.Spindle.VacuumMode == nil || *st.Spindle.VacuumMode != 1 || st.Spindle.SpindleTempC == nil || *st.Spindle.SpindleTempC != 31.5 || st.Spindle.PowerTempC == nil || *st.Spindle.PowerTempC != 42 || st.Spindle.ExternalMode == nil || *st.Spindle.ExternalMode != 1 {
+		t.Fatalf("extended spindle status = %+v", st.Spindle)
+	}
 	if st.Tool == nil || st.Tool.Active != 2 || st.Tool.Offset != 12.345 || st.Tool.Target == nil || *st.Tool.Target != 3 {
 		t.Fatalf("tool = %+v", st.Tool)
 	}

@@ -347,6 +347,33 @@ function fmtSpindle(s) {
   return `${cur}/${target} rpm ${over}`;
 }
 
+function fmtDashboardFeed(f) {
+  if (!f) return { current: "-", detail: "-" };
+  const current = Number(f.current);
+  const target = Number(f.target);
+  const override = Number(f.override);
+  return {
+    current: Number.isFinite(current) ? `${Math.round(current)} mm/min` : "-",
+    detail: `${Number.isFinite(target) ? Math.round(target) + " target" : "-"} · ${Number.isFinite(override) ? Math.round(override) + "%" : "-"}`,
+  };
+}
+
+function fmtDashboardSpindle(s) {
+  if (!s) return { current: "-", detail: "-" };
+  const current = Number(s.current_rpm);
+  const target = Number(s.target_rpm);
+  const override = Number(s.override);
+  return {
+    current: Number.isFinite(current) ? `${Math.round(current)} rpm` : "-",
+    detail: `${Number.isFinite(target) ? Math.round(target) + " target" : "-"} · ${Number.isFinite(override) ? Math.round(override) + "%" : "-"}`,
+  };
+}
+
+function fmtTemperature(value, label) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${label} ${number.toFixed(1)} °C` : `${label} -`;
+}
+
 function fmtActiveTool(t) {
   return Number.isFinite(t?.active) ? toolDisplayName(t.active) : "-";
 }
@@ -6425,6 +6452,7 @@ function renderActiveGcode() {
     ensureActiveGcodeSource(null);
     drawGcodePreview(null);
     renderActiveJobProgress(null);
+    renderDashboard();
     if (!state.activeGcodePending) clearNotice("active-gcode");
     return;
   }
@@ -6462,6 +6490,118 @@ function renderActiveGcode() {
   }
   renderActiveJobProgress(live, preview);
   drawGcodePreview(preview, live);
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const machine = state.machine || {};
+  const active = state.activeGcode || {};
+  const preview = active.preview || {};
+  const live = active.path ? activeJobPreviewState(machine, preview, active.path) : null;
+  const setText = (id, value) => {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  };
+
+  const machineState = document.getElementById("dashboard-state");
+  if (machineState) {
+    machineState.textContent = machine.state || "Unknown";
+    machineState.className = "badge state-" + (machine.state || "Unknown");
+  }
+  setText("dashboard-mpos", fmtPos(machine.mpos, !!machine.motion_estimated));
+  setText("dashboard-wpos", "Work " + fmtPos(machine.wpos, !!machine.motion_estimated));
+  const feed = fmtDashboardFeed(machine.feed);
+  setText("dashboard-feed", feed.current);
+  setText("dashboard-feed-detail", feed.detail);
+  const spindle = fmtDashboardSpindle(machine.spindle);
+  setText("dashboard-spindle", spindle.current);
+  setText("dashboard-spindle-detail", spindle.detail);
+  setText("dashboard-spindle-temp", fmtTemperature(machine.spindle?.spindle_temp_c, "Spindle"));
+  setText("dashboard-power-temp", fmtTemperature(machine.spindle?.power_temp_c, "Power"));
+  setText("dashboard-tool", fmtActiveTool(machine.tool));
+  const offset = Number(machine.tool?.offset);
+  const target = Number(machine.tool?.target);
+  setText("dashboard-tool-detail", `${Number.isFinite(offset) ? "TLO " + offset.toFixed(3) : "TLO -"}${Number.isFinite(target) ? " · next " + toolDisplayName(target) : ""}`);
+  setText("dashboard-connection", machine.connected ? "Connected" : (machine.reconnecting ? "Reconnecting" : "Disconnected"));
+  setText("dashboard-mode", `${machine.mode || "owner"} · ${fmtAge(machine.age_ms)}`);
+  setText("dashboard-job-title", active.path ? relPath(active.path) : "No active gcode selected.");
+
+  const progress = document.getElementById("dashboard-progress-bar");
+  if (progress) progress.value = live ? live.percent : 0;
+  const lineCount = Math.max(0, Number(preview.line_count) || 0);
+  setText("dashboard-progress-label", live ? `${live.percent}% · line ${live.playedLines}${lineCount ? " / " + lineCount : ""}` : "Progress");
+  setText("dashboard-elapsed", live ? fmtDuration(live.elapsedMs) : "-");
+  setText("dashboard-remaining", live && Number.isFinite(live.remainingMs) ? fmtDuration(live.remainingMs) : "-");
+  drawDashboardPreview(preview, live);
+}
+
+function dashboardPreviewPath(segments, bounds, endExclusive, maxSegments = 4000) {
+  if (!Array.isArray(segments) || !segments.length || !bounds?.min || !bounds?.max || endExclusive <= 0) return "";
+  const minX = Number(bounds.min[0]);
+  const minY = Number(bounds.min[1]);
+  const maxX = Number(bounds.max[0]);
+  const maxY = Number(bounds.max[1]);
+  if (![minX, minY, maxX, maxY].every(Number.isFinite)) return "";
+  const width = Math.max(0.001, maxX - minX);
+  const height = Math.max(0.001, maxY - minY);
+  const scale = Math.min(92 / width, 56 / height);
+  const offsetX = 4 + (92 - width * scale) / 2;
+  const offsetY = 4 + (56 - height * scale) / 2;
+  const point = (position) => {
+    const x = offsetX + (Number(position?.[0]) - minX) * scale;
+    const y = 64 - (offsetY + (Number(position?.[1]) - minY) * scale);
+    return Number.isFinite(x) && Number.isFinite(y) ? `${x.toFixed(2)} ${y.toFixed(2)}` : null;
+  };
+  const end = Math.min(segments.length, Math.max(0, Math.trunc(endExclusive)));
+  const step = Math.max(1, Math.ceil(end / Math.max(1, maxSegments)));
+  const indexes = [];
+  for (let index = 0; index < end; index += step) indexes.push(index);
+  if (end > 0 && indexes.at(-1) !== end - 1) indexes.push(end - 1);
+  const commands = [];
+  for (const index of indexes) {
+    const from = point(segments[index]?.from);
+    const to = point(segments[index]?.to);
+    if (from && to) commands.push(`M ${from} L ${to}`);
+  }
+  return commands.join(" ");
+}
+
+function dashboardPreviewPoint(position, bounds) {
+  if (!position || !bounds?.min || !bounds?.max) return null;
+  const minX = Number(bounds.min[0]);
+  const minY = Number(bounds.min[1]);
+  const maxX = Number(bounds.max[0]);
+  const maxY = Number(bounds.max[1]);
+  const x = Number(position[0]);
+  const y = Number(position[1]);
+  if (![minX, minY, maxX, maxY, x, y].every(Number.isFinite)) return null;
+  const width = Math.max(0.001, maxX - minX);
+  const height = Math.max(0.001, maxY - minY);
+  const scale = Math.min(92 / width, 56 / height);
+  const offsetX = 4 + (92 - width * scale) / 2;
+  const offsetY = 4 + (56 - height * scale) / 2;
+  return { x: offsetX + (x - minX) * scale, y: 64 - (offsetY + (y - minY) * scale) };
+}
+
+function drawDashboardPreview(preview, live = null) {
+  const segments = Array.isArray(preview?.segments) ? preview.segments : [];
+  const path = document.getElementById("dashboard-preview-path");
+  const complete = document.getElementById("dashboard-preview-complete");
+  const marker = document.getElementById("dashboard-preview-marker");
+  const empty = document.getElementById("dashboard-preview-empty");
+  if (!path || !complete || !marker || !empty) return;
+  const hasPreview = segments.length > 0 && !!preview?.bounds;
+  empty.hidden = hasPreview;
+  path.setAttribute("d", hasPreview ? dashboardPreviewPath(segments, preview.bounds, segments.length) : "");
+  const cursor = hasPreview && live ? Math.max(0, Math.min(segments.length, Number(live.cursor) || 0)) : 0;
+  complete.setAttribute("d", cursor ? dashboardPreviewPath(segments, preview.bounds, cursor) : "");
+  const fallback = cursor > 0 ? segments[cursor - 1]?.to : null;
+  const point = dashboardPreviewPoint(live?.position || fallback, preview?.bounds);
+  marker.hidden = !point;
+  if (point) {
+    marker.setAttribute("cx", point.x.toFixed(2));
+    marker.setAttribute("cy", point.y.toFixed(2));
+  }
 }
 
 function activeGcodeSourceSignature(active) {
@@ -10717,7 +10857,7 @@ function connectFilesSSE() {
 }
 
 function showTab(name) {
-  const tabs = ["active-job", "control", "files"];
+  const tabs = ["dashboard", "active-job", "control", "files"];
   if (!tabs.includes(name)) name = "active-job";
   state.activeTab = name;
   document.body.dataset.activeTab = name;
@@ -10732,6 +10872,7 @@ function showTab(name) {
   }
   if (name === "files") connectFilesSSE();
   if (name === "active-job") renderActiveGcode();
+  if (name === "dashboard") renderDashboard();
   if (name === "control") renderJog();
   else clearNotice("jog-availability");
 }
@@ -10854,7 +10995,7 @@ function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("notice-clear").onclick = () => clearNotice();
-  const viewTabs = ["active-job", "control", "files"];
+  const viewTabs = ["dashboard", "active-job", "control", "files"];
   for (const [index, name] of viewTabs.entries()) {
     const tab = document.getElementById("tab-" + name);
     tab.onclick = () => showTab(name);

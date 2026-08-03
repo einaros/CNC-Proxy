@@ -86,7 +86,7 @@
   .status-item.error { border-color: rgba(232,106,95,.5); color: var(--err); }
   .status-item.error .status-dot { background: var(--err); }
   #notice-clear { flex: 0 0 auto; }
-  .tabs { display: grid; grid-template-columns: repeat(3, minmax(112px, 1fr)); gap: 4px; min-width: 0; margin: 0; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
+  .tabs { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 4px; min-width: 0; margin: 0; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
   .tab { width: 100%; min-width: 0; min-height: var(--control-h); border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
   .tab:hover { border-color: rgba(87,166,214,.45); color: var(--text); }
@@ -162,6 +162,33 @@
   .metric .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
   .metric--wide { grid-column: span 2; }
   .metric--compact { min-width: 130px; }
+  #dashboard-view { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+  .dashboard-grid { min-height: 0; height: 100%; display: grid; grid-template-columns: minmax(420px, .9fr) minmax(460px, 1.1fr); gap: 12px; }
+  .dashboard-machine, .dashboard-job { min-width: 0; min-height: 0; display: grid; gap: 10px; padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+  .dashboard-machine { grid-template-rows: auto minmax(0, 1fr); }
+  .dashboard-heading { min-width: 0; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+  .dashboard-heading h2 { color: var(--text); font-size: 14px; text-transform: none; letter-spacing: 0; }
+  #dashboard-state { min-width: 84px; justify-content: center; text-align: center; }
+  .dashboard-metrics { min-height: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-content: start; }
+  .dashboard-metric { min-width: 0; min-height: 76px; display: grid; align-content: center; gap: 4px; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); }
+  .dashboard-metric > span { color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+  .dashboard-metric > strong, .dashboard-metric > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); font: 650 14px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
+  .dashboard-metric > b { color: var(--muted); font-size: 12px; font-weight: 500; }
+  .dashboard-job { grid-template-rows: auto auto minmax(240px, 1fr); }
+  #dashboard-job-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+  .dashboard-progress { display: grid; grid-template-columns: minmax(0, 1fr) repeat(2, minmax(92px, auto)); gap: 8px 16px; align-items: end; }
+  .dashboard-progress-main { display: grid; gap: 6px; }
+  .dashboard-progress-main > span, .dashboard-time > span { color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+  #dashboard-progress-bar { width: 100%; height: 10px; accent-color: var(--accent); }
+  .dashboard-time { display: grid; gap: 4px; }
+  .dashboard-time strong { font: 650 16px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .dashboard-preview-frame { min-height: 240px; display: grid; background: #12171c; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  #dashboard-preview, #dashboard-preview-empty { grid-area: 1 / 1; width: 100%; height: 100%; min-height: 0; }
+  #dashboard-preview { display: block; }
+  #dashboard-preview-path { fill: none; stroke: #45515a; stroke-width: .65; vector-effect: non-scaling-stroke; }
+  #dashboard-preview-complete { fill: none; stroke: var(--accent); stroke-width: 1.25; vector-effect: non-scaling-stroke; }
+  #dashboard-preview-marker { fill: #dff1fb; stroke: #12171c; stroke-width: .8; vector-effect: non-scaling-stroke; }
+  #dashboard-preview-empty { display: grid; place-items: center; color: var(--muted); }
   .action-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; margin: 0; min-width: 0; }
   .action-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
   .action-row label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -538,6 +565,9 @@
     .file-col-modified, th:nth-child(4), td:nth-child(4) { display: none; }
     .file-col-actions { width: 32%; }
     .file-col-status { width: 15%; }
+    .dashboard-grid { grid-template-columns: 1fr; overflow-y: auto; }
+    .dashboard-machine { min-height: 0; }
+    .dashboard-job { min-height: 440px; }
   }
   @media (max-width: 880px) {
     .control-page-layout { grid-template-columns: 1fr; }
@@ -601,7 +631,7 @@
     .machine-status-item { min-height: 40px; scroll-snap-align: start; }
     .connection-status { width: 36px; height: 36px; }
     .badge { min-height: 32px; display: inline-flex; align-items: center; }
-    .tabs { grid-template-columns: repeat(3, minmax(92px, 1fr)); }
+    .tabs { grid-template-columns: repeat(4, minmax(82px, 1fr)); }
     .tab { min-height: 44px; }
     .command-popout > summary, #command-actions > #ctl-halt { min-height: 44px; padding-inline: 10px; }
     .command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); left: 10px !important; width: auto !important; max-height: min(72dvh, 620px) !important; border-radius: 10px; transform: translateY(6px); }
@@ -815,6 +845,7 @@
     </div>
   </div>
   <nav class="tabs" role="tablist" aria-label="Views">
+    <button type="button" id="tab-dashboard" class="tab" role="tab" aria-selected="false" aria-controls="dashboard-view" tabindex="-1">Dashboard</button>
     <button type="button" id="tab-active-job" class="tab active" role="tab" aria-selected="true" aria-controls="active-job-view">Active job</button>
     <button type="button" id="tab-control" class="tab" role="tab" aria-selected="false" aria-controls="control-view" tabindex="-1">Control</button>
     <button type="button" id="tab-files" class="tab" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
@@ -831,6 +862,38 @@
         <button type="button" id="alarm-recover" data-control-action="recover">Recover</button>
       </div>
     </div>
+  </section>
+
+  <section id="dashboard-view" class="view" role="tabpanel" aria-labelledby="tab-dashboard" hidden>
+    <section class="dashboard-grid" aria-label="Machine and active job summary">
+      <div class="dashboard-machine">
+        <div class="dashboard-heading"><h2>Machine</h2><span id="dashboard-state" class="badge state-Unknown">Unknown</span></div>
+        <div class="dashboard-metrics">
+          <div class="dashboard-metric"><span>Machine position</span><strong id="dashboard-mpos">-</strong><b id="dashboard-wpos">-</b></div>
+          <div class="dashboard-metric"><span>Feed</span><strong id="dashboard-feed">-</strong><b id="dashboard-feed-detail">-</b></div>
+          <div class="dashboard-metric"><span>Spindle</span><strong id="dashboard-spindle">-</strong><b id="dashboard-spindle-detail">-</b></div>
+          <div class="dashboard-metric"><span>Temperatures</span><strong id="dashboard-spindle-temp">-</strong><b id="dashboard-power-temp">-</b></div>
+          <div class="dashboard-metric"><span>Tool</span><strong id="dashboard-tool">-</strong><b id="dashboard-tool-detail">-</b></div>
+          <div class="dashboard-metric"><span>Connection</span><strong id="dashboard-connection">-</strong><b id="dashboard-mode">-</b></div>
+        </div>
+      </div>
+      <div class="dashboard-job">
+        <div class="dashboard-heading"><h2>Current job</h2><div id="dashboard-job-title">No active gcode selected.</div></div>
+        <div class="dashboard-progress">
+          <div class="dashboard-progress-main"><span id="dashboard-progress-label">Progress</span><progress id="dashboard-progress-bar" max="100" value="0"></progress></div>
+          <div class="dashboard-time"><span>Elapsed</span><strong id="dashboard-elapsed">-</strong></div>
+          <div class="dashboard-time"><span>Remaining</span><strong id="dashboard-remaining">-</strong></div>
+        </div>
+        <div class="dashboard-preview-frame">
+          <svg id="dashboard-preview" viewBox="0 0 100 64" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Active job top view">
+            <path id="dashboard-preview-path"></path>
+            <path id="dashboard-preview-complete"></path>
+            <circle id="dashboard-preview-marker" r="1.5" hidden></circle>
+          </svg>
+          <div id="dashboard-preview-empty">No plotted moves</div>
+        </div>
+      </div>
+    </section>
   </section>
 
   <section id="active-job-view" class="view" role="tabpanel" aria-labelledby="tab-active-job">
@@ -1335,6 +1398,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=active-job-z-accuracy-1"></script>
+<script type="module" src="/app.js?v=summary-dashboard-1"></script>
 </body>
 </html>
