@@ -454,6 +454,24 @@ test("active job splitter clamps both panes and updates its accessible value", (
   assert.equal(previewRenders, 1);
 });
 
+test("control sections start collapsed on mobile and retain desktop defaults", () => {
+  const ids = ["jog-settings-section", "move-to-work-section", "work-zero-section", "gamepad-section"];
+  const elements = Object.fromEntries(ids.map((id) => [id, { open: true }]));
+  const ctx = buildContext(["initializeResponsiveControlSections"], [], {
+    document: { getElementById: (id) => elements[id] || null },
+    window: { matchMedia: () => ({ matches: true }) },
+  });
+
+  vm.runInContext("initializeResponsiveControlSections()", ctx);
+  for (const id of ids) assert.equal(elements[id].open, false, `${id} starts collapsed on mobile`);
+
+  vm.runInContext("initializeResponsiveControlSections(false)", ctx);
+  assert.equal(elements["jog-settings-section"].open, true);
+  assert.equal(elements["move-to-work-section"].open, true);
+  assert.equal(elements["work-zero-section"].open, true);
+  assert.equal(elements["gamepad-section"].open, false);
+});
+
 test("active-job context maps captured geometry into the current work coordinates and requires a complete probe plan", () => {
   const ctx = buildContext([
     "axisValue",

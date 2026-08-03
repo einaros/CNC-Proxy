@@ -11146,7 +11146,21 @@ function mergeMachineStatusForDisplay(next) {
   };
 }
 
+function initializeResponsiveControlSections(isMobile = window.matchMedia?.("(max-width: 600px)")?.matches === true) {
+  const sections = [
+    ["jog-settings-section", true],
+    ["move-to-work-section", true],
+    ["work-zero-section", true],
+    ["gamepad-section", false],
+  ];
+  for (const [id, desktopOpen] of sections) {
+    const section = document.getElementById(id);
+    if (section) section.open = !isMobile && desktopOpen;
+  }
+}
+
 function init() {
+  initializeResponsiveControlSections();
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("notice-clear").onclick = () => clearNotice();
