@@ -1048,6 +1048,37 @@ function setHeaderCollapsed(collapsed) {
   }
 }
 
+function setWorkAreaActionsOpen(open, restoreFocus = false) {
+  const button = document.getElementById("workarea-actions-toggle");
+  const panel = document.getElementById("workarea-actions-panel");
+  if (!button || !panel) return;
+  panel.classList.toggle("is-open", !!open);
+  button.setAttribute("aria-expanded", String(!!open));
+  if (!open && restoreFocus) button.focus();
+}
+
+function initWorkAreaActionsMenu() {
+  const button = document.getElementById("workarea-actions-toggle");
+  const panel = document.getElementById("workarea-actions-panel");
+  const close = panel?.querySelector(".workarea-actions-close");
+  if (!button || !panel || !close) return;
+  button.onclick = () => setWorkAreaActionsOpen(!panel.classList.contains("is-open"));
+  close.onclick = () => setWorkAreaActionsOpen(false, true);
+  document.addEventListener("click", (event) => {
+    if (!panel.classList.contains("is-open")) return;
+    if (button.contains(event.target) || panel.contains(event.target)) return;
+    setWorkAreaActionsOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !panel.classList.contains("is-open")) return;
+    event.preventDefault();
+    setWorkAreaActionsOpen(false, true);
+  });
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 600) setWorkAreaActionsOpen(false);
+  });
+}
+
 async function request(url, opts = {}) {
   const resp = await fetch(url, { credentials: "same-origin", cache: "no-store", ...opts });
   if (!resp.ok) {
@@ -11216,6 +11247,7 @@ function init() {
   const input = document.getElementById("file");
   document.getElementById("notice-clear").onclick = () => clearNotice();
   document.getElementById("header-toggle").onclick = () => setHeaderCollapsed(!document.body.classList.contains("header-collapsed"));
+  initWorkAreaActionsMenu();
   const viewTabs = ["dashboard", "active-job", "control", "files"];
   for (const [index, name] of viewTabs.entries()) {
     const tab = document.getElementById("tab-" + name);

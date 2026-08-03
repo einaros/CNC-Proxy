@@ -420,6 +420,8 @@
   .control-command-drawer .origin-row-preset, .control-command-drawer .origin-row-save { grid-template-columns: 1fr; }
   .tap-move-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(74px, 92px); gap: 10px; align-items: stretch; }
   .workarea-frame { position: relative; width: 100%; height: clamp(320px, 52vh, 680px); min-height: 320px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  #workarea-actions-panel { display: contents; }
+  #workarea-actions-toggle, .workarea-actions-close { display: none; }
   .workarea-controls { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 3px; padding: 3px; background: rgba(18,23,28,.82); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(6px); }
   .workarea-controls button { min-width: 30px; min-height: 28px; padding: 2px 8px; }
   #workarea-hover-position { position: absolute; right: 10px; bottom: 8px; z-index: 2; padding: 4px 6px; border: 1px solid rgba(48,56,58,.72); border-radius: var(--radius); background: rgba(18,23,28,.78); color: var(--muted); font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; pointer-events: none; white-space: nowrap; }
@@ -694,6 +696,15 @@
     .control-drawer-section > summary { min-height: 44px; }
     .tap-move-toolbar button, .tap-safe-z-toggle, .origin-action-grid button { min-height: 44px; }
     .workarea-frame { height: min(58dvh, 460px); min-height: 300px; }
+    #workarea-actions-toggle { position: absolute; top: 8px; left: 8px; z-index: 4; display: inline-flex; width: min(178px, calc(100% - 16px)); min-height: 44px; align-items: center; justify-content: space-between; border-color: rgba(87,166,214,.72); background: rgba(18,23,28,.94); backdrop-filter: blur(6px); }
+    #workarea-actions-toggle::after { content: "▾"; color: var(--muted); }
+    #workarea-actions-toggle[aria-expanded="true"]::after { content: "▴"; }
+    #workarea-actions-panel { position: absolute; top: 60px; left: 8px; z-index: 4; display: none; width: min(238px, calc(100% - 16px)); max-height: calc(100% - 68px); overflow-y: auto; padding: 8px; gap: 8px; background: rgba(18,23,28,.98); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 16px 36px rgba(0,0,0,.42); overscroll-behavior: contain; }
+    #workarea-actions-panel.is-open { display: grid; }
+    .workarea-actions-close { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; }
+    #workarea-actions-panel .workarea-controls, #workarea-actions-panel .outline-preview-controls { position: static; width: 100%; padding: 0; background: transparent; border: 0; backdrop-filter: none; pointer-events: auto; }
+    #workarea-actions-panel .workarea-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+    #workarea-actions-panel .workarea-controls button, #workarea-actions-panel .outline-preview-controls button, #workarea-actions-panel .outline-active-controls label { min-height: 44px; height: 44px; }
     .toolbar { gap: 8px; }
     #drop { min-height: 56px; display: grid; place-items: center; padding: 10px; }
     #filter { min-height: 44px; }
@@ -1164,26 +1175,30 @@
           <div class="control-workspace">
             <div class="tap-move-body">
               <div class="workarea-frame">
-                <div class="workarea-controls" aria-label="Work area view controls">
-                  <button type="button" id="workarea-zoom-out" title="Zoom out">-</button>
-                  <button type="button" id="workarea-zoom-reset" title="Fit work area">Fit</button>
-                  <button type="button" id="workarea-zoom-in" title="Zoom in">+</button>
-                </div>
-                <div id="outline-preview-controls" class="outline-preview-controls">
-                  <button type="button" id="outline-start" class="primary">Capture outline</button>
-                  <button type="button" id="outline-load">Load outline</button>
-                  <div id="outline-active-controls" class="outline-active-controls" hidden>
-                    <button type="button" id="outline-end">End outline</button>
-                    <button type="button" id="outline-add-point">Add point</button>
-                    <button type="button" id="outline-trace" hidden>Trace outline</button>
-                    <button type="button" id="outline-undo">Undo</button>
-                    <button type="button" id="outline-redo">Redo</button>
-                    <button type="button" id="outline-close">Close outline</button>
-                    <button type="button" id="outline-save">Save outline</button>
-                    <button type="button" id="outline-export">Export DXF</button>
-                    <label><input type="checkbox" id="outline-curve-fit"> Curve fit</label>
+                <button type="button" id="workarea-actions-toggle" aria-expanded="false" aria-controls="workarea-actions-panel">Work area actions</button>
+                <div id="workarea-actions-panel">
+                  <button type="button" class="workarea-actions-close" aria-label="Close work area actions">Close</button>
+                  <div class="workarea-controls" aria-label="Work area view controls">
+                    <button type="button" id="workarea-zoom-out" title="Zoom out">-</button>
+                    <button type="button" id="workarea-zoom-reset" title="Fit work area">Fit</button>
+                    <button type="button" id="workarea-zoom-in" title="Zoom in">+</button>
                   </div>
-                  <input id="outline-file" type="file" accept="application/json,.json" hidden>
+                  <div id="outline-preview-controls" class="outline-preview-controls">
+                    <button type="button" id="outline-start" class="primary">Capture outline</button>
+                    <button type="button" id="outline-load">Load outline</button>
+                    <div id="outline-active-controls" class="outline-active-controls" hidden>
+                      <button type="button" id="outline-end">End outline</button>
+                      <button type="button" id="outline-add-point">Add point</button>
+                      <button type="button" id="outline-trace" hidden>Trace outline</button>
+                      <button type="button" id="outline-undo">Undo</button>
+                      <button type="button" id="outline-redo">Redo</button>
+                      <button type="button" id="outline-close">Close outline</button>
+                      <button type="button" id="outline-save">Save outline</button>
+                      <button type="button" id="outline-export">Export DXF</button>
+                      <label><input type="checkbox" id="outline-curve-fit"> Curve fit</label>
+                    </div>
+                    <input id="outline-file" type="file" accept="application/json,.json" hidden>
+                  </div>
                 </div>
                 <div id="workarea-hover-position" hidden></div>
                 <svg id="workarea-plot" class="not-armed" viewBox="0 0 100 100" role="img" aria-label="Machine XY travel area">
@@ -1459,6 +1474,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=notification-spacing-1"></script>
+<script type="module" src="/app.js?v=mobile-workarea-actions-1"></script>
 </body>
 </html>

@@ -556,6 +556,35 @@ test("the notification gutter exists only while the bottom status bar is visible
   assert.ok(!classes.has("has-status-message"));
 });
 
+test("the mobile work area actions menu exposes state and restores focus on dismissal", () => {
+  const classes = new Set();
+  const attributes = {};
+  let focusCount = 0;
+  const button = {
+    setAttribute: (name, value) => { attributes[name] = value; },
+    focus: () => { focusCount++; },
+  };
+  const panel = {
+    classList: {
+      toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name),
+    },
+  };
+  const ctx = buildContext(["setWorkAreaActionsOpen"], [], {
+    document: {
+      getElementById: (id) => id === "workarea-actions-toggle" ? button : id === "workarea-actions-panel" ? panel : null,
+    },
+  });
+
+  vm.runInContext("setWorkAreaActionsOpen(true)", ctx);
+  assert.ok(classes.has("is-open"));
+  assert.equal(attributes["aria-expanded"], "true");
+
+  vm.runInContext("setWorkAreaActionsOpen(false, true)", ctx);
+  assert.ok(!classes.has("is-open"));
+  assert.equal(attributes["aria-expanded"], "false");
+  assert.equal(focusCount, 1);
+});
+
 test("active-job context maps captured geometry into the current work coordinates and requires a complete probe plan", () => {
   const ctx = buildContext([
     "axisValue",
