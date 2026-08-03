@@ -472,6 +472,22 @@ test("control sections start collapsed on mobile and retain desktop defaults", (
   assert.equal(elements["gamepad-section"].open, false);
 });
 
+test("closing a command sheet restores focus only for explicit dismissal", () => {
+  let focusCount = 0;
+  const summary = { tagName: "SUMMARY", focus: () => { focusCount++; } };
+  const popout = { open: true, children: [summary, { tagName: "DIV" }] };
+  const ctx = buildContext(["commandPopoutSummary", "closeCommandPopout"], [], { popout });
+
+  vm.runInContext("closeCommandPopout(popout)", ctx);
+  assert.equal(popout.open, false);
+  assert.equal(focusCount, 1, "the toolbar trigger regains keyboard focus");
+
+  popout.open = true;
+  vm.runInContext("closeCommandPopout(popout, false)", ctx);
+  assert.equal(popout.open, false);
+  assert.equal(focusCount, 1, "outside-click dismissal does not move focus");
+});
+
 test("active-job context maps captured geometry into the current work coordinates and requires a complete probe plan", () => {
   const ctx = buildContext([
     "axisValue",

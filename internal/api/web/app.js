@@ -9189,6 +9189,16 @@ function commandPanelPlacement(rect, preferredWidth, viewportWidth, viewportHeig
   return { top: Math.round(top), left, width, maxHeight: Math.round(maxHeight), arrowLeft, placement: placeAbove ? "above" : "below" };
 }
 
+function commandPopoutSummary(popout) {
+  return Array.from(popout?.children || []).find((el) => el.tagName === "SUMMARY") || null;
+}
+
+function closeCommandPopout(popout, restoreFocus = true) {
+  if (!popout?.open) return;
+  popout.open = false;
+  if (restoreFocus) commandPopoutSummary(popout)?.focus();
+}
+
 function initCommandPopouts() {
   const popouts = Array.from(document.querySelectorAll(".command-popout"));
   const commandMenu = document.getElementById("command-menu");
@@ -9226,13 +9236,17 @@ function initCommandPopouts() {
   }
 
   for (const popout of popouts) {
-    const trigger = directChild(popout, (el) => el.tagName === "SUMMARY");
+    const trigger = commandPopoutSummary(popout);
+    const panel = directChild(popout, (el) => el.classList.contains("command-panel"));
+    const closeButton = panel?.querySelector(".command-panel-close");
     if (trigger) trigger.setAttribute("aria-expanded", "false");
+    closeButton?.addEventListener("click", () => closeCommandPopout(popout));
     popout.addEventListener("toggle", () => {
       if (trigger) trigger.setAttribute("aria-expanded", String(popout.open));
       if (!popout.open) return;
+      if (panel) panel.scrollTop = 0;
       for (const other of popouts) {
-        if (other !== popout) other.open = false;
+        if (other !== popout) closeCommandPopout(other, false);
       }
       schedulePopoutPosition();
     });
@@ -9240,11 +9254,11 @@ function initCommandPopouts() {
   document.addEventListener("click", (e) => {
     const target = e.target instanceof Element ? e.target : null;
     if (target?.closest(".command-popout")) return;
-    for (const popout of popouts) popout.open = false;
+    for (const popout of popouts) closeCommandPopout(popout, false);
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    for (const popout of popouts) popout.open = false;
+    for (const popout of popouts) closeCommandPopout(popout);
   });
   window.addEventListener("resize", schedulePopoutPosition);
   window.addEventListener("scroll", schedulePopoutPosition, true);

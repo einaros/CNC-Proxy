@@ -70,6 +70,7 @@
   .command-panel-compact { --command-panel-pref-width: 360px; }
   .command-panel-tool { --command-panel-pref-width: 400px; }
   .command-panel-wide { --command-panel-pref-width: 760px; }
+  .command-panel-close { display: none; }
   .command-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: var(--gap-xs); align-items: center; min-width: 0; }
   .command-panel form { margin: 0; }
   #command-actions > #ctl-halt { flex: 0 0 auto; min-width: 84px; font-weight: 650; }
@@ -629,7 +630,7 @@
   @media (max-width: 600px) {
     :root { --control-h: 44px; }
     body { font-size: 14px; }
-    header { gap: 8px; padding: 8px 10px; }
+    header { gap: 8px; padding: 8px 10px; backdrop-filter: none; }
     main { padding: 8px 8px calc(88px + env(safe-area-inset-bottom)); }
     #command-toolbar { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: "actions actions" "machine status"; gap: 8px; align-items: center; }
     #command-actions { grid-area: actions; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 6px; overflow: visible; }
@@ -649,8 +650,9 @@
     .tabs { grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; }
     .tab { min-height: 44px; }
     .command-popout > summary, #command-actions > #ctl-halt { min-height: 44px; padding-inline: 10px; }
-    .command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); left: 10px !important; width: auto !important; max-height: min(72dvh, 620px) !important; border-radius: 10px; transform: translateY(6px); }
+    .command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); left: 10px !important; width: auto !important; max-height: min(72dvh, 620px) !important; border-radius: 10px; transform: translateY(6px); overscroll-behavior: contain; scrollbar-gutter: stable; }
     .command-panel::before { display: none; }
+    .command-panel-close { position: sticky; top: 0; z-index: 2; display: inline-flex; width: 100%; min-height: 44px; justify-content: center; background: #252b2d; box-shadow: 0 1px 0 var(--border); }
     .dashboard-grid { gap: 8px; }
     .dashboard-machine, .dashboard-job { gap: 8px; padding: 10px; }
     #dashboard-state { display: none; }
@@ -723,6 +725,7 @@
       <details class="command-popout">
         <summary>Machine</summary>
         <div class="command-panel command-panel-compact">
+          <button type="button" class="command-panel-close" aria-label="Close Machine menu">Close</button>
           <div id="machine-controls" class="command-group">
             <button type="button" id="ctl-home-main" data-control-action="home" title="Home machine ($H)">⌂ Home</button>
             <button type="button" id="ctl-hold" title="Feed hold — pause motion">⏸ Hold</button>
@@ -734,6 +737,7 @@
       <details class="command-popout">
         <summary>Macros</summary>
         <div class="command-panel command-panel-wide">
+          <button type="button" class="command-panel-close" aria-label="Close Macros menu">Close</button>
           <div id="macro-toolbar"></div>
           <div id="macro-panel"></div>
           <details id="macro-manager">
@@ -772,6 +776,7 @@
       <details class="command-popout">
         <summary>Tool</summary>
         <div class="command-panel command-panel-tool">
+          <button type="button" class="command-panel-close" aria-label="Close Tool menu">Close</button>
           <div id="tool-panel" class="action-panel">
             <div class="tool-vendor-panel">
               <div class="tool-status-title">
@@ -1439,6 +1444,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=mobile-control-sections-1"></script>
+<script type="module" src="/app.js?v=mobile-command-sheets-1"></script>
 </body>
 </html>
