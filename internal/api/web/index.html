@@ -650,7 +650,7 @@
     .tabs { grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; }
     .tab { min-height: 44px; }
     .command-popout > summary, #command-actions > #ctl-halt { min-height: 44px; padding-inline: 10px; }
-    .command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); left: 10px !important; width: auto !important; max-height: min(72dvh, 620px) !important; border-radius: 10px; transform: translateY(6px); overscroll-behavior: contain; scrollbar-gutter: stable; }
+    .command-panel { border-radius: 10px; overscroll-behavior: contain; scrollbar-gutter: stable; }
     .command-panel::before { display: none; }
     .command-panel-close { position: sticky; top: 0; z-index: 2; display: inline-flex; width: 100%; min-height: 44px; justify-content: center; background: #252b2d; box-shadow: 0 1px 0 var(--border); }
     .dashboard-grid { gap: 8px; }

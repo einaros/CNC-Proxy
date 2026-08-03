@@ -888,7 +888,7 @@ func TestWebUIServed(t *testing.T) {
 		`#command-menu { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; overflow: visible; }`,
 		`#machine-status-toolbar .machine-status-item:not(.machine-status-position) { display: none; }`,
 		`.dashboard-job.is-empty .dashboard-progress, .dashboard-job.is-empty .dashboard-preview-frame { display: none; }`,
-		`.command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom));`,
+		`.command-panel { border-radius: 10px; overscroll-behavior: contain; scrollbar-gutter: stable; }`,
 		`.command-panel-close { position: sticky; top: 0; z-index: 2; display: inline-flex; width: 100%; min-height: 44px;`,
 		`.active-gcode-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }`,
 		`#active-gcode-left.is-console-active { height: clamp(480px, 68dvh, 620px); min-height: 480px; }`,
@@ -898,6 +898,9 @@ func TestWebUIServed(t *testing.T) {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing stable Machine settings layout marker %s", want)
 		}
+	}
+	if strings.Contains(bodyText, `.command-panel { top: auto !important; right: 10px; bottom:`) {
+		t.Error("mobile command panels must remain anchored to their toolbar triggers")
 	}
 	machineSettingsIdx := strings.Index(bodyText, `id="machine-settings-modal"`)
 	machineTravelIdx := strings.Index(bodyText, `id="machine-settings-travel-title"`)
