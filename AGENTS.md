@@ -66,6 +66,14 @@ go vet -mod=mod ./...
   commands, upload/download handshakes, `.lz` handling) — use it for
   end-to-end work without hardware. Test machine when on its LAN:
   CARVERA_AIR_02220 (find IP via discovery or the controller's machine list).
+- **Agents own every development process they start.** If an agent starts
+  `cmd/fakemachine`, `cmd/proxy`, either sidecar, or any other long-lived local
+  process for validation, it must retain the exact process/session IDs and stop
+  those processes on every completion, failure, interruption, and handoff path.
+  Before finishing, verify that every port opened by those processes is no
+  longer listening. Never leave `go run` children orphaned under PID 1. Do not
+  stop a pre-existing process that the agent did not start unless the user
+  explicitly authorizes it; instead report the conflicting PID and command.
 - Deployment is Docker on the computer that runs the official controller
   (see README "Run in Docker"): `CNC_MACHINE=<ip>:2222 CNC_NAME="..."
   docker compose up -d`. Every flag is also an env var (`CNC_<FLAG>`,
