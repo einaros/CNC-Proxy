@@ -571,9 +571,11 @@
     .file-col-modified, th:nth-child(4), td:nth-child(4) { display: none; }
     .file-col-actions { width: 32%; }
     .file-col-status { width: 15%; }
-    .dashboard-grid { grid-template-columns: 1fr; overflow-y: auto; }
-    .dashboard-machine { min-height: 0; }
-    .dashboard-job { min-height: 440px; }
+    #dashboard-view { grid-template-rows: auto; align-content: start; overflow-y: auto; }
+    .dashboard-grid { height: auto; grid-template-columns: 1fr; grid-template-rows: auto auto; align-content: start; align-self: start; overflow: visible; }
+    .dashboard-machine { min-height: 0; grid-template-rows: auto auto; }
+    .dashboard-job { min-height: 0; grid-template-rows: auto auto auto; }
+    .dashboard-preview-frame { min-height: 0; aspect-ratio: 16 / 9; }
   }
   @media (max-width: 880px) {
     .control-page-layout { grid-template-columns: 1fr; }
@@ -627,21 +629,40 @@
     :root { --control-h: 44px; }
     body { font-size: 14px; }
     header { gap: 8px; padding: 8px 10px; }
-    main { padding: 10px 10px calc(88px + env(safe-area-inset-bottom)); }
-    #command-toolbar { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
-    #command-actions { min-width: 0; gap: 6px; overflow: hidden; }
-    #command-menu { flex: 1 1 auto; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-    #command-actions > #ctl-halt { flex: 0 0 auto; }
-    #machine { min-width: max-content; gap: 6px; justify-self: end; }
-    #machine-status-toolbar { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(208px, 1.6fr) repeat(3, minmax(108px, 1fr)); width: 100%; padding: 4px; overflow-x: auto; scroll-snap-type: x proximity; }
-    .machine-status-item { min-height: 40px; scroll-snap-align: start; }
+    main { padding: 8px 8px calc(88px + env(safe-area-inset-bottom)); }
+    #command-toolbar { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: "actions actions" "machine status"; gap: 8px; align-items: center; }
+    #command-actions { grid-area: actions; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 6px; overflow: visible; }
+    #command-menu { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; overflow: visible; }
+    .command-popout, .command-popout > summary { width: 100%; min-width: 0; }
+    #command-actions > #ctl-halt { width: 84px; min-width: 84px; }
+    #machine { grid-area: machine; min-width: 0; gap: 6px; justify-self: start; }
+    #machine-status-toolbar { grid-area: status; grid-column: auto; width: 100%; min-width: 0; margin: 0; padding: 4px; overflow: hidden; }
+    #machine-status-toolbar .machine-status-item:not(.machine-status-position) { display: none; }
+    .machine-status-position { width: 100%; min-width: 0; min-height: 40px; grid-template-columns: minmax(0, 1fr); padding-inline: 6px; overflow: hidden; }
+    .machine-status-position > .label { display: none; }
+    .position-lines, .position-line { width: 100%; min-width: 0; }
+    .position-line { grid-template-columns: 16px minmax(0, 1fr); }
+    .position-line b { min-width: 0; font-size: clamp(9px, 3vw, 11px); letter-spacing: -.02em; }
     .connection-status { width: 36px; height: 36px; }
     .badge { min-height: 32px; display: inline-flex; align-items: center; }
-    .tabs { grid-template-columns: repeat(4, minmax(82px, 1fr)); }
+    .tabs { grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; }
     .tab { min-height: 44px; }
     .command-popout > summary, #command-actions > #ctl-halt { min-height: 44px; padding-inline: 10px; }
     .command-panel { top: auto !important; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); left: 10px !important; width: auto !important; max-height: min(72dvh, 620px) !important; border-radius: 10px; transform: translateY(6px); }
     .command-panel::before { display: none; }
+    .dashboard-grid { gap: 8px; }
+    .dashboard-machine, .dashboard-job { gap: 8px; padding: 10px; }
+    #dashboard-state { display: none; }
+    .dashboard-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dashboard-metric { min-height: 68px; padding: 8px 10px; }
+    .dashboard-metric:first-child, .dashboard-metric:last-child { grid-column: 1 / -1; }
+    .dashboard-metric > strong, .dashboard-metric > b { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+    .dashboard-job .dashboard-heading { display: grid; justify-content: start; gap: 4px; }
+    #dashboard-job-title { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+    .dashboard-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .dashboard-progress-main { grid-column: 1 / -1; }
+    .dashboard-preview-frame { width: 100%; }
+    .dashboard-job.is-empty .dashboard-progress, .dashboard-job.is-empty .dashboard-preview-frame { display: none; }
     .active-gcode-head { gap: 10px; }
     .active-gcode-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
     .active-gcode-stat > strong { font-size: 13px; }
@@ -1416,6 +1437,6 @@
   <div id="notice"></div>
   <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=full-gcode-1"></script>
+<script type="module" src="/app.js?v=mobile-dashboard-1"></script>
 </body>
 </html>

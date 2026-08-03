@@ -6542,6 +6542,8 @@ function renderDashboard() {
     if (element) element.textContent = value;
   };
 
+  document.querySelector(".dashboard-job")?.classList.toggle("is-empty", !active.path);
+
   const machineState = document.getElementById("dashboard-state");
   if (machineState) {
     machineState.textContent = machine.state || "Unknown";
