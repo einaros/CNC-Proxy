@@ -34,6 +34,7 @@ const ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX = 320;
 const ACTIVE_JOB_SPLITTER_PX = 16;
 const JOG_INPUT_HEARTBEAT_MS = 100;
 const JOG_INPUT_DEADZONE = 0.12;
+const JOG_PREDICTION_TOLERANCE_MM = 0.02;
 const MOBILE_WORKAREA_MAX_WIDTH_PX = 600;
 const MOBILE_JOG_RADIUS_MIN_PX = 56;
 const MOBILE_JOG_RADIUS_MAX_PX = 88;
@@ -11168,19 +11169,7 @@ function applyJogEvent(ev) {
     }
   } else if (ev.type === "status" && ev.status) {
     clearNotice("machine-status");
-    state.jog.observed = ev.status.mpos || state.jog.observed;
-    // Motion events are deliberately estimates; a STATUS_RES is the observed
-    // machine position and must win immediately. Keeping an estimate until its
-    // local queue timer elapsed could leave the preview showing motion that the
-    // firmware rejected or had not parsed yet, especially when the session was
-    // disarmed by the same status report.
-    if (ev.status.mpos) {
-      state.jog.mpos = ev.status.mpos || state.jog.mpos;
-      state.jog.wpos = ev.status.wpos || state.jog.wpos;
-      state.jog.estimated = false;
-      state.jog.estimatedUntil = 0;
-    }
-    state.machine = {
+    const nextMachine = {
       ...state.machine,
       state: ev.status.state || state.machine.state,
       age_ms: ev.status.age_ms,
@@ -11188,9 +11177,10 @@ function applyJogEvent(ev) {
       raw: ev.status.raw || state.machine.raw,
       mpos: ev.status.mpos || state.machine.mpos,
       wpos: ev.status.wpos || state.machine.wpos,
-      motion_estimated: ev.status.mpos ? false : !!state.machine.motion_estimated,
+      motion_estimated: false,
       connected: true,
     };
+    state.machine = ev.status.mpos ? reconcileObservedMachineStatus(nextMachine) : mergeMachineStatusForDisplay(nextMachine);
     machineChanged = true;
     if ((ev.status.state === "Idle" || ev.status.state === "Run") && state.jog.errorCode === "status_waiting") {
       state.jog.error = "";
@@ -11543,8 +11533,7 @@ function clampAxis(v) {
 
 function applySnapshot(snap) {
   if (snap.machine) {
-    state.jog.observed = snap.machine.mpos || state.jog.observed;
-    state.machine = mergeMachineStatusForDisplay(snap.machine);
+    state.machine = reconcileObservedMachineStatus(snap.machine);
     syncActiveGcodeFromMachine(snap.machine);
     clearNotice("machine-status");
   }
@@ -11725,8 +11714,7 @@ async function pollMachine() {
   try {
     const r = await request("/api/machine/status");
     const next = await r.json();
-    state.jog.observed = next.mpos || state.jog.observed;
-    state.machine = mergeMachineStatusForDisplay(next);
+    state.machine = reconcileObservedMachineStatus(next);
     syncActiveGcodeFromMachine(next);
     clearNotice("machine-status");
     renderMachine();
@@ -11748,6 +11736,46 @@ function mergeMachineStatusForDisplay(next) {
     wpos: state.machine.wpos,
     motion_estimated: !!state.machine.motion_estimated,
   };
+}
+
+function shouldPreserveJogPrediction(next) {
+  if (!next?.mpos || !jogEstimateActive()) return false;
+  if (next.state && next.state !== "Idle" && next.state !== "Run") return false;
+  const predicted = state.jog.mpos;
+  if (!predicted) return false;
+  const target = state.jog.target || predicted;
+  let predictionIsAhead = false;
+  for (const axis of ["x", "y", "z"]) {
+    const observedAxis = axisValue(next.mpos, axis);
+    const predictedAxis = axisValue(predicted, axis);
+    if (observedAxis === null || predictedAxis === null) continue;
+    if (Math.abs(predictedAxis - observedAxis) <= JOG_PREDICTION_TOLERANCE_MM) continue;
+    const targetAxis = axisValue(target, axis);
+    if (targetAxis === null) {
+      predictionIsAhead = true;
+      continue;
+    }
+    const predictedRemaining = targetAxis - predictedAxis;
+    const observedRemaining = targetAxis - observedAxis;
+    const sameApproachSide = Math.abs(predictedRemaining) <= JOG_PREDICTION_TOLERANCE_MM ||
+      Math.sign(observedRemaining) === Math.sign(predictedRemaining);
+    if (sameApproachSide && Math.abs(observedRemaining) > Math.abs(predictedRemaining) + JOG_PREDICTION_TOLERANCE_MM) {
+      predictionIsAhead = true;
+    }
+  }
+  return predictionIsAhead;
+}
+
+function reconcileObservedMachineStatus(next) {
+  if (!next) return next;
+  state.jog.observed = next.mpos || state.jog.observed;
+  if (next.mpos && !shouldPreserveJogPrediction(next)) {
+    state.jog.mpos = next.mpos;
+    state.jog.wpos = next.wpos || state.jog.wpos;
+    state.jog.estimated = false;
+    state.jog.estimatedUntil = 0;
+  }
+  return mergeMachineStatusForDisplay(next);
 }
 
 function initializeResponsiveControlSections(isMobile = window.matchMedia?.("(max-width: 600px)")?.matches === true) {

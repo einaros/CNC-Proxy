@@ -3520,13 +3520,14 @@ test("jog motion keeps observed machine position distinct from its prediction", 
   assert.deepEqual(JSON.parse(JSON.stringify(state.jog.target)), { x: 10, y: 2, z: 3 });
 });
 
-test("observed jog status immediately corrects an unconfirmed preview estimate", () => {
+test("lagging jog status does not pull an active prediction backward", () => {
   const state = {
     jog: {
       armed: true,
       observed: { x: 1, y: 2, z: 3 },
       mpos: { x: 4, y: 2, z: 3 },
       wpos: { x: 4, y: 2, z: 3 },
+      target: { x: 10, y: 2, z: 3 },
       estimated: true,
       estimatedUntil: 10_000,
       error: "",
@@ -3539,8 +3540,96 @@ test("observed jog status immediately corrects an unconfirmed preview estimate",
       motion_estimated: true,
     },
   };
-  const ctx = buildContext(["applyJogEvent"], [], {
+  const ctx = buildContext([
+    "axisValue",
+    "jogEstimateActive",
+    "shouldPreserveJogPrediction",
+    "mergeMachineStatusForDisplay",
+    "reconcileObservedMachineStatus",
+    "applyJogEvent",
+  ], ["JOG_PREDICTION_TOLERANCE_MM"], {
     state,
+    performance: { now: () => 100 },
+    clearNotice: () => {},
+    renderMachine: () => {},
+    renderJog: () => {},
+  });
+  vm.runInContext(
+    "applyJogEvent({ type: 'status', status: { state: 'Idle', age_ms: 0, mpos: { x: 1.5, y: 2, z: 3 }, wpos: { x: 1.5, y: 2, z: 3 } } })",
+    ctx,
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(state.jog.observed)), { x: 1.5, y: 2, z: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.jog.mpos)), { x: 4, y: 2, z: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.machine.mpos)), { x: 4, y: 2, z: 3 });
+  assert.equal(state.jog.estimated, true);
+  assert.equal(state.machine.motion_estimated, true);
+});
+
+test("jog status replaces a prediction once the machine catches up", () => {
+  const state = {
+    jog: {
+      armed: true,
+      observed: { x: 1, y: 2, z: 3 },
+      mpos: { x: 4, y: 2, z: 3 },
+      wpos: { x: 4, y: 2, z: 3 },
+      target: { x: 10, y: 2, z: 3 },
+      estimated: true,
+      estimatedUntil: 10_000,
+      error: "",
+      errorCode: "",
+    },
+    machine: { state: "Run", mpos: { x: 4, y: 2, z: 3 }, wpos: { x: 4, y: 2, z: 3 }, motion_estimated: true },
+  };
+  const ctx = buildContext([
+    "axisValue",
+    "jogEstimateActive",
+    "shouldPreserveJogPrediction",
+    "mergeMachineStatusForDisplay",
+    "reconcileObservedMachineStatus",
+    "applyJogEvent",
+  ], ["JOG_PREDICTION_TOLERANCE_MM"], {
+    state,
+    performance: { now: () => 100 },
+    clearNotice: () => {},
+    renderMachine: () => {},
+    renderJog: () => {},
+  });
+  vm.runInContext(
+    "applyJogEvent({ type: 'status', status: { state: 'Run', age_ms: 0, mpos: { x: 4.01, y: 2, z: 3 }, wpos: { x: 4.01, y: 2, z: 3 } } })",
+    ctx,
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(state.jog.mpos)), { x: 4.01, y: 2, z: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.machine.mpos)), { x: 4.01, y: 2, z: 3 });
+  assert.equal(state.jog.estimated, false);
+  assert.equal(state.jog.estimatedUntil, 0);
+  assert.equal(state.machine.motion_estimated, false);
+});
+
+test("an expired jog prediction yields to a position that never caught up", () => {
+  const state = {
+    jog: {
+      armed: true,
+      observed: { x: 1, y: 2, z: 3 },
+      mpos: { x: 4, y: 2, z: 3 },
+      wpos: { x: 4, y: 2, z: 3 },
+      target: { x: 10, y: 2, z: 3 },
+      estimated: true,
+      estimatedUntil: 500,
+      error: "",
+      errorCode: "",
+    },
+    machine: { state: "Run", mpos: { x: 4, y: 2, z: 3 }, wpos: { x: 4, y: 2, z: 3 }, motion_estimated: true },
+  };
+  const ctx = buildContext([
+    "axisValue",
+    "jogEstimateActive",
+    "shouldPreserveJogPrediction",
+    "mergeMachineStatusForDisplay",
+    "reconcileObservedMachineStatus",
+    "applyJogEvent",
+  ], ["JOG_PREDICTION_TOLERANCE_MM"], {
+    state,
+    performance: { now: () => 600 },
     clearNotice: () => {},
     renderMachine: () => {},
     renderJog: () => {},
@@ -3550,9 +3639,7 @@ test("observed jog status immediately corrects an unconfirmed preview estimate",
     ctx,
   );
   assert.deepEqual(JSON.parse(JSON.stringify(state.jog.mpos)), { x: 1.5, y: 2, z: 3 });
-  assert.deepEqual(JSON.parse(JSON.stringify(state.machine.mpos)), { x: 1.5, y: 2, z: 3 });
   assert.equal(state.jog.estimated, false);
-  assert.equal(state.jog.estimatedUntil, 0);
   assert.equal(state.machine.motion_estimated, false);
 });
 
