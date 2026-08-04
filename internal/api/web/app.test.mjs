@@ -14,6 +14,16 @@ import { fileURLToPath } from "node:url";
 
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "app.js"), "utf8");
 
+test("file rows expose responsive metadata cells", () => {
+  for (const marker of [
+    'class="file-type-cell" data-label="Type"',
+    'class="file-size-cell num" data-label="${f.is_dir ? "Items" : "Size"}"',
+    'class="file-modified-cell" data-label="Modified"',
+  ]) {
+    assert.ok(source.includes(marker), `app.js includes ${marker}`);
+  }
+});
+
 function extractFunction(name) {
   let start = source.indexOf("\nfunction " + name + "(");
   if (start < 0) start = source.indexOf("\nasync function " + name + "(");

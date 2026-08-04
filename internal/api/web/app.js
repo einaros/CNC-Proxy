@@ -6255,9 +6255,9 @@ function buildFileRow(tr, f, q) {
       ${f.children != null ? `<div class="muted">${f.children} item${f.children === 1 ? "" : "s"}</div>` : ""}
       ${f.error ? `<div class="err">${escapeHtml(f.error)}</div>` : ""}
     </td>
-    <td>${type}</td>
-    <td class="num">${escapeHtml(f.is_dir && f.children != null ? String(f.children) : fmtSize(f.size, f.is_dir))}</td>
-    <td>${escapeHtml(fmtTime(f.mtime))}</td>
+    <td class="file-type-cell" data-label="Type">${type}</td>
+    <td class="file-size-cell num" data-label="${f.is_dir ? "Items" : "Size"}">${escapeHtml(f.is_dir && f.children != null ? String(f.children) : fmtSize(f.size, f.is_dir))}</td>
+    <td class="file-modified-cell" data-label="Modified">${escapeHtml(fmtTime(f.mtime))}</td>
     <td class="status-cell">${f.virtual ? `<span class="sync"><span class="dot"></span>Folder</span>` : `<span class="sync s-${escapeHtml(f.sync)}"><span class="dot"></span>${escapeHtml(label)}</span>`}</td>
     <td class="actions"></td>`;
 

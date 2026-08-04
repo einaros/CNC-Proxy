@@ -769,7 +769,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index still contains obsolete dashboard 2D preview marker %s", gone)
 		}
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `.status-item`, `#status-bar { position: fixed;`, `background: transparent; border: 0; box-shadow: none; pointer-events: none;`, `.status-item.entering`, `.status-item.leaving`, `.status-dismiss`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="header-toggle"`, `aria-label="Hide top bars"`, `body.header-collapsed #command-toolbar, body.header-collapsed .tabs { display: none; }`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos"`, `.dashboard-position-metric > strong, .dashboard-position-metric > b { overflow: visible; text-overflow: clip; white-space: normal;`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `id="jog-settings-section"`, `id="move-to-work-section"`, `id="work-zero-section"`, `id="gamepad-section"`, `id="workarea-mobile-jog"`, `.mobile-jog-base`, `.mobile-jog-knob`, `class="command-panel-close" aria-label="Close Macros menu"`, `class="command-panel-close" aria-label="Close Tool menu"`, `type="module"`, `/app.js?v=stable-jog-prediction-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `.status-item`, `#status-bar { position: fixed;`, `background: transparent; border: 0; box-shadow: none; pointer-events: none;`, `.status-item.entering`, `.status-item.leaving`, `.status-dismiss`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="header-toggle"`, `aria-label="Hide top bars"`, `body.header-collapsed #command-toolbar, body.header-collapsed .tabs { display: none; }`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos"`, `.dashboard-position-metric > strong, .dashboard-position-metric > b { overflow: visible; text-overflow: clip; white-space: normal;`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `id="jog-settings-section"`, `id="move-to-work-section"`, `id="work-zero-section"`, `id="gamepad-section"`, `id="workarea-mobile-jog"`, `.mobile-jog-base`, `.mobile-jog-knob`, `class="command-panel-close" aria-label="Close Macros menu"`, `class="command-panel-close" aria-label="Close Tool menu"`, `type="module"`, `/app.js?v=mobile-files-1`} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -800,6 +800,30 @@ func TestWebUIServed(t *testing.T) {
 	for _, want := range []string{`id="file-browser"`, `id="folder-tree"`, `id="breadcrumbs"`, `id="folder-up"`, `id="folder-new"`, `id="current-folder"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index missing %s", want)
+		}
+	}
+	for _, want := range []string{
+		`id="file-table"`,
+		`#file-table .file-col-modified, #file-table thead th:nth-child(4), #file-table .file-modified-cell`,
+		`#files tr { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr) max-content; grid-template-areas: "name name name status" "type size modified modified" "actions actions actions actions";`,
+		`#file-table .file-type-cell { display: block; grid-area: type; }`,
+		`#file-table .file-size-cell { display: block; grid-area: size; }`,
+		`#file-table .file-modified-cell { display: block; grid-area: modified;`,
+		`#current-folder { display: none; }`,
+		`#folder-bar { grid-template-columns: minmax(0, 1fr); gap: 8px; justify-content: stretch; }`,
+		`#folder-actions { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr));`,
+	} {
+		if !strings.Contains(bodyText, want) {
+			t.Errorf("index missing mobile file listing marker %s", want)
+		}
+	}
+	for _, gone := range []string{
+		`.file-col-modified, th:nth-child(4), td:nth-child(4)`,
+		`.file-col-type, th:nth-child(2), td:nth-child(2)`,
+		`    th:nth-child(3), td:nth-child(3)`,
+	} {
+		if strings.Contains(bodyText, gone) {
+			t.Errorf("index still contains unscoped responsive table selector %s", gone)
 		}
 	}
 	for _, want := range []string{
@@ -913,7 +937,7 @@ func TestWebUIServed(t *testing.T) {
 		`.command-panel-close { position: sticky; top: 0; z-index: 2; display: inline-flex; width: 100%; min-height: 44px;`,
 		`.active-gcode-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }`,
 		`#active-gcode-left.is-console-active { height: clamp(480px, 68dvh, 620px); min-height: 480px; }`,
-		`#files .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));`,
+		`#files .actions { display: grid; grid-area: actions; grid-template-columns: repeat(2, minmax(0, 1fr));`,
 		`dialog { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); margin: 8px; }`,
 	} {
 		if !strings.Contains(bodyText, want) {
