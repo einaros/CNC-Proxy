@@ -3294,6 +3294,74 @@ test("armed outline capture waits for a fresh Idle position after queued motion"
   assert.equal(result.machine.x, 10.1);
 });
 
+test("an early outline point request remains latched until its motion revision settles", async () => {
+  const clock = { value: 0 };
+  const state = {
+    machine: { state: "Run", motion_estimated: true },
+    jog: {
+      armed: true,
+      statusRevision: 10,
+      motionRevisionKnown: true,
+      motionRevision: 3,
+      settledMotionRevision: 2,
+      targetMotionPending: 0,
+      fieldProbeMovePending: 0,
+      zStepPending: 0,
+      zProbePending: false,
+      probe3DPending: false,
+      deadman: false,
+      axes: { x: 0, y: 0, z: 0 },
+      estimated: true,
+      estimatedUntil: 100,
+      lastInput: null,
+    },
+  };
+  const ctx = buildContext([
+    "axisValue",
+    "finiteOr",
+    "jogMotionAwaitingSettlement",
+    "jogEstimateActive",
+    "outlineCaptureMotionPending",
+    "outlineCapturePositionsClose",
+    "waitForOutlineCapturePosition",
+  ], [
+    "JOG_INPUT_DEADZONE",
+    "OUTLINE_CAPTURE_SETTLE_MS",
+    "OUTLINE_CAPTURE_POLL_MS",
+    "OUTLINE_CAPTURE_TIMEOUT_MS",
+    "OUTLINE_CAPTURE_POSITION_TOLERANCE_MM",
+  ], {
+    state,
+    clock,
+    performance: { now: () => clock.value },
+    tapMoveTargetBusy: () => false,
+    jogInputActive: () => false,
+    hasPendingOriginOperation: () => false,
+    currentOutlineCapturePosition: () => ({
+      machine: { x: state.jog.settledMotionRevision >= 3 ? 12 : 4, y: 20, z: -3 },
+      work: { x: state.jog.settledMotionRevision >= 3 ? 3 : -5, y: 2, z: 0 },
+      origin: { x: 9, y: 18, z: -3 },
+    }),
+  });
+  const result = await vm.runInContext(`waitForOutlineCapturePosition({
+    now: () => clock.value,
+    delay: async (ms) => {
+      clock.value += ms;
+      if (clock.value >= 100) {
+        state.jog.estimated = false;
+        state.machine.motion_estimated = false;
+        state.machine.state = "Idle";
+      }
+      if (clock.value >= 250) state.jog.settledMotionRevision = 3;
+    },
+    afterMotionRevision: 3,
+    pollMS: 50,
+    timeoutMS: 2000
+  })`, ctx);
+  assert.equal(clock.value, 250, "the press is retained past visual stop until the server settles its queued revision");
+  assert.equal(result.machine.x, 12);
+});
+
 test("outline point presses queue while the prior position capture is pending", async () => {
   const pending = [];
   let undo = 0;
@@ -3617,6 +3685,59 @@ test("jog motion keeps observed machine position distinct from its prediction", 
   assert.deepEqual(JSON.parse(JSON.stringify(state.jog.target)), { x: 10, y: 2, z: 3 });
 });
 
+test("a reconnected jog stream resets obsolete motion revisions", () => {
+  const state = {
+    jog: {
+      motionStreamRevision: 4,
+      motionRevisionKnown: true,
+      motionRevision: 20,
+      settledMotionRevision: 19,
+      errorCode: "",
+    },
+  };
+  const ctx = buildContext(["applyJogEvent"], [], {
+    state,
+    flushQueuedTapMoveArm: () => {},
+    renderJog: () => {},
+    renderOutlineCapture: () => {},
+  });
+  vm.runInContext("applyJogEvent({ type: 'hello', capabilities: { tick_ms: 20 } })", ctx);
+  assert.equal(state.jog.motionStreamRevision, 5);
+  assert.equal(state.jog.motionRevisionKnown, false);
+  assert.equal(state.jog.motionRevision, 0);
+  assert.equal(state.jog.settledMotionRevision, 0);
+});
+
+test("work-area spindle never falls back to the raw pre-jog observation", () => {
+  const markers = [];
+  const state = {
+    jog: {
+      mpos: { x: 9, y: 8, z: 0 },
+      observed: { x: 1, y: 2, z: 0 },
+      target: null,
+    },
+    machine: { mpos: { x: 9, y: 8, z: 0 } },
+    activeTab: "control",
+  };
+  const ctx = buildContext(["renderWorkArea"], [], {
+    state,
+    gcodeView: { renderer: null },
+    applyWorkAreaViewport: () => {},
+    renderWorkAreaBoundary: () => {},
+    renderWorkAreaGrid: () => {},
+    renderWorkAreaOrigin: () => {},
+    renderWorkAreaOutline: () => {},
+    renderWorkAreaFieldProbePreview: () => {},
+    setWorkAreaToolRadius: () => {},
+    setWorkAreaMarker: (id, point) => markers.push({ id, point }),
+  });
+  vm.runInContext("renderWorkArea()", ctx);
+  assert.deepEqual(JSON.parse(JSON.stringify(markers[0])), {
+    id: "workarea-spindle",
+    point: { x: 9, y: 8, z: 0 },
+  });
+});
+
 test("lagging jog status does not pull an active prediction backward", () => {
   const state = {
     jog: {
@@ -3626,7 +3747,10 @@ test("lagging jog status does not pull an active prediction backward", () => {
       wpos: { x: 4, y: 2, z: 3 },
       target: { x: 10, y: 2, z: 3 },
       estimated: true,
-      estimatedUntil: 10_000,
+      estimatedUntil: 500,
+      motionRevisionKnown: true,
+      motionRevision: 3,
+      settledMotionRevision: 2,
       error: "",
       errorCode: "",
     },
@@ -3639,6 +3763,7 @@ test("lagging jog status does not pull an active prediction backward", () => {
   };
   const ctx = buildContext([
     "axisValue",
+    "jogMotionAwaitingSettlement",
     "jogEstimateActive",
     "shouldPreserveJogPrediction",
     "mergeMachineStatusForDisplay",
@@ -3646,7 +3771,7 @@ test("lagging jog status does not pull an active prediction backward", () => {
     "applyJogEvent",
   ], ["JOG_PREDICTION_TOLERANCE_MM"], {
     state,
-    performance: { now: () => 100 },
+    performance: { now: () => 600 },
     clearNotice: () => {},
     renderMachine: () => {},
     renderJog: () => {},
@@ -3679,6 +3804,7 @@ test("jog status replaces a prediction once the machine catches up", () => {
   };
   const ctx = buildContext([
     "axisValue",
+    "jogMotionAwaitingSettlement",
     "jogEstimateActive",
     "shouldPreserveJogPrediction",
     "mergeMachineStatusForDisplay",
@@ -3719,6 +3845,7 @@ test("an expired jog prediction yields to a position that never caught up", () =
   };
   const ctx = buildContext([
     "axisValue",
+    "jogMotionAwaitingSettlement",
     "jogEstimateActive",
     "shouldPreserveJogPrediction",
     "mergeMachineStatusForDisplay",

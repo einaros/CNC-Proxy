@@ -1037,6 +1037,7 @@ func TestJogFastTickMaintainsBoundedBackToBackLookahead(t *testing.T) {
 		clock.Set(base.Add(time.Duration(i) * mgr.cfg.Tick))
 		s.motionTick()
 	}
+	waitForGcodeCount(t, fm, 3)
 	got := fm.Gcodes()
 	if len(got) < 3 {
 		t.Fatalf("jog did not establish back-to-back planner segments: %v", got)
@@ -1623,6 +1624,55 @@ func TestJogEmitsEstimatedMotionFromQueuedSegments(t *testing.T) {
 	}
 	if ev.Motion.QueueLeadMs <= 0 {
 		t.Fatalf("queue lead = %dms, want positive queued motion", ev.Motion.QueueLeadMs)
+	}
+}
+
+func TestJogStatusIdentifiesTheMotionRevisionItsPositionSettles(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	base := time.Unix(100, 0)
+	clock := newManualClock(base)
+	mgr.now = clock.Now
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = time.Hour
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Step(2, "x", 1)
+	motion := drainUntil(t, s, "motion")
+	if motion.Motion == nil || motion.Motion.Revision == 0 {
+		t.Fatalf("motion event = %+v, want a non-zero planner revision", motion)
+	}
+	drainUntil(t, s, "ack")
+
+	s.mu.Lock()
+	queuedUntil := s.queuedUntil
+	s.mu.Unlock()
+	clock.Set(queuedUntil.Add(time.Millisecond))
+	time.Sleep(75 * time.Millisecond)
+	fm.SetStatus("<Idle|MPos:1,0,0|WPos:1,0,0>")
+	if err := s.refreshStatus(); err != nil {
+		t.Fatal(err)
+	}
+	status := drainUntil(t, s, "status")
+	if status.Status == nil {
+		t.Fatalf("status event = %+v", status)
+	}
+	if status.Status.MotionRevision != motion.Motion.Revision || status.Status.SettledMotionRevision != motion.Motion.Revision {
+		s.mu.Lock()
+		serverQueueEnd := s.queuedUntil
+		s.mu.Unlock()
+		t.Fatalf("settled status revisions = motion %d settled %d, want %d (state=%s now=%s queue_end=%s)", status.Status.MotionRevision, status.Status.SettledMotionRevision, motion.Motion.Revision, status.Status.State, clock.Now(), serverQueueEnd)
+	}
+	if got := status.Status.MPos["x"]; got != 1 {
+		t.Fatalf("settled status X = %v, want 1", got)
 	}
 }
 

@@ -204,12 +204,14 @@ type Event struct {
 
 // StatusEvent is the status subset streamed to jog clients.
 type StatusEvent struct {
-	State      machine.State      `json:"state"`
-	AgeMs      int64              `json:"age_ms"`
-	ObservedAt time.Time          `json:"observed_at,omitempty"`
-	Raw        string             `json:"raw,omitempty"`
-	MPos       machine.AxisValues `json:"mpos,omitempty"`
-	WPos       machine.AxisValues `json:"wpos,omitempty"`
+	State                 machine.State      `json:"state"`
+	AgeMs                 int64              `json:"age_ms"`
+	ObservedAt            time.Time          `json:"observed_at,omitempty"`
+	Raw                   string             `json:"raw,omitempty"`
+	MPos                  machine.AxisValues `json:"mpos,omitempty"`
+	WPos                  machine.AxisValues `json:"wpos,omitempty"`
+	MotionRevision        uint64             `json:"motion_revision"`
+	SettledMotionRevision uint64             `json:"settled_motion_revision"`
 }
 
 // MotionEvent reports one server-generated jog segment for visualization and
@@ -222,7 +224,13 @@ type MotionEvent struct {
 	Delta         Axes               `json:"delta"`
 	Lead          Axes               `json:"lead"`
 	QueueLeadMs   int64              `json:"queue_lead_ms,omitempty"`
+	Revision      uint64             `json:"revision"`
 	Command       string             `json:"command,omitempty"`
+}
+
+type motionRevisions struct {
+	motion  uint64
+	settled uint64
 }
 
 type command struct {
@@ -285,6 +293,9 @@ type Manager struct {
 	sessions map[*Session]struct{}
 	owner    *Session
 	now      func() time.Time
+
+	motionRevision  uint64
+	settledRevision uint64
 }
 
 // New creates a Manager.
@@ -301,6 +312,26 @@ func (m *Manager) softLimits() SoftLimits {
 		return SoftLimits{}
 	}
 	return m.cfg.SoftLimits()
+}
+
+func (m *Manager) markMotion() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.motionRevision++
+	return m.motionRevision
+}
+
+func (m *Manager) markSettled() motionRevisions {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.settledRevision = m.motionRevision
+	return motionRevisions{motion: m.motionRevision, settled: m.settledRevision}
+}
+
+func (m *Manager) motionRevisions() motionRevisions {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return motionRevisions{motion: m.motionRevision, settled: m.settledRevision}
 }
 
 // Capabilities reports static limits plus current availability.
@@ -784,6 +815,7 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 		from:  copyAxes(planned),
 		to:    copyAxes(target),
 	}, now)
+	s.mgr.markMotion()
 	s.lastMotionCmd = cmd
 	s.mu.Unlock()
 	s.logMotion(now, cmd)
@@ -1087,6 +1119,7 @@ func (s *Session) writePlannedJogSegment(now time.Time, lease *session.JogLease,
 		from:  copyAxes(from),
 		to:    copyAxes(target),
 	}, now)
+	s.mgr.markMotion()
 	s.lastMotionCmd = cmd
 	s.mu.Unlock()
 	s.logMotion(now, cmd)
@@ -1187,7 +1220,7 @@ func (s *Session) handleArm(seq int64) {
 	s.segments = nil
 	s.mu.Unlock()
 	armSucceeded = true
-	s.mgr.broadcastEvent(Event{Type: "status", Status: statusEvent(st, age)})
+	s.mgr.broadcastEvent(Event{Type: "status", Status: statusEvent(st, age, s.mgr.markSettled())})
 	s.emit(Event{Type: "ack", Seq: seq})
 	s.emitState(seq)
 }
@@ -1378,7 +1411,8 @@ func (s *Session) applyStatusPayload(payload string) error {
 	// firmware queue. A wall-clock estimate reaching zero does not prove that
 	// queue has drained; resetting planned here would lose our only bound on how
 	// far ahead we have submitted. Idle is the firmware's actual drain signal.
-	if queueLead(now, s.queuedUntil) == 0 && st.State == machine.Idle {
+	settled := queueLead(now, s.queuedUntil) == 0 && st.State == machine.Idle
+	if settled {
 		s.planned = copyAxes(st.MPos)
 		s.segments = nil
 	}
@@ -1386,7 +1420,11 @@ func (s *Session) applyStatusPayload(payload string) error {
 	if st.State == machine.Alarm {
 		s.logAlarmStatus(st)
 	}
-	s.mgr.broadcastEvent(Event{Type: "status", Status: statusEvent(st, age)})
+	revisions := s.mgr.motionRevisions()
+	if settled {
+		revisions = s.mgr.markSettled()
+	}
+	s.mgr.broadcastEvent(Event{Type: "status", Status: statusEvent(st, age, revisions)})
 	if completed != nil {
 		s.emit(Event{Type: "target_complete", Seq: completed.seq, Target: completed.target})
 	}
@@ -1578,6 +1616,7 @@ func (s *Session) motionTick() {
 			from:  copyAxes(planned),
 			to:    copyAxes(target),
 		}, writtenAt)
+		s.mgr.markMotion()
 		s.lastMotionCmd = cmd
 		latest = s.latest
 		inputUnchanged := s.haveInput && motionInputActive(true, latest, s.mgr.now(), s.mgr.cfg)
@@ -2204,13 +2243,16 @@ func (s *Session) emitMotionEstimate(now time.Time, st machine.Status, target ma
 	s.segments = trimPlannedSegments(s.segments, now)
 	estimated := estimateFromSegments(s.segments, now, target)
 	s.mu.Unlock()
+	revision := s.mgr.motionRevisions().motion
 	if target == nil {
 		target = estimated
 	}
 	if target == nil && estimated == nil {
 		return
 	}
-	s.emitMotion(now, motionEvent(target, st.MPos, estimated, delta, cmd, queuedLead, st))
+	ev := motionEvent(target, st.MPos, estimated, delta, cmd, queuedLead, st)
+	ev.Revision = revision
+	s.emitMotion(now, ev)
 }
 
 func (s *Session) emitMotion(now time.Time, ev *MotionEvent) {
@@ -2354,14 +2396,16 @@ func (s *Session) closeEvents() {
 	close(s.events)
 }
 
-func statusEvent(st machine.Status, age time.Duration) *StatusEvent {
+func statusEvent(st machine.Status, age time.Duration, revisions motionRevisions) *StatusEvent {
 	return &StatusEvent{
-		State:      st.State,
-		AgeMs:      age.Milliseconds(),
-		ObservedAt: st.ObservedAt,
-		Raw:        st.Raw,
-		MPos:       copyAxes(st.MPos),
-		WPos:       copyAxes(st.WPos),
+		State:                 st.State,
+		AgeMs:                 age.Milliseconds(),
+		ObservedAt:            st.ObservedAt,
+		Raw:                   st.Raw,
+		MPos:                  copyAxes(st.MPos),
+		WPos:                  copyAxes(st.WPos),
+		MotionRevision:        revisions.motion,
+		SettledMotionRevision: revisions.settled,
 	}
 }
 

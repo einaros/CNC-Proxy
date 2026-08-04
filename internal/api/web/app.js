@@ -102,6 +102,10 @@ const state = {
     estimated: false,
     estimatedUntil: 0,
     statusRevision: 0,
+    motionRevision: 0,
+    settledMotionRevision: 0,
+    motionRevisionKnown: false,
+    motionStreamRevision: 0,
     availability: null,
     target: null,
     lead: { x: 0, y: 0, z: 0 },
@@ -2172,7 +2176,10 @@ function renderWorkArea() {
   renderWorkAreaOutline();
   renderWorkAreaFieldProbePreview();
   setWorkAreaToolRadius();
-  const spindle = jogEstimateActive() ? (state.jog.mpos || state.machine.mpos) : (state.jog.observed || state.jog.mpos || state.machine.mpos);
+  // `observed` is deliberately kept as raw reconciliation input. It can lag
+  // several status polls behind the planner estimate and must never become the
+  // displayed position merely because the estimate's wall-clock timer elapsed.
+  const spindle = state.jog.mpos || state.machine.mpos || state.jog.observed;
   const target = state.jog.target;
   setWorkAreaMarker("workarea-spindle", spindle);
   setWorkAreaMarker("workarea-target", target);
@@ -2413,11 +2420,28 @@ async function waitForOutlineCapturePosition(options = {}) {
   const pollMS = finiteOr(options.pollMS, OUTLINE_CAPTURE_POLL_MS);
   const timeoutMS = finiteOr(options.timeoutMS, OUTLINE_CAPTURE_TIMEOUT_MS);
   let requiredRevision = Number.isFinite(Number(options.afterRevision)) ? Number(options.afterRevision) : -1;
+  const requireMotionSettlement = Number.isFinite(Number(options.afterMotionRevision)) && Number(options.afterMotionRevision) >= 0;
+  let requiredMotionRevision = Number.isFinite(Number(options.afterMotionRevision))
+    ? Number(options.afterMotionRevision)
+    : (Number(state.jog.motionRevision) || 0);
+  let requiredMotionStream = Number.isFinite(Number(options.afterMotionStream))
+    ? Number(options.afterMotionStream)
+    : (Number(state.jog.motionStreamRevision) || 0);
   const startedAt = now();
   let stablePosition = null;
   let stableSince = null;
   while (now() - startedAt <= timeoutMS) {
     const revision = Number(state.jog.statusRevision) || 0;
+    const revisionKnown = !!state.jog.motionRevisionKnown;
+    if (revisionKnown) {
+      const motionStream = Number(state.jog.motionStreamRevision) || 0;
+      if (motionStream !== requiredMotionStream) {
+        requiredMotionStream = motionStream;
+        requiredMotionRevision = Number(state.jog.motionRevision) || 0;
+      } else {
+        requiredMotionRevision = Math.max(requiredMotionRevision, Number(state.jog.motionRevision) || 0);
+      }
+    }
     const machineStillJogging = !!state.jog.armed && state.machine?.state !== "Idle";
     if (outlineCaptureMotionPending() || machineStillJogging) {
       // A position report observed before the predicted queue drained cannot
@@ -2427,12 +2451,14 @@ async function waitForOutlineCapturePosition(options = {}) {
       stableSince = null;
     } else {
       const position = currentOutlineCapturePosition();
-      const freshObservedPosition = requiredRevision < 0 || revision > requiredRevision;
+      const motionSettled = revisionKnown && Number(state.jog.settledMotionRevision || 0) >= requiredMotionRevision;
+      const freshObservedPosition = motionSettled || (!requireMotionSettlement && (requiredRevision < 0 || revision > requiredRevision));
       if (position && freshObservedPosition) {
-        // An armed jog's fresh Idle report is the firmware's queue-drained
-        // signal. It is more authoritative than another arbitrary settle
-        // timer and already carries the exact MPos/WPos pair to capture.
-        if (requiredRevision >= 0) return position;
+        // The jog server owns the planner queue and marks the exact motion
+        // revision covered by a post-queue Idle position. Capture immediately
+        // once that contract is satisfied, including a button press made while
+        // the browser was still visually catching up.
+        if (motionSettled || (!revisionKnown && requiredRevision >= 0)) return position;
         if (stablePosition && outlineCapturePositionsClose(stablePosition, position)) {
           if (stableSince !== null && now() - stableSince >= settleMS) return position;
         } else {
@@ -2450,8 +2476,11 @@ async function processOutlinePointQueue(o) {
   try {
     while (o.addPointQueued > 0) {
       o.addPointQueued--;
-      const afterRevision = state.jog.armed ? (Number(state.jog.statusRevision) || 0) : -1;
-      const pos = await waitForOutlineCapturePosition({ afterRevision });
+      const revisionKnown = !!state.jog.motionRevisionKnown;
+      const afterRevision = state.jog.armed && !revisionKnown ? (Number(state.jog.statusRevision) || 0) : -1;
+      const afterMotionRevision = revisionKnown ? (Number(state.jog.motionRevision) || 0) : -1;
+      const afterMotionStream = Number(state.jog.motionStreamRevision) || 0;
+      const pos = await waitForOutlineCapturePosition({ afterRevision, afterMotionRevision, afterMotionStream });
       if (state.outline !== o || !o.active || o.closed) throw new Error("outline capture changed while waiting for motion to settle");
       const capture = {
         id: newID("outline-point"),
@@ -11149,6 +11178,10 @@ function clearDisarmedMovementState() {
 function applyJogEvent(ev) {
   let machineChanged = false;
   if (ev.type === "hello" && ev.capabilities) {
+    state.jog.motionStreamRevision = (Number(state.jog.motionStreamRevision) || 0) + 1;
+    state.jog.motionRevision = 0;
+    state.jog.settledMotionRevision = 0;
+    state.jog.motionRevisionKnown = false;
     state.jog.caps = ev.capabilities;
     state.jog.availability = ev.capabilities.availability || null;
     if (state.jog.availability?.available && state.jog.errorCode === "busy") {
@@ -11181,6 +11214,13 @@ function applyJogEvent(ev) {
   } else if (ev.type === "status" && ev.status) {
     clearNotice("machine-status");
     state.jog.statusRevision = (Number(state.jog.statusRevision) || 0) + 1;
+    const motionRevision = Number(ev.status.motion_revision);
+    const settledMotionRevision = Number(ev.status.settled_motion_revision);
+    if (Number.isFinite(motionRevision) && Number.isFinite(settledMotionRevision)) {
+      state.jog.motionRevisionKnown = true;
+      state.jog.motionRevision = Math.max(Number(state.jog.motionRevision) || 0, motionRevision);
+      state.jog.settledMotionRevision = Math.max(Number(state.jog.settledMotionRevision) || 0, settledMotionRevision);
+    }
     const nextMachine = {
       ...state.machine,
       state: ev.status.state || state.machine.state,
@@ -11202,6 +11242,11 @@ function applyJogEvent(ev) {
       state.jog.errorCode = "";
     }
   } else if (ev.type === "motion" && ev.motion) {
+    const motionRevision = Number(ev.motion.revision);
+    if (Number.isFinite(motionRevision)) {
+      state.jog.motionRevisionKnown = true;
+      state.jog.motionRevision = Math.max(Number(state.jog.motionRevision) || 0, motionRevision);
+    }
     const predicted = ev.motion.estimated || ev.motion.observed || ev.motion.target;
     if (!state.jog.targetMotionPending) state.jog.target = ev.motion.target || state.jog.target;
     state.jog.mpos = predicted || state.jog.mpos;
@@ -11380,8 +11425,14 @@ function applyJogEvent(ev) {
   }
 }
 
+function jogMotionAwaitingSettlement() {
+  return !!state.jog.motionRevisionKnown &&
+    Number(state.jog.motionRevision || 0) > Number(state.jog.settledMotionRevision || 0);
+}
+
 function jogEstimateActive() {
-  return !!state.jog.estimated && Number(state.jog.estimatedUntil) > performance.now();
+  return !!state.jog.estimated &&
+    (jogMotionAwaitingSettlement() || Number(state.jog.estimatedUntil) > performance.now());
 }
 
 function currentGamepad() {
@@ -11763,6 +11814,7 @@ function mergeMachineStatusForDisplay(next) {
 
 function shouldPreserveJogPrediction(next) {
   if (!next?.mpos || !jogEstimateActive()) return false;
+  if (state.jog.motionRevisionKnown && !jogMotionAwaitingSettlement()) return false;
   if (next.state && next.state !== "Idle" && next.state !== "Run") return false;
   const predicted = state.jog.mpos;
   if (!predicted) return false;

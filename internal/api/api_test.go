@@ -1553,7 +1553,7 @@ func TestJogWebSocketObserversReceiveOwnerMotion(t *testing.T) {
 	writeWS(t, owner, map[string]any{"type": "step", "seq": 2, "axis": "z", "distance": 1})
 	readWSEvent(t, owner, "ack")
 	observerMotion := readWSEvent(t, observer, "motion")
-	if observerMotion.Motion == nil || observerMotion.Motion.Target["z"] != 1 {
+	if observerMotion.Motion == nil || observerMotion.Motion.Target["z"] != 1 || observerMotion.Motion.Revision == 0 {
 		t.Fatalf("observer motion = %+v, want shared Z target", observerMotion)
 	}
 }
