@@ -1586,6 +1586,39 @@ func TestJogWebSocketArmAndInput(t *testing.T) {
 	t.Fatalf("no jog command observed: %v", m.Gcodes())
 }
 
+func TestJogWebSocketCapturesReleasedQueueEndpoint(t *testing.T) {
+	srv, m, _ := serverWithJog(t, false)
+	c := dialWS(t, srv.URL)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, c, "hello")
+	writeWS(t, c, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, c, "ack")
+	writeWS(t, c, map[string]any{"type": "input", "seq": 2, "deadman": true, "axes": map[string]float64{"x": 1}})
+
+	deadline := time.Now().Add(time.Second)
+	for len(m.Gcodes()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(m.Gcodes()) == 0 {
+		t.Fatal("no jog command reached the fake machine before capture")
+	}
+
+	// WebSocket message order is the capture contract: release first, then
+	// freeze the endpoint that the already-admitted queue will reach.
+	writeWS(t, c, map[string]any{"type": "input", "seq": 3, "deadman": false, "axes": map[string]float64{"x": 0}})
+	writeWS(t, c, map[string]any{"type": "capture_position", "seq": 4})
+	ev := readWSEvent(t, c, "position_capture")
+	if ev.Seq != 4 || ev.Position == nil {
+		t.Fatalf("capture event = %+v, want seq 4 position", ev)
+	}
+	if ev.Position.MPos["x"] <= 0 || ev.Position.WPos["x"] != ev.Position.MPos["x"] {
+		t.Fatalf("capture position = %+v, want released positive-X endpoint with zero work offset", ev.Position)
+	}
+	if ev.Position.MotionRevision == 0 {
+		t.Fatalf("capture position = %+v, want the admitted motion revision", ev.Position)
+	}
+}
+
 func TestJogWebSocketStep(t *testing.T) {
 	srv, m, _ := serverWithJog(t, false)
 	c := dialWS(t, srv.URL)

@@ -1883,6 +1883,7 @@ test("loading measured outline data still installs a freshly generated probe pla
       state.outline.fieldProbePreview = [{ id: "field-probe-0001", x: 20, y: 20 }];
     },
     markGcodeContextOverlayDirty: () => {},
+    cancelOutlineCaptureIntents: () => {},
   });
   vm.runInContext("installLoadedOutlineState(next)", ctx);
   assert.equal(state.outline, next);
@@ -3366,7 +3367,7 @@ test("outline point presses queue while the prior position capture is pending", 
   const pending = [];
   let undo = 0;
   const state = {
-    jog: { armed: true, statusRevision: 7 },
+    jog: { armed: false, statusRevision: 7 },
     outline: {
       active: true,
       closed: false,
@@ -3408,6 +3409,91 @@ test("outline point presses queue while the prior position capture is pending", 
   assert.equal(state.outline.addPointQueued, 0);
   assert.equal(state.outline.points.length, 2);
   assert.deepEqual(state.outline.points.map((point) => [point.machine_x, point.machine_y]), [[1, 2], [2, 3]]);
+  assert.equal(undo, 2);
+});
+
+test("armed outline capture preserves every rapid press as a server intent", () => {
+  const sent = [];
+  let nextSeq = 10;
+  let senderResets = 0;
+  const state = {
+    jog: { armed: true, outlineCaptureIntents: [] },
+    outline: {
+      active: true,
+      closed: false,
+      fieldProbePending: false,
+      addPointPending: false,
+      addPointQueued: 0,
+      feedback: "",
+      feedbackKind: "",
+    },
+  };
+  const ctx = buildContext(["requestOutlinePositionCapture", "addOutlinePoint"], [], {
+    state,
+    sendJog: (message) => {
+      sent.push(message);
+      return nextSeq++;
+    },
+    resetJogInputSender: () => { senderResets++; },
+    renderOutlineCapture: () => {},
+    setOutlineFeedback: () => {},
+    setStatusMessage: () => { throw new Error("connected captures must not report an error"); },
+  });
+
+  vm.runInContext("addOutlinePoint(); addOutlinePoint(); addOutlinePoint();", ctx);
+  assert.deepEqual(sent.map((message) => message.type), ["capture_position", "capture_position", "capture_position"]);
+  assert.deepEqual(state.jog.outlineCaptureIntents.map((intent) => intent.seq), [10, 11, 12]);
+  assert.equal(state.outline.addPointPending, false, "independent server captures do not disable later presses");
+  assert.equal(senderResets, 3, "each boundary forces the next gamepad sample to resume immediately");
+});
+
+test("server-captured outline positions commit in press order despite later motion", () => {
+  let undo = 0;
+  const outline = {
+    active: true,
+    closed: false,
+    points: [],
+    origin: null,
+  };
+  const state = {
+    jog: {
+      outlineCaptureIntents: [
+        { seq: 20, outline, capturedAt: "first", resolved: false, position: null, error: "" },
+        { seq: 21, outline, capturedAt: "second", resolved: false, position: null, error: "" },
+      ],
+    },
+    outline,
+  };
+  const ctx = buildContext([
+    "capturedOutlinePosition",
+    "appendOutlineCapturedPosition",
+    "resolveOutlineCaptureIntent",
+  ], [], {
+    state,
+    pushOutlineUndo: () => { undo++; },
+    cloneOutlineOrigin: (origin) => ({ ...origin }),
+    newID: (prefix) => prefix + "-" + (outline.points.length + 1),
+    clearFieldProbeData: () => {},
+    clearNotice: () => {},
+    renderOutlineCapture: () => {},
+    renderWorkArea: () => {},
+    setStatusMessage: () => { throw new Error("valid captures must not publish a notice"); },
+  });
+
+  const first = { mpos: { x: 1, y: 2, z: -3 }, wpos: { x: 11, y: 12, z: 0 } };
+  const second = { mpos: { x: 8, y: 9, z: -3 }, wpos: { x: 18, y: 19, z: 0 } };
+  ctx.first = first;
+  ctx.second = second;
+  vm.runInContext("resolveOutlineCaptureIntent(21, second)", ctx);
+  assert.equal(outline.points.length, 0, "a later response waits for the earlier press");
+  vm.runInContext("resolveOutlineCaptureIntent(20, first)", ctx);
+
+  assert.deepEqual(outline.points.map((point) => [point.machine_x, point.machine_y, point.captured_at]), [
+    [1, 2, "first"],
+    [8, 9, "second"],
+  ]);
+  assert.deepEqual(outline.origin, { x: -10, y: -10, z: -3 });
+  assert.equal(state.jog.outlineCaptureIntents.length, 0);
   assert.equal(undo, 2);
 });
 
@@ -3498,6 +3584,7 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
       renderJog: () => {},
       renderMachine: () => {},
       renderOutlineCapture: () => {},
+      resolveOutlineCaptureIntent: () => false,
       clearTimeout: () => {},
     },
   );
@@ -3571,6 +3658,7 @@ test("a terminal target error releases Tap Move without disarming", () => {
       renderJog: () => {},
       renderMachine: () => {},
       renderOutlineCapture: () => {},
+      resolveOutlineCaptureIntent: () => false,
       clearTimeout: () => {},
     },
   );
@@ -4061,6 +4149,55 @@ test("the jog sampler heartbeats a held mobile work-area controller", () => {
   assert.equal(sent[0].deadman, true);
   assert.deepEqual(sent[0].axes, { x: 0.7, y: -0.2, z: 0 });
   assert.equal(state.jog.pad, "Touch");
+});
+
+test("a sampled gamepad stop reaches the server before its outline capture", () => {
+  const order = [];
+  const gamepad = {
+    index: 0,
+    connected: true,
+    axes: [0, 0, 0, 0],
+    buttons: Array.from({ length: 8 }, (_, index) => ({ pressed: index === 7 })),
+  };
+  const state = {
+    ui: {
+      gamepad: {
+        deadman_button: 0,
+        slow_buttons: [],
+        outline_button: 7,
+      },
+    },
+    workarea: { mobileJogActive: false },
+    jog: {
+      inputSuspended: false,
+      armed: true,
+      preferredPadIndex: 0,
+      pad: "Pad",
+      deadman: true,
+      axes: { x: 1, y: 0, z: 0 },
+      buttons: Array(8).fill(false),
+    },
+  };
+  const ctx = buildContext(["sampleJog"], [], {
+    state,
+    currentGamepad: () => gamepad,
+    mappedAxis: () => 0,
+    buttonStates: (gp) => gp.buttons.map((button) => button.pressed),
+    buttonPressed: (gp, index) => !!gp.buttons[index]?.pressed,
+    gamepadLabel: () => "Pad",
+    sameJogAxes: () => false,
+    sameButtonStates: () => false,
+    captureGamepadOutlineButton: () => false,
+    handleGamepadOutlineButton: () => { order.push("capture"); },
+    handleGamepadMacroButtons: () => {},
+    sendJog: (message) => { order.push(message.type); },
+    renderJog: () => {},
+    scheduleJogSample: () => {},
+    releaseJogInput: () => {},
+  });
+
+  vm.runInContext("sampleJog()", ctx);
+  assert.deepEqual(order, ["input", "capture"]);
 });
 
 test("gamepad input coalesces under backpressure but never delays release", () => {

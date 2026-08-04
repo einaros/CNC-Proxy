@@ -1248,6 +1248,100 @@ func TestGamepadReleaseDuringSlowTransportWriteAdmitsAtMostCurrentFrame(t *testi
 	}
 }
 
+func TestCapturePositionFreezesStoppedBoundaryAcrossLaterMotion(t *testing.T) {
+	mgr, fm, gate, cleanup := newGatedJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.StatusInterval = time.Hour
+	mgr.cfg.DeadmanTimeout = 5 * time.Second
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	now := time.Now()
+	mgr.now = func() time.Time { return now }
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: now})
+	tickDone := make(chan struct{})
+	go func() {
+		s.motionTick()
+		close(tickDone)
+	}()
+	select {
+	case <-gate.started:
+	case <-time.After(time.Second):
+		t.Fatal("jog frame never entered the slow transport")
+	}
+
+	// A stop is never delayed behind the transport. Capture, however, must wait
+	// for that already-admitted frame so its endpoint is included exactly once.
+	stopDone := make(chan struct{})
+	go func() {
+		s.SetInput(Input{Seq: 3, Deadman: false, Axes: Axes{}, At: now})
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("stop input waited for the in-flight transport write")
+	}
+	captureDone := make(chan struct{})
+	go func() {
+		s.CapturePosition(4)
+		close(captureDone)
+	}()
+	select {
+	case <-captureDone:
+		t.Fatal("capture returned before the in-flight segment committed")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	close(gate.allow)
+	select {
+	case <-tickDone:
+	case <-time.After(time.Second):
+		t.Fatal("motion tick did not finish after transport resumed")
+	}
+	select {
+	case <-captureDone:
+	case <-time.After(time.Second):
+		t.Fatal("capture did not complete after the in-flight segment committed")
+	}
+	first := readEvent(t, s, "position_capture")
+	if first.Seq != 4 || first.Position == nil || first.Position.MPos["x"] <= 0 || first.Position.MotionRevision == 0 {
+		t.Fatalf("first capture = %+v, want committed X stop boundary", first)
+	}
+	if first.Position.WPos["x"] != first.Position.MPos["x"] {
+		t.Fatalf("first work position = %+v, want zero-offset machine position %+v", first.Position.WPos, first.Position.MPos)
+	}
+	frozenX := first.Position.MPos["x"]
+
+	// Resume immediately in another direction without waiting for a status
+	// report. The first event remains frozen and the next press captures a new
+	// endpoint.
+	now = now.Add(jogSegmentDuration(mgr.cfg))
+	s.SetInput(Input{Seq: 5, Deadman: true, Axes: Axes{Y: 1}, At: now})
+	s.motionTick()
+	s.SetInput(Input{Seq: 6, Deadman: false, Axes: Axes{}, At: now})
+	s.CapturePosition(7)
+	second := readEvent(t, s, "position_capture")
+	if second.Seq != 7 || second.Position == nil || second.Position.MPos["y"] <= 0 {
+		t.Fatalf("second capture = %+v, want later Y stop boundary", second)
+	}
+	if first.Position.MPos["x"] != frozenX || first.Position.MPos["y"] != 0 {
+		t.Fatalf("later motion mutated first capture: %+v", first.Position)
+	}
+	waitForGcodeCount(t, fm, 2)
+	if got := fm.Gcodes(); len(got) < 2 {
+		t.Fatalf("gcode commands = %v, want motion on both sides of capture", got)
+	}
+}
+
 func TestGamepadDirectionChangeDuringSlowWriteUpdatesNextFrame(t *testing.T) {
 	mgr, fm, gate, cleanup := newGatedJogManager(t)
 	defer cleanup()

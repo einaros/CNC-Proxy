@@ -146,6 +146,7 @@ const state = {
     lastInput: null,
     lastInputSentAt: 0,
     inputSuspended: false,
+    outlineCaptureIntents: [],
   },
   outline: defaultOutlineState(),
   workarea: defaultWorkAreaView(),
@@ -2353,6 +2354,7 @@ function startOutlineCapture() {
   const floorZ = finiteOr(current.floorMachineZ, NaN);
   const floorProbe = cloneFloorProbe(current.floorProbe);
   const pos = currentOutlineCapturePosition();
+  cancelOutlineCaptureIntents(current);
   state.outline = defaultOutlineState();
   markGcodeContextOverlayDirty();
   state.outline.active = true;
@@ -2378,6 +2380,7 @@ function endOutlineCapture() {
   const keepCurveFit = !!current.curveFit;
   const floorZ = finiteOr(current.floorMachineZ, NaN);
   const floorProbe = cloneFloorProbe(current.floorProbe);
+  cancelOutlineCaptureIntents(current);
   state.outline = defaultOutlineState();
   markGcodeContextOverlayDirty();
   state.outline.curveFit = keepCurveFit;
@@ -2511,6 +2514,100 @@ async function processOutlinePointQueue(o) {
   }
 }
 
+function outlineCaptureIntentCount(o = state.outline) {
+  return (state.jog?.outlineCaptureIntents || []).filter((intent) => intent.outline === o).length;
+}
+
+function cancelOutlineCaptureIntents(o = state.outline) {
+  if (!state.jog) return;
+  state.jog.outlineCaptureIntents = (state.jog.outlineCaptureIntents || []).filter((intent) => intent.outline !== o);
+}
+
+function capturedOutlinePosition(position) {
+  const machine = {};
+  const work = {};
+  const origin = {};
+  for (const axis of ["x", "y", "z"]) {
+    const m = Number(position?.mpos?.[axis]);
+    const w = Number(position?.wpos?.[axis]);
+    if (!Number.isFinite(m) || !Number.isFinite(w)) {
+      throw new Error("captured machine and work positions must include X, Y, and Z");
+    }
+    machine[axis] = m;
+    work[axis] = w;
+    origin[axis] = m - w;
+  }
+  return { machine, work, origin };
+}
+
+function appendOutlineCapturedPosition(o, pos, capturedAt = new Date().toISOString()) {
+  if (state.outline !== o || !o.active || o.closed) return false;
+  pushOutlineUndo();
+  o.active = true;
+  if (!o.origin) o.origin = cloneOutlineOrigin(pos.origin);
+  o.points.push({
+    id: newID("outline-point"),
+    x: pos.work.x,
+    y: pos.work.y,
+    z: pos.work.z,
+    machine_x: pos.machine.x,
+    machine_y: pos.machine.y,
+    machine_z: pos.machine.z,
+    captured_at: capturedAt,
+  });
+  clearFieldProbeData();
+  clearNotice("outline-point");
+  return true;
+}
+
+function resolveOutlineCaptureIntent(seq, position = null, error = "") {
+  const intents = state.jog.outlineCaptureIntents || [];
+  const intent = intents.find((candidate) => candidate.seq === seq);
+  if (!intent) return false;
+  intent.position = position;
+  intent.error = error;
+  intent.resolved = true;
+
+  while (intents.length && intents[0].resolved) {
+    const next = intents.shift();
+    if (state.outline !== next.outline || !next.outline.active || next.outline.closed) continue;
+    if (next.error) {
+      setStatusMessage("outline-point", "Add point failed: " + next.error, "error", { force: true });
+      continue;
+    }
+    try {
+      appendOutlineCapturedPosition(next.outline, capturedOutlinePosition(next.position), next.capturedAt);
+    } catch (e) {
+      setStatusMessage("outline-point", "Add point failed: " + e.message, "error", { force: true });
+    }
+  }
+  renderOutlineCapture();
+  renderWorkArea();
+  return true;
+}
+
+function failOutlineCaptureIntents(message) {
+  const pending = [...(state.jog.outlineCaptureIntents || [])];
+  for (const intent of pending) resolveOutlineCaptureIntent(intent.seq, null, message);
+}
+
+function requestOutlinePositionCapture(o) {
+  const capturedAt = new Date().toISOString();
+  const seq = sendJog({ type: "capture_position" });
+  if (!seq) {
+    setStatusMessage("outline-point", "Add point failed: movement connection is unavailable", "error", { force: true });
+    return false;
+  }
+  if (!Array.isArray(state.jog.outlineCaptureIntents)) state.jog.outlineCaptureIntents = [];
+  state.jog.outlineCaptureIntents.push({ seq, outline: o, capturedAt, resolved: false, position: null, error: "" });
+  // Capture is a server-side stop boundary. Force the next sampled gamepad
+  // input onto the wire so motion can resume immediately even if its axes are
+  // numerically identical to the sample sent before the capture.
+  resetJogInputSender();
+  renderOutlineCapture();
+  return true;
+}
+
 function addOutlinePoint() {
   const o = state.outline;
   if (!o.active) {
@@ -2522,6 +2619,12 @@ function addOutlinePoint() {
     return;
   }
   if (o.fieldProbePending) return;
+  if (state.jog.armed) {
+    o.feedback = "";
+    o.feedbackKind = "";
+    requestOutlinePositionCapture(o);
+    return;
+  }
   o.addPointQueued = Math.min(32, (Number(o.addPointQueued) || 0) + 1);
   if (o.addPointPending) return;
   o.addPointPending = true;
@@ -2658,7 +2761,9 @@ function renderOutlineCapture() {
   const exportObj = document.getElementById("outline-export-obj");
   const exportHeight = document.getElementById("outline-export-height");
   const summary = document.getElementById("outline-summary");
-  const busy = !!o.addPointPending || !!o.floorProbePending || !!o.fieldProbePending || !!o.fieldProbePointMovePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
+  const capturePending = outlineCaptureIntentCount(o) > 0;
+  const actionBusy = !!o.addPointPending || !!o.floorProbePending || !!o.fieldProbePending || !!o.fieldProbePointMovePending || !!o.tracePending || !!o.filePending || !!state.jog.zProbePending;
+  const busy = capturePending || actionBusy;
   const probeActive = isProbeToolActive();
   const fieldReady = o.active && o.closed && o.points.length >= 3;
   if (panel) panel.hidden = !o.active;
@@ -2678,9 +2783,12 @@ function renderOutlineCapture() {
     setSoftDisabled(end, false);
   }
   if (add) {
-    add.disabled = busy;
-    add.setAttribute("aria-busy", o.addPointPending ? "true" : "false");
-    setSoftDisabled(add, !busy && !!o.closed);
+    // Each press is an independent capture intent. Keep Add point available
+    // while earlier intents are in flight so rapid gamepad/button presses are
+    // never collapsed into one request.
+    add.disabled = actionBusy;
+    add.setAttribute("aria-busy", capturePending || o.addPointPending ? "true" : "false");
+    setSoftDisabled(add, !actionBusy && !!o.closed);
     setTextIfChanged(add, "Add point");
   }
   if (undo) undo.disabled = busy || !o.undo.length;
@@ -5307,6 +5415,7 @@ async function loadOutlineFile(file) {
 }
 
 function installLoadedOutlineState(next) {
+  cancelOutlineCaptureIntents(state.outline);
   state.outline = next;
   markGcodeContextOverlayDirty();
   if (next.closed) updateFieldProbePreview();
@@ -9677,6 +9786,7 @@ function connectJog() {
     }
     state.jog.disarmAfterPendingArm = false;
     state.jog.sent.clear();
+    failOutlineCaptureIntents("movement connection closed before the position was captured");
     resetJogInputSender();
     completeCommandDisarm(state.jog.commandDisarm?.seq, "Movement disconnected before the command.");
     if (state.jog.armQueuedAction) {
@@ -11272,6 +11382,9 @@ function applyJogEvent(ev) {
       };
       machineChanged = true;
     }
+  } else if (ev.type === "position_capture" && ev.position) {
+    state.jog.sent.delete(ev.seq);
+    resolveOutlineCaptureIntent(ev.seq, ev.position);
   } else if (ev.type === "ack") {
     const sent = state.jog.sent.get(ev.seq);
     if (sent) {
@@ -11350,6 +11463,11 @@ function applyJogEvent(ev) {
       }
       renderJog();
       renderOutlineCapture();
+      return;
+    }
+    if (ev.seq && resolveOutlineCaptureIntent(ev.seq, null, ev.message || jogErrorText(ev.code))) {
+      state.jog.sent.delete(ev.seq);
+      renderJog();
       return;
     }
     completeCommandDisarm(ev.seq, ev.message || jogErrorText(ev.code));
@@ -11563,10 +11681,13 @@ function sampleJog() {
     state.jog.deadman = deadman;
     state.jog.axes = axes;
     const capturingOutlineButton = captureGamepadOutlineButton(buttons);
+    // The stop/latest input frame must precede a point-capture request on the
+    // WebSocket. This makes a release+button press in one sampled gamepad frame
+    // freeze the endpoint of the released motion, never the previous position.
+    if (state.jog.armed) sendJog({ type: "input", deadman, axes, slow });
     handleGamepadOutlineButton(buttons, capturingOutlineButton);
     handleGamepadMacroButtons(buttons, deadman);
     state.jog.buttons = buttons;
-    if (state.jog.armed) sendJog({ type: "input", deadman, axes, slow });
     if (changed) renderJog();
   } catch (e) {
     state.jog.error = "gamepad read failed: " + e.message;

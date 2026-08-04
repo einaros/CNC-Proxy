@@ -198,6 +198,7 @@ type Event struct {
 	Capabilities *Capabilities      `json:"capabilities,omitempty"`
 	Status       *StatusEvent       `json:"status,omitempty"`
 	Motion       *MotionEvent       `json:"motion,omitempty"`
+	Position     *PositionEvent     `json:"position,omitempty"`
 	Target       machine.AxisValues `json:"target,omitempty"`
 	LatencyMs    int64              `json:"latency_ms,omitempty"`
 }
@@ -226,6 +227,15 @@ type MotionEvent struct {
 	QueueLeadMs   int64              `json:"queue_lead_ms,omitempty"`
 	Revision      uint64             `json:"revision"`
 	Command       string             `json:"command,omitempty"`
+}
+
+// PositionEvent is an immutable machine/work-coordinate snapshot of the
+// planned stop boundary. It lets an operator capture a point and immediately
+// resume jogging without a later status report moving that captured point.
+type PositionEvent struct {
+	MPos           machine.AxisValues `json:"mpos"`
+	WPos           machine.AxisValues `json:"wpos"`
+	MotionRevision uint64             `json:"motion_revision"`
 }
 
 type motionRevisions struct {
@@ -400,6 +410,7 @@ func (m *Manager) Start(ctx context.Context) (*Session, error) {
 		events:   make(chan Event, 128),
 		done:     make(chan struct{}),
 	}
+	s.admissionCond = sync.NewCond(&s.admissionMu)
 	m.mu.Lock()
 	m.sessions[s] = struct{}{}
 	m.mu.Unlock()
@@ -505,6 +516,14 @@ type Session struct {
 	once     sync.Once
 	emitMu   sync.Mutex
 	closed   bool
+	// admissionMu coordinates latest-input changes with continuous-jog segment
+	// admission without delaying a stop behind a slow socket write. Capture
+	// closes the admission gate, waits for the one in-flight segment to commit,
+	// then snapshots a boundary that later input cannot change.
+	admissionMu       sync.Mutex
+	admissionCond     *sync.Cond
+	admissionInFlight bool
+	captureBarrier    bool
 
 	mu              sync.Mutex
 	latest          Input
@@ -598,15 +617,78 @@ func (s *Session) ReportError(seq int64, code, msg string) {
 	s.emit(Event{Type: "error", Seq: seq, Code: code, Message: msg})
 }
 
-// SetInput replaces the latest gamepad intent. Inputs are never queued.
+// SetInput replaces the latest gamepad intent. Inputs are never queued. It
+// records a stop without waiting on a slow socket write; that in-flight segment
+// observes the changed input after it commits and no follow-up is admitted.
 func (s *Session) SetInput(in Input) {
 	if in.At.IsZero() {
 		in.At = s.mgr.now()
 	}
+	s.admissionMu.Lock()
 	s.mu.Lock()
 	s.latest = in
 	s.haveInput = true
 	s.mu.Unlock()
+	s.admissionMu.Unlock()
+}
+
+// CapturePosition freezes the endpoint at which the currently admitted jog
+// queue will stop. Capture is a movement-admission barrier: it cancels the
+// current input intent, waits for any segment write already in progress, and
+// snapshots planned before a later input can resume motion.
+func (s *Session) CapturePosition(seq int64) {
+	s.admissionMu.Lock()
+	now := s.mgr.now()
+	s.mu.Lock()
+	if s.lease == nil || !s.armed {
+		s.mu.Unlock()
+		s.admissionMu.Unlock()
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBadInput, Message: "arm movement before capturing an outline point"})
+		return
+	}
+	// The capture itself defines a stop boundary even if the browser's neutral
+	// input frame was delayed. A later input frame resumes from this boundary.
+	s.latest = Input{Seq: seq, At: now}
+	s.haveInput = true
+	s.captureBarrier = true
+	s.mu.Unlock()
+	for s.admissionInFlight {
+		s.admissionCond.Wait()
+	}
+	s.mu.Lock()
+	if s.lease == nil || !s.armed {
+		s.mu.Unlock()
+		s.captureBarrier = false
+		s.admissionCond.Broadcast()
+		s.admissionMu.Unlock()
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeMachineError, Message: "movement stopped before the outline position was captured"})
+		return
+	}
+	mpos := copyAxes(s.planned)
+	st := s.lastStatus
+	if len(mpos) == 0 {
+		mpos = copyAxes(st.MPos)
+	}
+	wpos := estimatedWorkPosition(mpos, st)
+	revisions := s.mgr.motionRevisions()
+	s.mu.Unlock()
+	s.captureBarrier = false
+	s.admissionCond.Broadcast()
+	s.admissionMu.Unlock()
+
+	if !hasXYZ(mpos) || !hasXYZ(wpos) {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStaleStatus, Message: "machine and work positions are unavailable for outline capture"})
+		return
+	}
+	s.emit(Event{
+		Type: "position_capture",
+		Seq:  seq,
+		Position: &PositionEvent{
+			MPos:           copyAxes(mpos),
+			WPos:           copyAxes(wpos),
+			MotionRevision: revisions.motion,
+		},
+	})
 }
 
 func (s *Session) enqueue(cmd command) {
@@ -1559,9 +1641,15 @@ func (s *Session) motionTick() {
 	}
 	lastCmd := ""
 	for sent := 0; sent < maxSegmentsPerTick; sent++ {
+		s.admissionMu.Lock()
+		if s.captureBarrier {
+			s.admissionMu.Unlock()
+			break
+		}
 		admitAt := s.mgr.now()
 		queuedLead = queueLead(admitAt, queuedUntil)
 		if queuedLead >= lookahead {
+			s.admissionMu.Unlock()
 			break
 		}
 		s.mu.Lock()
@@ -1569,6 +1657,7 @@ func (s *Session) motionTick() {
 		inputCurrent := s.haveInput && motionInputActive(true, latest, admitAt, s.mgr.cfg)
 		s.mu.Unlock()
 		if !inputCurrent {
+			s.admissionMu.Unlock()
 			break
 		}
 		// Input is latest-wins and may change while the first frame in this refill
@@ -1576,6 +1665,7 @@ func (s *Session) motionTick() {
 		// direction, speed, or slow-mode change never causes a second stale block.
 		delta = MotionDelta(latest.Axes, latest.Slow, s.mgr.cfg)
 		if delta.X == 0 && delta.Y == 0 && delta.Z == 0 {
+			s.admissionMu.Unlock()
 			break
 		}
 		target := copyAxes(planned)
@@ -1585,6 +1675,7 @@ func (s *Session) motionTick() {
 		target = clampJogTarget(planned, target, s.mgr.softLimits())
 		delta = axesDelta(planned, target)
 		if delta.X == 0 && delta.Y == 0 && delta.Z == 0 {
+			s.admissionMu.Unlock()
 			break
 		}
 		// Compare planned and physical position only immediately after a new
@@ -1592,11 +1683,15 @@ func (s *Session) motionTick() {
 		// machine is expected to move away from the old MPos; continuously using
 		// that old value as a hard fence periodically starves the planner.
 		if physicalLeadCheckDue(admitAt, lastStatusAt, s.mgr.cfg) && jogLeadTooLarge(target, st.MPos, s.mgr.cfg) {
+			s.admissionMu.Unlock()
 			break
 		}
+		s.admissionInFlight = true
+		s.admissionMu.Unlock()
 		cmd := jogCommandForDuration(target, delta, s.mgr.cfg, segDur)
 		if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
 			s.failLease(CodeMachineError, err)
+			s.finishSegmentAdmission()
 			return
 		}
 		writtenAt := s.mgr.now()
@@ -1621,6 +1716,7 @@ func (s *Session) motionTick() {
 		latest = s.latest
 		inputUnchanged := s.haveInput && motionInputActive(true, latest, s.mgr.now(), s.mgr.cfg)
 		s.mu.Unlock()
+		s.finishSegmentAdmission()
 		planned = target
 		lastCmd = cmd
 		s.logMotion(writtenAt, cmd)
@@ -1635,6 +1731,13 @@ func (s *Session) motionTick() {
 	}
 	emitAt := s.mgr.now()
 	s.emitMotionEstimate(emitAt, st, planned, delta, lastCmd, queueLead(emitAt, queuedUntil))
+}
+
+func (s *Session) finishSegmentAdmission() {
+	s.admissionMu.Lock()
+	s.admissionInFlight = false
+	s.admissionCond.Broadcast()
+	s.admissionMu.Unlock()
 }
 
 // Normalize converts raw axes into one tick of motion in mm.
@@ -2429,6 +2532,16 @@ func copyAxes(in machine.AxisValues) machine.AxisValues {
 		out[k] = v
 	}
 	return out
+}
+
+func hasXYZ(in machine.AxisValues) bool {
+	for _, axis := range []string{"x", "y", "z"} {
+		value, ok := in[axis]
+		if !ok || math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func ptr[T any](v T) *T { return &v }
