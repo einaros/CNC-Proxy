@@ -658,37 +658,117 @@ test("header toggle preserves a visible restore control and closes open menus", 
   assert.equal(attributes["aria-label"], "Hide top bars");
 });
 
-test("the notification gutter exists only while the bottom status bar is visible", () => {
-  const classes = new Set();
+test("the overlay status stack renders every distinct notification newest first", () => {
+  const makeElement = () => {
+    const element = {
+      children: [],
+      dataset: {},
+      className: "",
+      textContent: "",
+      parent: null,
+      attributes: {},
+      append(...children) {
+        for (const child of children) {
+          child.parent = this;
+          this.children.push(child);
+        }
+      },
+      appendChild(child) {
+        if (child.parent) child.parent.children = child.parent.children.filter((candidate) => candidate !== child);
+        child.parent = this;
+        this.children.push(child);
+      },
+      querySelector(selector) {
+        const className = selector.slice(1);
+        return this.children.find((child) => child.className.split(" ").includes(className)) || null;
+      },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      remove() {
+        if (this.parent) this.parent.children = this.parent.children.filter((candidate) => candidate !== this);
+      },
+    };
+    element.classList = {
+      contains: (name) => element.className.split(" ").includes(name),
+      remove: (name) => { element.className = element.className.split(" ").filter((part) => part !== name).join(" "); },
+    };
+    return element;
+  };
   const bar = { hidden: false };
-  const list = { innerHTML: "", appendChild() {} };
-  const state = { notices: new Map() };
+  const list = makeElement();
+  const state = { notices: new Map([
+    ["older", { key: "older", kind: "info", text: "First", seq: 1, entering: false, removing: false }],
+    ["newer", { key: "newer", kind: "ok", text: "Second", seq: 2, entering: false, removing: false }],
+  ]) };
   const ctx = buildContext(["renderNoticeBar"], [], {
     state,
     document: {
-      body: {
-        classList: {
-          toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name),
-        },
-      },
       getElementById: (id) => id === "status-bar" ? bar : id === "notice" ? list : null,
-      createElement: () => ({ className: "", textContent: "", append() {} }),
+      createElement: makeElement,
     },
+    clearNotice: () => {},
   });
 
   vm.runInContext("renderNoticeBar()", ctx);
-  assert.equal(bar.hidden, true);
-  assert.ok(!classes.has("has-status-message"));
-
-  state.notices.set("test", { kind: "ok", text: "Done", seq: 1 });
-  vm.runInContext("renderNoticeBar()", ctx);
   assert.equal(bar.hidden, false);
-  assert.ok(classes.has("has-status-message"));
+  assert.deepEqual(list.children.map((row) => row.dataset.noticeKey), ["newer", "older"]);
+  assert.equal(list.children[0].querySelector(".status-text").textContent, "Second");
+  assert.equal(list.children[1].querySelector(".status-text").textContent, "First");
+  assert.match(list.children[0].querySelector(".status-dismiss").attributes["aria-label"], /Second/);
 
   state.notices.clear();
   vm.runInContext("renderNoticeBar()", ctx);
   assert.equal(bar.hidden, true);
-  assert.ok(!classes.has("has-status-message"));
+  assert.equal(list.children.length, 0);
+});
+
+test("distinct notifications coexist and timeout starts an individual downward exit", () => {
+  const timers = [];
+  const state = { noticeSeq: 0, noticeKey: "", notices: new Map() };
+  const ctx = buildContext(["setNotice", "dismissNotice"], [], {
+    state,
+    noticeTimeoutMs: () => 1000,
+    renderNoticeBar: () => {},
+    clearTimeout: () => {},
+    setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
+    noticeItemRects: () => new Map([["second", 10]]),
+    animateNoticeReflow: () => {},
+    NOTICE_EXIT_MS: 180,
+  });
+
+  vm.runInContext(`setNotice("First", "info", "first")`, ctx);
+  vm.runInContext(`setNotice("Second", "error", "second")`, ctx);
+  assert.equal(state.notices.size, 2);
+  assert.deepEqual([...state.notices.keys()], ["first", "second"]);
+
+  const firstTimeout = timers[0];
+  firstTimeout.callback();
+  assert.equal(state.notices.get("first").removing, true);
+  assert.equal(state.notices.get("second").removing, false);
+  const exitTimer = timers.find((timer) => timer.delay === 180);
+  assert.ok(exitTimer, "timeout schedules the downward exit before removal");
+  exitTimer.callback();
+  assert.equal(state.notices.has("first"), false);
+  assert.equal(state.notices.has("second"), true);
+});
+
+test("remaining notifications animate downward when a stack item is removed", () => {
+  let animation = null;
+  const row = {
+    dataset: { noticeKey: "remaining" },
+    getBoundingClientRect: () => ({ top: 140 }),
+    animate: (frames, options) => { animation = { frames, options }; },
+  };
+  const ctx = buildContext(["animateNoticeReflow"], [], {
+    document: { getElementById: () => ({ children: [row] }) },
+    NOTICE_REFLOW_MS: 200,
+  });
+  ctx.previous = new Map([["remaining", 100]]);
+  vm.runInContext("animateNoticeReflow(previous)", ctx);
+  assert.deepEqual(JSON.parse(JSON.stringify(animation.frames)), [
+    { transform: "translateY(-40px)" },
+    { transform: "translateY(0)" },
+  ]);
+  assert.equal(animation.options.duration, 200);
 });
 
 test("the mobile work area actions menu exposes state and restores focus on dismissal", () => {

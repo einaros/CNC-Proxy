@@ -81,19 +81,25 @@
   .command-panel form { margin: 0; }
   #command-actions > #ctl-halt { flex: 0 0 auto; min-width: 84px; font-weight: 650; }
   main { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; padding: clamp(14px, 2vw, 22px); }
-  body.has-status-message main { padding-bottom: 76px; }
   main > *, .view > .page-section { width: 100%; min-width: 0; }
-  #status-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; display: flex; gap: 10px; align-items: flex-end; padding: 8px 20px calc(8px + env(safe-area-inset-bottom)); background: rgba(16,19,22,.96); border-top: 1px solid var(--border); box-shadow: 0 -10px 24px rgba(0,0,0,.22); }
+  #status-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 120; display: grid; justify-items: end; padding: 8px 20px calc(8px + env(safe-area-inset-bottom)); background: transparent; border: 0; box-shadow: none; pointer-events: none; overflow: visible; }
   #status-bar[hidden] { display: none !important; }
-  #notice { flex: 1; min-width: 0; display: grid; gap: 5px; max-height: 30vh; overflow: auto; }
-  .status-item { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--muted); }
+  #notice { width: min(720px, calc(100vw - 40px)); min-width: 0; display: flex; flex-direction: column; align-items: flex-end; justify-content: flex-end; gap: 8px; max-height: min(42dvh, 420px); overflow: visible; }
+  .status-item { pointer-events: auto; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; width: fit-content; max-width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); box-shadow: 0 10px 28px rgba(0,0,0,.34); color: var(--muted); }
+  .status-item.entering { animation: status-item-in .22s ease-out both; }
+  .status-item.leaving { pointer-events: none; animation: status-item-out .18s ease-in both; }
   .status-item .status-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
   .status-item .status-text { min-width: 0; overflow-wrap: anywhere; }
+  .status-dismiss { min-height: 28px; padding: 3px 8px; background: transparent; }
   .status-item.ok { border-color: rgba(68,194,123,.45); color: var(--ok); }
   .status-item.ok .status-dot { background: var(--ok); }
   .status-item.error { border-color: rgba(232,106,95,.5); color: var(--err); }
   .status-item.error .status-dot { background: var(--err); }
-  #notice-clear { flex: 0 0 auto; }
+  @keyframes status-item-in { from { opacity: 0; transform: translateY(calc(100% + 16px)); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes status-item-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(calc(100% + 16px)); } }
+  @media (prefers-reduced-motion: reduce) {
+    .status-item.entering, .status-item.leaving { animation-duration: .01ms; }
+  }
   .tabs { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 4px; min-width: 0; margin: 0; padding: 4px; background: rgba(14,18,19,.55); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
   .tab { width: 100%; min-width: 0; min-height: var(--control-h); border-color: transparent; border-radius: 4px; padding: 5px 12px; background: transparent; color: var(--muted); font-weight: 550; white-space: nowrap; }
@@ -633,8 +639,8 @@
     #file-browser { grid-template-columns: 1fr; }
     #folder-bar { align-items: stretch; display: grid; }
     #folder-actions { justify-content: stretch; }
-    #status-bar { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); align-items: stretch; }
-    #notice-clear { align-self: flex-start; }
+    #status-bar { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
+    #notice { width: min(720px, calc(100vw - 20px)); }
     .machine-settings-travel-fields, .machine-settings-motion-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 600px) {
@@ -642,7 +648,6 @@
     body { font-size: 14px; }
     header { gap: 8px; padding: 8px 10px; backdrop-filter: none; }
     main { padding: 8px; }
-    body.has-status-message main { padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
     #command-toolbar { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: "actions actions" "machine status"; gap: 8px; align-items: center; }
     #command-actions { grid-area: actions; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 6px; overflow: visible; }
     #command-menu { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; overflow: visible; }
@@ -707,8 +712,10 @@
     #filter { min-height: 44px; }
     #folder-actions { grid-template-columns: minmax(0, 1fr) repeat(2, auto); align-items: center; }
     #folder-actions button { min-height: 44px; }
-    #status-bar { max-height: 42dvh; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); align-items: stretch; }
-    #notice-clear { min-height: 44px; align-self: flex-start; }
+    #status-bar { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
+    #notice { width: calc(100vw - 20px); max-height: 42dvh; }
+    .status-item { width: 100%; }
+    .status-dismiss { min-width: 44px; min-height: 44px; }
     dialog { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); margin: 8px; }
     .machine-settings-modal-head { position: sticky; top: 0; z-index: 1; background: var(--panel); }
     #log-tools, .log-left, .log-right, #gcode-form { display: grid; grid-template-columns: 1fr; align-items: stretch; }
@@ -1465,8 +1472,7 @@
 </dialog>
 <div id="status-bar" role="status" aria-live="polite" hidden>
   <div id="notice"></div>
-  <button type="button" id="notice-clear">Dismiss</button>
 </div>
-<script type="module" src="/app.js?v=movement-disarm-1"></script>
+<script type="module" src="/app.js?v=status-stack-1"></script>
 </body>
 </html>
