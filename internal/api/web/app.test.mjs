@@ -3225,11 +3225,13 @@ test("outline gamepad button is inert outside capture and adds exactly one point
   assert.equal(points, 1);
 });
 
-test("outline capture waits for pending motion, clears the estimate, and holds a stable final position", async () => {
+test("armed outline capture waits for a fresh Idle position after queued motion", async () => {
   const clock = { value: 0 };
   const state = {
-    machine: { motion_estimated: true },
+    machine: { state: "Run", motion_estimated: true },
     jog: {
+      armed: true,
+      statusRevision: 4,
       targetMotionPending: 9,
       fieldProbeMovePending: 0,
       zStepPending: 0,
@@ -3272,16 +3274,73 @@ test("outline capture waits for pending motion, clears the estimate, and holds a
       clock.value += ms;
       if (clock.value >= 100) {
         state.jog.targetMotionPending = 0;
+      }
+      if (clock.value >= 150) {
         state.jog.estimated = false;
         state.machine.motion_estimated = false;
+        state.jog.statusRevision = 5;
+      }
+      if (clock.value >= 250) {
+        state.machine.state = "Idle";
+        state.jog.statusRevision = 6;
       }
     },
+    afterRevision: 4,
     settleMS: 200,
     pollMS: 50,
     timeoutMS: 2000
   })`, ctx);
-  assert.ok(clock.value >= 450, "the stability window restarts when the observed position changes");
+  assert.equal(clock.value, 250, "fresh Idle is the authoritative queue-drained position without an extra settle delay");
   assert.equal(result.machine.x, 10.1);
+});
+
+test("outline point presses queue while the prior position capture is pending", async () => {
+  const pending = [];
+  let undo = 0;
+  const state = {
+    jog: { armed: true, statusRevision: 7 },
+    outline: {
+      active: true,
+      closed: false,
+      fieldProbePending: false,
+      addPointPending: false,
+      addPointQueued: 0,
+      points: [],
+      origin: null,
+      feedback: "",
+      feedbackKind: "",
+    },
+  };
+  const ctx = buildContext(["processOutlinePointQueue", "addOutlinePoint"], [], {
+    state,
+    setOutlineFeedback: () => {},
+    renderOutlineCapture: () => {},
+    renderWorkArea: () => {},
+    waitForOutlineCapturePosition: () => new Promise((resolve) => pending.push(resolve)),
+    newID: (prefix) => prefix + "-" + (state.outline.points.length + 1),
+    pushOutlineUndo: () => { undo++; },
+    cloneOutlineOrigin: (origin) => ({ ...origin }),
+    clearFieldProbeData: () => {},
+    clearNotice: () => {},
+    setStatusMessage: () => { throw new Error("successful capture must not publish a notice"); },
+  });
+
+  vm.runInContext("addOutlinePoint(); addOutlinePoint();", ctx);
+  assert.equal(state.outline.addPointPending, true);
+  assert.equal(state.outline.addPointQueued, 1, "second press is retained while the first waits for status");
+  assert.equal(pending.length, 1);
+
+  pending[0]({ machine: { x: 1, y: 2, z: -3 }, work: { x: 11, y: 12, z: 0 }, origin: { x: -10, y: -10, z: -3 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pending.length, 2, "queued press starts its own authoritative capture");
+  pending[1]({ machine: { x: 2, y: 3, z: -3 }, work: { x: 12, y: 13, z: 0 }, origin: { x: -10, y: -10, z: -3 } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(state.outline.addPointPending, false);
+  assert.equal(state.outline.addPointQueued, 0);
+  assert.equal(state.outline.points.length, 2);
+  assert.deepEqual(state.outline.points.map((point) => [point.machine_x, point.machine_y]), [[1, 2], [2, 3]]);
+  assert.equal(undo, 2);
 });
 
 test("focusing the outline button field captures the next gamepad press", () => {

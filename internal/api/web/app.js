@@ -101,6 +101,7 @@ const state = {
     observed: null,
     estimated: false,
     estimatedUntil: 0,
+    statusRevision: 0,
     availability: null,
     target: null,
     lead: { x: 0, y: 0, z: 0 },
@@ -551,6 +552,7 @@ function defaultOutlineState() {
     fieldProbeIssue: "",
     tracePending: false,
     addPointPending: false,
+    addPointQueued: 0,
     filePending: false,
     feedback: "",
     feedbackKind: "",
@@ -2391,7 +2393,6 @@ function outlineCaptureMotionPending() {
     !!j.probe3DPending ||
     hasPendingOriginOperation() ||
     liveInput ||
-    !!j.estimated ||
     !!state.machine.motion_estimated ||
     jogEstimateActive();
 }
@@ -2411,16 +2412,27 @@ async function waitForOutlineCapturePosition(options = {}) {
   const settleMS = finiteOr(options.settleMS, OUTLINE_CAPTURE_SETTLE_MS);
   const pollMS = finiteOr(options.pollMS, OUTLINE_CAPTURE_POLL_MS);
   const timeoutMS = finiteOr(options.timeoutMS, OUTLINE_CAPTURE_TIMEOUT_MS);
+  let requiredRevision = Number.isFinite(Number(options.afterRevision)) ? Number(options.afterRevision) : -1;
   const startedAt = now();
   let stablePosition = null;
   let stableSince = null;
   while (now() - startedAt <= timeoutMS) {
-    if (outlineCaptureMotionPending()) {
+    const revision = Number(state.jog.statusRevision) || 0;
+    const machineStillJogging = !!state.jog.armed && state.machine?.state !== "Idle";
+    if (outlineCaptureMotionPending() || machineStillJogging) {
+      // A position report observed before the predicted queue drained cannot
+      // authorize a capture. Require the next report after motion clears.
+      if (requiredRevision >= 0) requiredRevision = Math.max(requiredRevision, revision);
       stablePosition = null;
       stableSince = null;
     } else {
       const position = currentOutlineCapturePosition();
-      if (position) {
+      const freshObservedPosition = requiredRevision < 0 || revision > requiredRevision;
+      if (position && freshObservedPosition) {
+        // An armed jog's fresh Idle report is the firmware's queue-drained
+        // signal. It is more authoritative than another arbitrary settle
+        // timer and already carries the exact MPos/WPos pair to capture.
+        if (requiredRevision >= 0) return position;
         if (stablePosition && outlineCapturePositionsClose(stablePosition, position)) {
           if (stableSince !== null && now() - stableSince >= settleMS) return position;
         } else {
@@ -2434,7 +2446,43 @@ async function waitForOutlineCapturePosition(options = {}) {
   throw new Error("motion did not settle before the outline capture timeout");
 }
 
-async function addOutlinePoint() {
+async function processOutlinePointQueue(o) {
+  try {
+    while (o.addPointQueued > 0) {
+      o.addPointQueued--;
+      const afterRevision = state.jog.armed ? (Number(state.jog.statusRevision) || 0) : -1;
+      const pos = await waitForOutlineCapturePosition({ afterRevision });
+      if (state.outline !== o || !o.active || o.closed) throw new Error("outline capture changed while waiting for motion to settle");
+      const capture = {
+        id: newID("outline-point"),
+        x: pos.work.x,
+        y: pos.work.y,
+        z: pos.work.z,
+        machine_x: pos.machine.x,
+        machine_y: pos.machine.y,
+        machine_z: pos.machine.z,
+        captured_at: new Date().toISOString(),
+      };
+      pushOutlineUndo();
+      o.active = true;
+      if (!o.origin) o.origin = cloneOutlineOrigin(pos.origin);
+      o.points.push(capture);
+      clearFieldProbeData();
+      clearNotice("outline-point");
+      renderOutlineCapture();
+      renderWorkArea();
+    }
+  } catch (e) {
+    o.addPointQueued = 0;
+    setStatusMessage("outline-point", "Add point failed: " + e.message, "error", { force: true });
+  } finally {
+    o.addPointPending = false;
+    renderOutlineCapture();
+    renderWorkArea();
+  }
+}
+
+function addOutlinePoint() {
   const o = state.outline;
   if (!o.active) {
     setOutlineFeedback("Capture outline before adding points.", "error");
@@ -2444,39 +2492,14 @@ async function addOutlinePoint() {
     setOutlineFeedback("Undo close before adding another point.", "error");
     return;
   }
-  if (o.fieldProbePending || o.addPointPending) return;
+  if (o.fieldProbePending) return;
+  o.addPointQueued = Math.min(32, (Number(o.addPointQueued) || 0) + 1);
+  if (o.addPointPending) return;
   o.addPointPending = true;
-  o.feedback = "Waiting for motion and position to settle before adding the outline point...";
+  o.feedback = "";
   o.feedbackKind = "";
   renderOutlineCapture();
-  try {
-    const pos = await waitForOutlineCapturePosition();
-    if (state.outline !== o || !o.active || o.closed) throw new Error("outline capture changed while waiting for motion to settle");
-    const capture = {
-      id: newID("outline-point"),
-      x: pos.work.x,
-      y: pos.work.y,
-      z: pos.work.z,
-      machine_x: pos.machine.x,
-      machine_y: pos.machine.y,
-      machine_z: pos.machine.z,
-      captured_at: new Date().toISOString(),
-    };
-    pushOutlineUndo();
-    o.active = true;
-    if (!o.origin) o.origin = cloneOutlineOrigin(pos.origin);
-    o.points.push(capture);
-    clearFieldProbeData();
-    o.feedback = "Point " + o.points.length + " added at " + outlinePointLabel(o.points[o.points.length - 1]) + ".";
-    o.feedbackKind = "ok";
-  } catch (e) {
-    o.feedback = "Add point failed: " + e.message;
-    o.feedbackKind = "error";
-  } finally {
-    o.addPointPending = false;
-    renderOutlineCapture();
-    renderWorkArea();
-  }
+  processOutlinePointQueue(o);
 }
 
 function closeOutline() {
@@ -2627,8 +2650,9 @@ function renderOutlineCapture() {
   }
   if (add) {
     add.disabled = busy;
+    add.setAttribute("aria-busy", o.addPointPending ? "true" : "false");
     setSoftDisabled(add, !busy && !!o.closed);
-    setTextIfChanged(add, o.addPointPending ? "Settling..." : "Add point");
+    setTextIfChanged(add, "Add point");
   }
   if (undo) undo.disabled = busy || !o.undo.length;
   if (redo) redo.disabled = busy || !o.redo.length;
@@ -11156,6 +11180,7 @@ function applyJogEvent(ev) {
     }
   } else if (ev.type === "status" && ev.status) {
     clearNotice("machine-status");
+    state.jog.statusRevision = (Number(state.jog.statusRevision) || 0) + 1;
     const nextMachine = {
       ...state.machine,
       state: ev.status.state || state.machine.state,
