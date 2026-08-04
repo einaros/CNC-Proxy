@@ -211,6 +211,7 @@ type MachineSoftEndstopProfile struct {
 	YMin    float64 `json:"y_min,omitempty"`
 	YMax    float64 `json:"y_max,omitempty"`
 	ZMin    float64 `json:"z_min,omitempty"`
+	ZMax    float64 `json:"z_max,omitempty"`
 }
 
 // MachineAnchorProfile contains the fixed XY reference points reported by the

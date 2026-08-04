@@ -69,7 +69,18 @@ type Config struct {
 	StatusInterval  time.Duration
 	DeadmanTimeout  time.Duration
 	MotionPrimitive MotionPrimitive
+	SoftLimits      func() SoftLimits
 	Log             Logger
+}
+
+// SoftLimits is the learned machine-coordinate envelope enforced by the
+// firmware. The callback in Config keeps this profile current after a machine
+// learning refresh without rebuilding active browser sessions.
+type SoftLimits struct {
+	Enabled    bool
+	XMin, XMax float64
+	YMin, YMax float64
+	ZMin, ZMax float64
 }
 
 // MotionPrimitive selects the wire command used for one jog segment.
@@ -284,6 +295,13 @@ func New(arb *session.Arbiter, cfg Config) *Manager {
 
 // Config returns the normalized config.
 func (m *Manager) Config() Config { return m.cfg }
+
+func (m *Manager) softLimits() SoftLimits {
+	if m.cfg.SoftLimits == nil {
+		return SoftLimits{}
+	}
+	return m.cfg.SoftLimits()
+}
 
 // Capabilities reports static limits plus current availability.
 func (m *Manager) Capabilities() Capabilities {
@@ -725,7 +743,7 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 		s.requestStatus()
 		return
 	}
-	if planned == nil || queuedLead == 0 {
+	if planned == nil || (queuedLead == 0 && statusObservedAfterQueue(lastStatusAt, queuedUntil)) {
 		planned = copyAxes(st.MPos)
 	}
 	if planned == nil {
@@ -737,6 +755,13 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	target["x"] += delta.X
 	target["y"] += delta.Y
 	target["z"] += delta.Z
+	target = clampJogTarget(planned, target, s.mgr.softLimits())
+	delta = axesDelta(planned, target)
+	if delta.X == 0 && delta.Y == 0 && delta.Z == 0 {
+		s.emitMotionEstimate(now, st, target, delta, "", queuedLead)
+		s.emit(Event{Type: "ack", Seq: seq, Target: target})
+		return
+	}
 	dur := stepJogDuration(delta, s.mgr.cfg)
 	cmd := jogCommandForDuration(target, delta, s.mgr.cfg, dur)
 	if err := lease.Conn.WriteGcodeLine(cmd); err != nil {
@@ -763,7 +788,7 @@ func (s *Session) handleStep(seq int64, axis string, distance float64) {
 	s.mu.Unlock()
 	s.logMotion(now, cmd)
 	s.emitMotionEstimate(now, st, target, delta, cmd, queuedLead)
-	s.emit(Event{Type: "ack", Seq: seq})
+	s.emit(Event{Type: "ack", Seq: seq, Target: target})
 }
 
 func (s *Session) handleOrigin(seq int64, axis string, value float64) {
@@ -817,6 +842,11 @@ func (s *Session) handleOriginCommand(seq int64, cmd string, machineOrigin machi
 	queuedLead := queueLead(now, queuedUntil)
 	if queuedLead > 0 {
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for queued jog motion to finish before setting origin"})
+		return
+	}
+	if !statusObservedAfterQueue(lastStatusAt, queuedUntil) {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before setting origin."})
+		s.requestStatus()
 		return
 	}
 	if len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(s.mgr.cfg) {
@@ -910,6 +940,11 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "wait for queued jog motion to finish before selecting a tap target"})
 		return
 	}
+	if !statusObservedAfterQueue(lastStatusAt, queuedUntil) {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before tap move."})
+		s.requestStatus()
+		return
+	}
 	if (len(st.MPos) == 0 || now.Sub(lastStatusAt) > activeStatusMaxAge(cfg)) && queuedLead == 0 {
 		if statusInFlight {
 			s.emit(Event{Type: "error", Seq: seq, Code: CodeStatusWaiting, Message: "Waiting for fresh machine status before tap move."})
@@ -919,7 +954,7 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		s.requestStatus()
 		return
 	}
-	if planned == nil || queuedLead == 0 {
+	if planned == nil || (queuedLead == 0 && statusObservedAfterQueue(lastStatusAt, queuedUntil)) {
 		planned = copyAxes(st.MPos)
 	}
 	if planned == nil {
@@ -950,6 +985,10 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 	for axis, value := range effectiveTargetAxes {
 		finalTarget[axis] = value
 	}
+	finalTarget = clampJogTarget(planned, finalTarget, s.mgr.softLimits())
+	for axis := range effectiveTargetAxes {
+		effectiveTargetAxes[axis] = finalTarget[axis]
+	}
 	fullDelta := axesDelta(planned, finalTarget)
 	if fullDelta.X == 0 && fullDelta.Y == 0 && fullDelta.Z == 0 {
 		s.emitMotionEstimate(now, st, finalTarget, fullDelta, "", queuedLead)
@@ -969,12 +1008,15 @@ func (s *Session) handleTarget(seq int64, targetAxes machine.AxisValues, feedMMM
 		if plannedZ < safeZMM {
 			safeTarget := copyAxes(planned)
 			safeTarget["z"] = safeZMM
-			safeDelta := Axes{Z: safeZMM - plannedZ}
-			var err error
-			planned, queuedUntil, queuedLead, lastCmd, err = s.writePlannedJogSegment(now, lease, planned, safeTarget, safeDelta, stepJogDuration(safeDelta, cfg), queuedUntil, cfg)
-			if err != nil {
-				s.failLease(CodeMachineError, err)
-				return
+			safeTarget = clampJogTarget(planned, safeTarget, s.mgr.softLimits())
+			safeDelta := axesDelta(planned, safeTarget)
+			if safeDelta.Z != 0 {
+				var err error
+				planned, queuedUntil, queuedLead, lastCmd, err = s.writePlannedJogSegment(now, lease, planned, safeTarget, safeDelta, stepJogDuration(safeDelta, cfg), queuedUntil, cfg)
+				if err != nil {
+					s.failLease(CodeMachineError, err)
+					return
+				}
 			}
 		}
 	}
@@ -1452,7 +1494,12 @@ func (s *Session) motionTick() {
 		s.requestStatus()
 		return
 	}
-	if planned == nil || (queuedLead == 0 && st.State == machine.Idle) {
+	// A cached Idle sample from before the most recently queued segment cannot
+	// prove that segment drained. Rewinding planned to that old MPos would submit
+	// the same relative $J block again on every tick, eventually overrunning the
+	// firmware planner and its soft limits. Only a status observed after the
+	// predicted queue end may re-anchor the planner.
+	if planned == nil || (queuedLead == 0 && st.State == machine.Idle && !lastStatusAt.Before(queuedUntil)) {
 		planned = copyAxes(st.MPos)
 	}
 	segDur := jogSegmentDuration(s.mgr.cfg)
@@ -1497,6 +1544,11 @@ func (s *Session) motionTick() {
 		target["x"] += delta.X
 		target["y"] += delta.Y
 		target["z"] += delta.Z
+		target = clampJogTarget(planned, target, s.mgr.softLimits())
+		delta = axesDelta(planned, target)
+		if delta.X == 0 && delta.Y == 0 && delta.Z == 0 {
+			break
+		}
 		// Compare planned and physical position only immediately after a new
 		// sample. Between samples, a healthy
 		// machine is expected to move away from the old MPos; continuously using
@@ -1649,6 +1701,37 @@ func axesDelta(from, target machine.AxisValues) Axes {
 		Y: target["y"] - from["y"],
 		Z: target["z"] - from["z"],
 	}
+}
+
+func clampJogTarget(from, target machine.AxisValues, limits SoftLimits) machine.AxisValues {
+	clamped := copyAxes(target)
+	if !limits.Enabled || len(from) == 0 || len(clamped) == 0 {
+		return clamped
+	}
+	for _, bound := range []struct {
+		axis     string
+		min, max float64
+	}{
+		{axis: "x", min: limits.XMin, max: limits.XMax},
+		{axis: "y", min: limits.YMin, max: limits.YMax},
+		{axis: "z", min: limits.ZMin, max: limits.ZMax},
+	} {
+		start, startOK := from[bound.axis]
+		wanted, targetOK := clamped[bound.axis]
+		if !startOK || !targetOK || !validSoftLimitRange(bound.min, bound.max) || start < bound.min || start > bound.max {
+			continue
+		}
+		if wanted < bound.min {
+			clamped[bound.axis] = bound.min
+		} else if wanted > bound.max {
+			clamped[bound.axis] = bound.max
+		}
+	}
+	return clamped
+}
+
+func validSoftLimitRange(min, max float64) bool {
+	return !math.IsNaN(min) && !math.IsInf(min, 0) && !math.IsNaN(max) && !math.IsInf(max, 0) && min < max
 }
 
 func targetReached(position, target machine.AxisValues) bool {
@@ -1907,6 +1990,10 @@ func queueLead(now, queuedUntil time.Time) time.Duration {
 		return 0
 	}
 	return queuedUntil.Sub(now)
+}
+
+func statusObservedAfterQueue(observedAt, queuedUntil time.Time) bool {
+	return queuedUntil.IsZero() || !observedAt.Before(queuedUntil)
 }
 
 func motionInputActive(haveInput bool, in Input, now time.Time, cfg Config) bool {

@@ -1248,6 +1248,7 @@ func normalizeMachineSoftEndstopProfile(in MachineSoftEndstopProfile) MachineSof
 		YMin:    normalizeFinite(in.YMin, 0),
 		YMax:    normalizeFinite(in.YMax, 0),
 		ZMin:    normalizeFinite(in.ZMin, 0),
+		ZMax:    normalizeFinite(in.ZMax, 0),
 	}
 }
 

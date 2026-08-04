@@ -1226,6 +1226,10 @@ func applyKnownMachineConfig(learned *store.MachineLearned) {
 	}
 	if v, ok := num("soft_endstop.z_min"); ok {
 		learned.SoftEndstop.ZMin = v
+		// CarveraFirmware fixes every XYZ soft-endstop maximum at -1 mm;
+		// unlike the homing gamma_max coordinate, this is the actual target
+		// checked by Robot::append_milestone before accepting a move.
+		learned.SoftEndstop.ZMax = firmwareTravelMaxMM
 		learned.ZMinMM = v
 	}
 

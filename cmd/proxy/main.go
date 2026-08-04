@@ -232,7 +232,22 @@ func main() {
 		StatusInterval:  *jogStatus,
 		DeadmanTimeout:  *jogDeadman,
 		MotionPrimitive: jog.MotionPrimitive(*jogMotion),
-		Log:             svc.GcodeLog(),
+		SoftLimits: func() jog.SoftLimits {
+			soft := svc.UISettings().Machine.Learned.SoftEndstop
+			zMax := soft.ZMax
+			if zMax == 0 {
+				// Profiles learned before ZMax was persisted still target the
+				// same firmware, whose XYZ upper soft endpoint is fixed at -1.
+				zMax = -1
+			}
+			return jog.SoftLimits{
+				Enabled: soft.Enabled,
+				XMin:    soft.XMin, XMax: soft.XMax,
+				YMin: soft.YMin, YMax: soft.YMax,
+				ZMin: soft.ZMin, ZMax: zMax,
+			}
+		},
+		Log: svc.GcodeLog(),
 	})
 
 	authCfg := httpauth.Config{User: *authUser, Token: *authToken}

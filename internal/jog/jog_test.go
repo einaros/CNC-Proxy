@@ -82,6 +82,120 @@ func TestNormalizeClampsFastJogCadence(t *testing.T) {
 	}
 }
 
+func TestClampJogTargetUsesEnabledLearnedEnvelope(t *testing.T) {
+	from := machine.AxisValues{"x": -2, "y": -10, "z": -2}
+	target := machine.AxisValues{"x": 3, "y": -30, "z": 4}
+	limits := SoftLimits{
+		Enabled: true,
+		XMin:    -20, XMax: -1,
+		YMin: -25, YMax: -1,
+		ZMin: -15, ZMax: -1,
+	}
+	got := clampJogTarget(from, target, limits)
+	if got["x"] != -1 || got["y"] != -25 || got["z"] != -1 {
+		t.Fatalf("clamped target = %+v, want exact XYZ soft limits", got)
+	}
+
+	limits.Enabled = false
+	got = clampJogTarget(from, target, limits)
+	if got["x"] != 3 || got["y"] != -30 || got["z"] != 4 {
+		t.Fatalf("disabled limits changed target: %+v", got)
+	}
+}
+
+func TestContinuousJogStopsAtSoftLimitWithoutQueuingOvershoot(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.Tick = time.Hour
+	mgr.cfg.DeadmanTimeout = 2 * time.Hour
+	mgr.cfg.SoftLimits = func() SoftLimits {
+		return SoftLimits{
+			Enabled: true,
+			XMin:    -10, XMax: 1,
+			YMin: -10, YMax: 1,
+			ZMin: -10, ZMax: 1,
+		}
+	}
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	now := time.Now()
+	mgr.now = func() time.Time { return now }
+	s.SetInput(Input{Seq: 2, Deadman: true, Axes: Axes{X: 1}, At: now})
+	s.motionTick()
+	drainUntil(t, s, "motion")
+	waitForGcodeCount(t, fm, 1)
+	if got := fm.Gcodes(); len(got) != 1 || !strings.Contains(got[0], "X1.0000") {
+		t.Fatalf("boundary jog commands = %v, want one segment ending exactly at X max", got)
+	}
+
+	for i := 0; i < 5; i++ {
+		now = now.Add(100 * time.Millisecond)
+		s.motionTick()
+	}
+	if got := fm.Gcodes(); len(got) != 1 {
+		t.Fatalf("jog queued %d commands beyond the soft limit: %v", len(got)-1, got)
+	}
+}
+
+func TestStepAndTargetJogClampToSoftLimit(t *testing.T) {
+	mgr, fm, cleanup := newJogManager(t)
+	defer cleanup()
+	mgr.cfg.SoftLimits = func() SoftLimits {
+		return SoftLimits{
+			Enabled: true,
+			XMin:    -10, XMax: 1,
+			YMin: -10, YMax: 1,
+			ZMin: -10, ZMax: 1,
+		}
+	}
+
+	s, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drainUntil(t, s, "hello")
+	s.Arm(1)
+	drainUntil(t, s, "ack")
+
+	s.Step(2, "x", 5)
+	stepAck := drainUntil(t, s, "ack")
+	if stepAck.Target["x"] != 1 {
+		t.Fatalf("step ack target = %+v, want X max", stepAck.Target)
+	}
+	waitForGcodeCount(t, fm, 1)
+	if got := fm.Gcodes()[0]; !strings.Contains(got, "X1.0000") {
+		t.Fatalf("step command = %q, want clamped X delta", got)
+	}
+
+	s.mu.Lock()
+	settledAt := s.queuedUntil.Add(time.Millisecond)
+	s.mu.Unlock()
+	mgr.now = func() time.Time { return settledAt }
+	status := "<Idle|MPos:1,0,0|WPos:1,0,0>"
+	if err := s.applyStatusPayload(status); err != nil {
+		t.Fatal(err)
+	}
+	drainUntil(t, s, "status")
+	s.Target(3, machine.AxisValues{"x": 25, "y": -25}, 600, false, 0)
+	targetAck := drainUntil(t, s, "ack")
+	if targetAck.Target["x"] != 1 || targetAck.Target["y"] != -10 {
+		t.Fatalf("target ack = %+v, want clamped X/Y limits", targetAck.Target)
+	}
+	waitForGcodeCount(t, fm, 2)
+	if got := fm.Gcodes()[1]; strings.Contains(got, "X") || !strings.Contains(got, "Y-10.0000") {
+		t.Fatalf("target command = %q, want only clamped Y delta", got)
+	}
+}
+
 func TestStatusQueryTimeoutToleratesTransportLatency(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Tick = 5 * time.Millisecond

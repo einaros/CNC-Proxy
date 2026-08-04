@@ -1013,7 +1013,7 @@ func TestLearnMachineParametersPersistsConfigDrivenProfile(t *testing.T) {
 	if res.Learned.SoftEndstop.Enabled || res.Learned.Clearance.X != -5 || res.Learned.Probe.RetractMM != 2 {
 		t.Fatalf("known config profile = %+v", res.Learned)
 	}
-	if res.Learned.SoftEndstop.XMax != -1 || res.Learned.SoftEndstop.YMax != -1 {
+	if res.Learned.SoftEndstop.XMax != -1 || res.Learned.SoftEndstop.YMax != -1 || res.Learned.SoftEndstop.ZMax != -1 {
 		t.Fatalf("firmware travel maxima = %+v", res.Learned.SoftEndstop)
 	}
 	if !res.Learned.Anchors.Available || res.Learned.Anchors.Anchor1 != (store.XYPoint{X: -287.51, Y: -202.11}) || res.Learned.Anchors.Anchor2 != (store.XYPoint{X: -199.01, Y: -157.11}) {
