@@ -6653,14 +6653,6 @@ function renderActiveGcode() {
   const machineReady = state.machine?.state === "Idle";
   run.disabled = !!state.activeGcodePending;
   setSoftDisabled(run, !state.activeGcodePending && (!active.runnable || !machineReady));
-  const idleRequiredText = "Machine must be Idle before starting the active gcode.";
-  if (!state.activeGcodePending && active.message) {
-    setStatusMessage("active-gcode", active.message, "error");
-  } else if (!state.activeGcodePending && !machineReady) {
-    setStatusMessage("active-gcode", idleRequiredText, "");
-  } else if (!state.activeGcodePending && machineReady && state.notices.get("active-gcode")?.text === idleRequiredText) {
-    clearNotice("active-gcode");
-  }
   renderActiveJobProgress(live, preview);
   drawGcodePreview(renderedPreview, live);
   renderDashboard();
@@ -11279,6 +11271,17 @@ function applyJogEvent(ev) {
     }
   } else if (ev.type === "error") {
     const terminalSessionError = ev.code !== "status_waiting";
+    if (!terminalSessionError) {
+      // A delayed status reply is an internal retry state, not an operator
+      // warning and not a terminal result for any pending movement action.
+      if (state.jog.errorCode === "status_waiting") {
+        state.jog.error = "";
+        state.jog.errorCode = "";
+      }
+      renderJog();
+      renderOutlineCapture();
+      return;
+    }
     completeCommandDisarm(ev.seq, ev.message || jogErrorText(ev.code));
     if (ev.seq && ev.seq === state.jog.armPending) {
       const action = state.jog.armPendingAction;

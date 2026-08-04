@@ -3451,6 +3451,8 @@ test("a terminal target error releases Tap Move without disarming", () => {
   vm.runInContext("applyJogEvent({ type: 'error', code: 'status_waiting', message: 'Waiting for fresh machine status before continuing jog.' })", ctx);
   assert.equal(state.jog.targetPending, 12);
   assert.equal(state.jog.targetMotionPending, 12);
+  assert.equal(state.jog.error, "", "retryable status polling must not become a global jog warning");
+  assert.equal(state.jog.errorCode, "");
 
   vm.runInContext("applyJogEvent({ type: 'error', seq: 12, code: 'target_not_reached', message: 'machine stopped before reaching the requested tap target' })", ctx);
   assert.equal(state.jog.armed, true);
@@ -3462,6 +3464,12 @@ test("a terminal target error releases Tap Move without disarming", () => {
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, "target");
   assert.equal(state.jog.targetMotionPending, 13);
+});
+
+test("active gcode render does not publish warnings before the operator tries to run it", () => {
+  const render = extractFunction("renderActiveGcode");
+  assert.ok(!render.includes('setStatusMessage("active-gcode"'), "disabled run state stays local until the run action is invoked");
+  assert.ok(!render.includes("Machine must be Idle before starting the active gcode."));
 });
 
 test("Trace outline waits for a pending Tap Move target", async () => {
