@@ -133,7 +133,7 @@ func TestActiveMotionRequestsBoundedStatusPolling(t *testing.T) {
 	}
 }
 
-func TestManagerSingleActiveSession(t *testing.T) {
+func TestManagerAllowsMultipleObserverSessions(t *testing.T) {
 	mgr, _, cleanup := newJogManager(t)
 	defer cleanup()
 
@@ -142,8 +142,18 @@ func TestManagerSingleActiveSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s1.Close()
-	if _, err := mgr.Start(context.Background()); err == nil {
-		t.Fatal("second session should be rejected")
+	hello1 := drainUntil(t, s1, "hello")
+	s2, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	hello2 := drainUntil(t, s2, "hello")
+	if hello1.Capabilities == nil || !hello1.Capabilities.Availability.Available {
+		t.Fatalf("first observer availability = %+v, want available", hello1.Capabilities)
+	}
+	if hello2.Capabilities == nil || !hello2.Capabilities.Availability.Available {
+		t.Fatalf("second observer availability = %+v, want available", hello2.Capabilities)
 	}
 }
 
@@ -178,27 +188,63 @@ func TestManagerDisarmActiveWaitsForLeaseRelease(t *testing.T) {
 	}
 }
 
-func TestActiveSessionAvailabilityIgnoresItself(t *testing.T) {
+func TestObserverCanDisarmAndTakeMovementControl(t *testing.T) {
 	mgr, _, cleanup := newJogManager(t)
 	defer cleanup()
 
-	s, err := mgr.Start(context.Background())
+	first, err := mgr.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	hello := drainUntil(t, s, "hello")
-	if hello.Capabilities == nil || !hello.Capabilities.Availability.Available {
-		t.Fatalf("active session hello availability = %+v, want available", hello.Capabilities)
+	defer first.Close()
+	drainUntil(t, first, "hello")
+	second, err := mgr.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	drainUntil(t, second, "hello")
+
+	first.Arm(1)
+	drainUntil(t, first, "ack")
+	firstArmed := drainUntil(t, first, "state")
+	if firstArmed.Armed == nil || !*firstArmed.Armed || firstArmed.Availability == nil || !firstArmed.Availability.Available {
+		t.Fatalf("first armed state = %+v, want armed owner", firstArmed)
+	}
+	secondBusy := drainUntil(t, second, "state")
+	if secondBusy.Armed == nil || *secondBusy.Armed || secondBusy.Availability == nil || secondBusy.Availability.Reason != CodeBusy {
+		t.Fatalf("second observer state = %+v, want unarmed and busy", secondBusy)
 	}
 	if ext := mgr.Availability(); ext.Available || ext.Reason != CodeBusy {
-		t.Fatalf("external availability during active session = %+v, want busy", ext)
+		t.Fatalf("external availability while first owns movement = %+v, want busy", ext)
 	}
 
-	s.emitState(1)
-	ev := readEvent(t, s, "state")
-	if ev.Availability == nil || !ev.Availability.Available || ev.Availability.Reason == CodeBusy {
-		t.Fatalf("active session state availability = %+v, want available and not busy", ev.Availability)
+	second.Disarm(2)
+	drainUntil(t, second, "ack")
+	secondReady := drainUntil(t, second, "state")
+	if secondReady.Armed == nil || *secondReady.Armed || secondReady.Availability == nil || !secondReady.Availability.Available {
+		t.Fatalf("second state after takeover disarm = %+v, want ready observer", secondReady)
+	}
+	firstDisarmed := drainUntilState(t, first, func(ev Event) bool {
+		return ev.Armed != nil && !*ev.Armed && ev.Availability != nil && ev.Availability.Available
+	})
+	if firstDisarmed.Armed == nil || *firstDisarmed.Armed {
+		t.Fatalf("first state after remote disarm = %+v, want disarmed", firstDisarmed)
+	}
+
+	second.Arm(3)
+	drainUntil(t, second, "ack")
+	secondArmed := drainUntilState(t, second, func(ev Event) bool {
+		return ev.Armed != nil && *ev.Armed
+	})
+	if secondArmed.Availability == nil || !secondArmed.Availability.Available {
+		t.Fatalf("second armed state = %+v, want movement owner", secondArmed)
+	}
+	firstBusy := drainUntilState(t, first, func(ev Event) bool {
+		return ev.Armed != nil && !*ev.Armed && ev.Availability != nil && ev.Availability.Reason == CodeBusy
+	})
+	if firstBusy.Availability == nil || firstBusy.Availability.Reason != CodeBusy {
+		t.Fatalf("first observer after takeover = %+v, want busy", firstBusy)
 	}
 }
 
@@ -2020,6 +2066,27 @@ func readEvent(t *testing.T, s *Session, typ string) Event {
 			}
 		case <-deadline:
 			t.Fatalf("timeout waiting for event %q", typ)
+		}
+	}
+}
+
+func drainUntilState(t *testing.T, s *Session, match func(Event) bool) Event {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				t.Fatal("events closed before matching state")
+			}
+			if ev.Type == "error" {
+				t.Fatalf("unexpected jog error waiting for state: %+v", ev)
+			}
+			if ev.Type == "state" && match(ev) {
+				return ev
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for matching state")
 		}
 	}
 }

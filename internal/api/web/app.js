@@ -1333,6 +1333,10 @@ function recoveryButtonText(recovery, reason = null) {
 
 function syncJogAvailabilityFromMachine(m) {
   if (!state.jog.caps?.enabled) return;
+  // Movement ownership comes from the jog service, not the shared machine
+  // status stream. Keep another UI's ownership visible until the service
+  // broadcasts that it has been released.
+  if (movementOwnedElsewhere()) return;
   if (state.jog.armed && (m.state === "Idle" || m.state === "Run")) {
     state.jog.availability = { available: true, message: "Jog session active." };
     if (state.jog.errorCode === "status_waiting") {
@@ -1386,8 +1390,13 @@ function isTransientJogBlock(err) {
     low.includes("controller requested the machine");
 }
 
+function movementOwnedElsewhere(j = state.jog) {
+  return !j.armed && j.availability?.reason === "busy";
+}
+
 function renderJog() {
   const j = state.jog;
+  const externalOwner = movementOwnedElsewhere(j);
   document.getElementById("jog-link").textContent = j.link;
   document.getElementById("jog-pad").textContent = j.pad || "-";
   const dead = document.getElementById("jog-deadman");
@@ -1398,8 +1407,9 @@ function renderJog() {
   else clearNotice("jog-availability");
   const arm = document.getElementById("jog-arm");
   setTextIfChanged(arm, j.armPending ? (j.armPendingAction === "arm" ? "Arming..." : "Disarming...") :
-    (j.armQueuedAction ? "Connecting..." : (j.armed ? "Disarm Movement" : "Arm Movement")));
+    (j.armQueuedAction ? "Connecting..." : ((j.armed || externalOwner) ? "Disarm Movement" : "Arm Movement")));
   arm.classList.toggle("armed", j.armed);
+  arm.setAttribute("aria-pressed", j.armed ? "true" : "false");
   const armBusy = !!j.armPending || !!j.armQueuedAction;
   const originBusy = hasPendingOriginOperation();
   const tapOperationBusy = originBusy || !!j.zProbePending;
@@ -1677,6 +1687,9 @@ function jogPanelMessage() {
   if (j.link !== "online") {
     return { text: "Connecting to jog service...", kind: "" };
   }
+  if (movementOwnedElsewhere(j)) {
+    return { text: j.availability.message || jogErrorText("busy"), kind: "" };
+  }
   if (!j.armed && j.availability && !j.availability.available) {
     return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
   }
@@ -1701,7 +1714,7 @@ function jogErrorText(err) {
   case "disabled":
     return "Jogging is disabled.";
   case "busy":
-    return "Another jog session is active. Close the other CNC Proxy tab/client or wait for it to disconnect.";
+    return "Movement control is held by another UI. Disarm it before taking control.";
   case "not_idle":
     return "Machine is not Idle. Wait for fresh Idle status, then arm jog again.";
   case "stale_status":
@@ -9857,8 +9870,8 @@ function toggleTapMoveArm() {
     setTapFeedback("Jog service is unavailable in this browser.", "error");
     return;
   }
-  const action = state.jog.armed ? "disarm" : "arm";
-  if (action === "disarm") releaseJogInput(true);
+  const action = (state.jog.armed || movementOwnedElsewhere()) ? "disarm" : "arm";
+  if (state.jog.armed) releaseJogInput(true);
   if (state.jog.link !== "online") {
     state.jog.armQueuedAction = action;
     state.jog.tapFeedback = "Connecting to jog service...";

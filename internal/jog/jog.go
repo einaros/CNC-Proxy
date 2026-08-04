@@ -264,20 +264,22 @@ type pendingTarget struct {
 	verifyAfter  time.Time
 }
 
-// Manager owns the single active jog session.
+// Manager owns all connected jog UI sessions and the single session allowed to
+// hold movement control. Observers stay connected while another UI is armed.
 type Manager struct {
 	cfg Config
 	arb *session.Arbiter
 
-	mu     sync.Mutex
-	active *Session
-	now    func() time.Time
+	mu       sync.Mutex
+	sessions map[*Session]struct{}
+	owner    *Session
+	now      func() time.Time
 }
 
 // New creates a Manager.
 func New(arb *session.Arbiter, cfg Config) *Manager {
 	cfg = cfg.normalize()
-	return &Manager{cfg: cfg, arb: arb, now: time.Now}
+	return &Manager{cfg: cfg, arb: arb, sessions: make(map[*Session]struct{}), now: time.Now}
 }
 
 // Config returns the normalized config.
@@ -311,13 +313,13 @@ func (m *Manager) availability(ignore *Session) Availability {
 		return Availability{Available: false, Reason: CodeDisabled, Message: "Jogging is disabled."}
 	}
 	m.mu.Lock()
-	active := m.active
+	owner := m.owner
 	m.mu.Unlock()
-	if active != nil && active != ignore {
-		return Availability{Available: false, Reason: CodeBusy, Message: "Another jog session is active. Close the other CNC Proxy tab/client or wait for it to disconnect."}
+	if owner != nil && owner != ignore {
+		return Availability{Available: false, Reason: CodeBusy, Message: "Movement control is held by another UI. Disarm it before taking control."}
 	}
 	st, _ := m.arb.Tracker().Current()
-	activeJog := ignore != nil && active == ignore && ignore.hasLease()
+	activeJog := ignore != nil && owner == ignore && ignore.hasLease()
 	if !m.arb.Tracker().Fresh(m.arb.StateMaxAge()) {
 		return Availability{Available: false, Reason: CodeStaleStatus, Message: "Machine status is stale. Wait for a fresh Idle status before jogging."}
 	}
@@ -333,8 +335,8 @@ func (m *Manager) availability(ignore *Session) Availability {
 	return Availability{Available: true, Message: "Ready to arm jog."}
 }
 
-// Start opens a single active session. The session does not acquire the machine
-// lease until the client arms it.
+// Start opens a connected UI session. Sessions remain observers until one of
+// them exclusively arms movement and acquires the machine lease.
 func (m *Manager) Start(ctx context.Context) (*Session, error) {
 	if !m.cfg.Enabled {
 		return nil, Error{Code: CodeDisabled, Message: "jogging is disabled"}
@@ -350,36 +352,82 @@ func (m *Manager) Start(ctx context.Context) (*Session, error) {
 		done:     make(chan struct{}),
 	}
 	m.mu.Lock()
-	if m.active != nil {
-		m.mu.Unlock()
-		cancel()
-		return nil, Error{Code: CodeBusy, Message: "another jog session is active"}
-	}
-	m.active = s
+	m.sessions[s] = struct{}{}
 	m.mu.Unlock()
 	go s.run()
 	return s, nil
 }
 
-func (m *Manager) clearActive(s *Session) {
+func (m *Manager) unregister(s *Session) {
 	m.mu.Lock()
-	if m.active == s {
-		m.active = nil
+	delete(m.sessions, s)
+	if m.owner == s {
+		m.owner = nil
 	}
 	m.mu.Unlock()
+}
+
+func (m *Manager) claimOwner(s *Session) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.owner != nil && m.owner != s {
+		return false
+	}
+	m.owner = s
+	return true
+}
+
+func (m *Manager) clearOwner(s *Session) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.owner != s {
+		return false
+	}
+	m.owner = nil
+	return true
+}
+
+func (m *Manager) ownerSession() *Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.owner
+}
+
+func (m *Manager) broadcastState(source *Session, seq int64) {
+	for _, s := range m.connectedSessions() {
+		eventSeq := int64(0)
+		if s == source {
+			eventSeq = seq
+		}
+		s.emitOwnState(eventSeq)
+	}
+}
+
+func (m *Manager) broadcastEvent(ev Event) {
+	for _, s := range m.connectedSessions() {
+		s.emit(ev)
+	}
+}
+
+func (m *Manager) connectedSessions() []*Session {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+	return sessions
 }
 
 // DisarmActive releases the machine lease held by the current jog session.
 // It waits for the session loop to process the disarm so callers may safely
 // begin work that needs the arbiter operation lock after this method returns.
 func (m *Manager) DisarmActive(ctx context.Context) error {
-	m.mu.Lock()
-	active := m.active
-	m.mu.Unlock()
-	if active == nil {
+	owner := m.ownerSession()
+	if owner == nil {
 		return nil
 	}
-	return active.disarmAndWait(ctx)
+	return owner.disarmAndWait(ctx)
 }
 
 // Error is a stable jog error with an API code.
@@ -524,8 +572,9 @@ func (s *Session) enqueue(cmd command) {
 func (s *Session) run() {
 	defer func() {
 		s.release(nil)
-		s.mgr.clearActive(s)
+		s.mgr.unregister(s)
 		s.closeEvents()
+		s.mgr.broadcastState(nil, 0)
 		close(s.done)
 	}()
 	s.emit(Event{Type: "hello", Capabilities: ptr(s.mgr.capabilities(s))})
@@ -595,7 +644,18 @@ func (s *Session) handleCommand(cmd command) {
 	case "arm":
 		s.handleArm(cmd.seq)
 	case "disarm":
-		s.release(nil)
+		owner := s.mgr.ownerSession()
+		if owner != nil && owner != s {
+			ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+			err := owner.disarmAndWait(ctx)
+			cancel()
+			if err != nil {
+				s.emit(Event{Type: "error", Seq: cmd.seq, Code: CodeBusy, Message: "could not disarm movement control: " + err.Error()})
+				return
+			}
+		} else {
+			s.release(nil)
+		}
 		if cmd.seq != 0 {
 			s.emit(Event{Type: "ack", Seq: cmd.seq})
 		}
@@ -1001,6 +1061,21 @@ func (s *Session) handleArm(seq int64) {
 		s.emitState(seq)
 		return
 	}
+	if !s.mgr.claimOwner(s) {
+		s.emit(Event{Type: "error", Seq: seq, Code: CodeBusy, Message: "movement control is held by another UI; disarm it before taking control"})
+		s.emitState(seq)
+		return
+	}
+	armSucceeded := false
+	defer func() {
+		if armSucceeded {
+			return
+		}
+		if s.mgr.clearOwner(s) {
+			s.mgr.broadcastState(s, 0)
+		}
+	}()
+	s.mgr.broadcastState(s, 0)
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
 	lease, err := s.mgr.arb.AcquireJog(ctx)
@@ -1069,7 +1144,8 @@ func (s *Session) handleArm(seq int64) {
 	s.queuedUntil = time.Time{}
 	s.segments = nil
 	s.mu.Unlock()
-	s.emit(Event{Type: "status", Status: statusEvent(st, age)})
+	armSucceeded = true
+	s.mgr.broadcastEvent(Event{Type: "status", Status: statusEvent(st, age)})
 	s.emit(Event{Type: "ack", Seq: seq})
 	s.emitState(seq)
 }
@@ -1268,7 +1344,7 @@ func (s *Session) applyStatusPayload(payload string) error {
 	if st.State == machine.Alarm {
 		s.logAlarmStatus(st)
 	}
-	s.emit(Event{Type: "status", Status: statusEvent(st, age)})
+	s.mgr.broadcastEvent(Event{Type: "status", Status: statusEvent(st, age)})
 	if completed != nil {
 		s.emit(Event{Type: "target_complete", Seq: completed.seq, Target: completed.target})
 	}
@@ -2059,7 +2135,7 @@ func (s *Session) emitMotion(now time.Time, ev *MotionEvent) {
 	}
 	s.lastMotionEvent = now
 	s.mu.Unlock()
-	s.emit(Event{Type: "motion", Motion: ev})
+	s.mgr.broadcastEvent(Event{Type: "motion", Motion: ev})
 }
 
 func (s *Session) logMotion(now time.Time, cmd string) {
@@ -2131,6 +2207,7 @@ func (s *Session) release(err error) {
 		s.statusWG.Wait()
 		lease.Release(err)
 	}
+	s.mgr.clearOwner(s)
 }
 
 func (s *Session) failLease(code string, err error) {
@@ -2146,6 +2223,10 @@ func (s *Session) hasLease() bool {
 }
 
 func (s *Session) emitState(seq int64) {
+	s.mgr.broadcastState(s, seq)
+}
+
+func (s *Session) emitOwnState(seq int64) {
 	avail := s.mgr.availability(s)
 	s.mu.Lock()
 	armed := s.armed

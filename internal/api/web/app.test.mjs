@@ -811,7 +811,7 @@ test("fresh machine status clears a terminal stale jog recovery error", () => {
     },
   };
   const ctx = buildContext(
-    ["hasMPos", "isTransientJogBlock", "syncJogAvailabilityFromMachine"],
+    ["hasMPos", "isTransientJogBlock", "movementOwnedElsewhere", "syncJogAvailabilityFromMachine"],
     [],
     { state },
   );
@@ -823,6 +823,58 @@ test("fresh machine status clears a terminal stale jog recovery error", () => {
   assert.equal(state.jog.error, "");
   assert.equal(state.jog.errorCode, "");
   assert.equal(state.jog.availability.available, true);
+});
+
+test("machine snapshots do not overwrite movement ownership from another UI", () => {
+  const state = {
+    jog: {
+      caps: { enabled: true },
+      armed: false,
+      error: "",
+      errorCode: "",
+      availability: {
+        available: false,
+        reason: "busy",
+        message: "Movement control is held by another UI. Disarm it before taking control.",
+      },
+    },
+  };
+  const ctx = buildContext(
+    ["hasMPos", "isTransientJogBlock", "movementOwnedElsewhere", "syncJogAvailabilityFromMachine"],
+    [],
+    { state },
+  );
+
+  vm.runInContext(`syncJogAvailabilityFromMachine({ state: "Idle", stale: false, age_ms: 10, mpos: { x: 0, y: 0, z: 0 } })`, ctx);
+  assert.equal(state.jog.availability.reason, "busy");
+  assert.equal(state.jog.availability.available, false);
+});
+
+test("an observing UI disarms the current movement owner before it can arm", () => {
+  const actions = [];
+  const state = {
+    jog: {
+      caps: { enabled: true },
+      link: "online",
+      armed: false,
+      armPending: 0,
+      armQueuedAction: "",
+      availability: { available: false, reason: "busy" },
+    },
+  };
+  const ctx = buildContext(["movementOwnedElsewhere", "toggleTapMoveArm"], [], {
+    state,
+    hasPendingOriginOperation: () => false,
+    sendTapMoveArmAction: (action) => { actions.push(action); return true; },
+    releaseJogInput: () => { throw new Error("observer must not release local input"); },
+    setTapFeedback: () => {},
+    jogErrorText: () => "",
+    connectJog: () => {},
+    renderJog: () => {},
+  });
+
+  vm.runInContext("toggleTapMoveArm()", ctx);
+  assert.deepEqual(actions, ["disarm"]);
 });
 
 test("active-job context maps captured geometry into the current work coordinates and requires a complete probe plan", () => {
@@ -3086,11 +3138,28 @@ test("Set Origin shows the machine-coordinate change from the current origin", (
 });
 
 test("an unconnected gamepad does not produce a disconnect status", () => {
-  const ctx = buildContext(["jogPanelMessage"], [], {
+  const ctx = buildContext(["movementOwnedElsewhere", "jogErrorText", "jogPanelMessage"], [], {
     state: { jog: { error: "", link: "online", availability: null, pad: "", armed: false } },
   });
   const message = vm.runInContext("jogPanelMessage()", ctx);
   assert.equal(message.text, "");
+});
+
+test("an observing UI describes the explicit movement handoff", () => {
+  const ctx = buildContext(["movementOwnedElsewhere", "jogErrorText", "jogPanelMessage"], [], {
+    state: {
+      jog: {
+        error: "",
+        link: "online",
+        availability: { available: false, reason: "busy", message: "Movement control is held by another UI. Disarm it before taking control." },
+        pad: "",
+        armed: false,
+      },
+    },
+  });
+  const message = vm.runInContext("jogPanelMessage()", ctx);
+  assert.equal(message.text, "Movement control is held by another UI. Disarm it before taking control.");
+  assert.equal(message.kind, "");
 });
 
 test("outline gamepad button defaults to the standard right trigger and persists a custom binding", () => {

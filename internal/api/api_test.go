@@ -769,7 +769,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index still contains obsolete dashboard 2D preview marker %s", gone)
 		}
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `.status-item`, `#status-bar { position: fixed;`, `background: transparent; border: 0; box-shadow: none; pointer-events: none;`, `.status-item.entering`, `.status-item.leaving`, `.status-dismiss`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="header-toggle"`, `aria-label="Hide top bars"`, `body.header-collapsed #command-toolbar, body.header-collapsed .tabs { display: none; }`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos"`, `.dashboard-position-metric > strong, .dashboard-position-metric > b { overflow: visible; text-overflow: clip; white-space: normal;`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `id="jog-settings-section"`, `id="move-to-work-section"`, `id="work-zero-section"`, `id="gamepad-section"`, `id="workarea-mobile-jog"`, `.mobile-jog-base`, `.mobile-jog-knob`, `class="command-panel-close" aria-label="Close Macros menu"`, `class="command-panel-close" aria-label="Close Tool menu"`, `type="module"`, `/app.js?v=mobile-workarea-jog-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `.status-item`, `#status-bar { position: fixed;`, `background: transparent; border: 0; box-shadow: none; pointer-events: none;`, `.status-item.entering`, `.status-item.leaving`, `.status-dismiss`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="header-toggle"`, `aria-label="Hide top bars"`, `body.header-collapsed #command-toolbar, body.header-collapsed .tabs { display: none; }`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos"`, `.dashboard-position-metric > strong, .dashboard-position-metric > b { overflow: visible; text-overflow: clip; white-space: normal;`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `id="jog-settings-section"`, `id="move-to-work-section"`, `id="work-zero-section"`, `id="gamepad-section"`, `id="workarea-mobile-jog"`, `.mobile-jog-base`, `.mobile-jog-knob`, `class="command-panel-close" aria-label="Close Macros menu"`, `class="command-panel-close" aria-label="Close Tool menu"`, `type="module"`, `/app.js?v=multi-ui-jog-1`} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -1460,7 +1460,7 @@ func TestJogWebSocketBadAxis(t *testing.T) {
 	}
 }
 
-func TestJogWebSocketDuplicateSession(t *testing.T) {
+func TestJogWebSocketMovementOwnershipHandoff(t *testing.T) {
 	srv, _, _ := serverWithJog(t, false)
 	first := dialWS(t, srv.URL)
 	defer first.Close(websocket.StatusNormalClosure, "")
@@ -1468,9 +1468,66 @@ func TestJogWebSocketDuplicateSession(t *testing.T) {
 
 	second := dialWS(t, srv.URL)
 	defer second.Close(websocket.StatusNormalClosure, "")
-	ev := readWSEvent(t, second, "error")
-	if ev.Code != jog.CodeBusy {
-		t.Fatalf("second session error = %+v", ev)
+	readWSEvent(t, second, "hello")
+
+	writeWS(t, first, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, first, "ack")
+	firstArmed := readWSStateWhere(t, first, func(ev jog.Event) bool { return ev.Armed != nil && *ev.Armed })
+	if firstArmed.Availability == nil || !firstArmed.Availability.Available {
+		t.Fatalf("first armed state = %+v", firstArmed)
+	}
+	secondBusy := readWSStateWhere(t, second, func(ev jog.Event) bool {
+		return ev.Armed != nil && !*ev.Armed && ev.Availability != nil && ev.Availability.Reason == jog.CodeBusy
+	})
+	if secondBusy.Availability == nil || secondBusy.Availability.Reason != jog.CodeBusy {
+		t.Fatalf("second observer state = %+v, want busy", secondBusy)
+	}
+	writeWS(t, second, map[string]any{"type": "disarm", "seq": 2})
+	readWSEvent(t, second, "ack")
+	firstDisarmed := readWSStateWhere(t, first, func(ev jog.Event) bool {
+		return ev.Armed != nil && !*ev.Armed && ev.Availability != nil && ev.Availability.Available
+	})
+	if firstDisarmed.Armed == nil || *firstDisarmed.Armed {
+		t.Fatalf("first state after remote disarm = %+v", firstDisarmed)
+	}
+	readWSStateWhere(t, second, func(ev jog.Event) bool {
+		return ev.Armed != nil && !*ev.Armed && ev.Availability != nil && ev.Availability.Available
+	})
+
+	writeWS(t, second, map[string]any{"type": "arm", "seq": 3})
+	readWSEvent(t, second, "ack")
+	secondArmed := readWSStateWhere(t, second, func(ev jog.Event) bool { return ev.Armed != nil && *ev.Armed })
+	if secondArmed.Availability == nil || !secondArmed.Availability.Available {
+		t.Fatalf("second armed state = %+v", secondArmed)
+	}
+	firstBusy := readWSStateWhere(t, first, func(ev jog.Event) bool {
+		return ev.Armed != nil && !*ev.Armed && ev.Availability != nil && ev.Availability.Reason == jog.CodeBusy
+	})
+	if firstBusy.Availability == nil || firstBusy.Availability.Reason != jog.CodeBusy {
+		t.Fatalf("first observer after takeover = %+v, want busy", firstBusy)
+	}
+}
+
+func TestJogWebSocketObserversReceiveOwnerMotion(t *testing.T) {
+	srv, _, _ := serverWithJog(t, false)
+	owner := dialWS(t, srv.URL)
+	defer owner.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, owner, "hello")
+
+	observer := dialWS(t, srv.URL)
+	defer observer.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, observer, "hello")
+
+	writeWS(t, owner, map[string]any{"type": "arm", "seq": 1})
+	readWSEvent(t, owner, "ack")
+	readWSStateWhere(t, observer, func(ev jog.Event) bool {
+		return ev.Availability != nil && ev.Availability.Reason == jog.CodeBusy
+	})
+	writeWS(t, owner, map[string]any{"type": "step", "seq": 2, "axis": "z", "distance": 1})
+	readWSEvent(t, owner, "ack")
+	observerMotion := readWSEvent(t, observer, "motion")
+	if observerMotion.Motion == nil || observerMotion.Motion.Target["z"] != 1 {
+		t.Fatalf("observer motion = %+v, want shared Z target", observerMotion)
 	}
 }
 
@@ -1726,6 +1783,31 @@ func readWSEvent(t *testing.T, c *websocket.Conn, typ string) jog.Event {
 		}
 	}
 	t.Fatalf("timeout waiting for websocket event %q", typ)
+	return jog.Event{}
+}
+
+func readWSStateWhere(t *testing.T, c *websocket.Conn, match func(jog.Event) bool) jog.Event {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		_, b, err := c.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("read matching websocket state: %v", err)
+		}
+		var ev jog.Event
+		if err := json.Unmarshal(b, &ev); err != nil {
+			t.Fatalf("decode event %q: %v", string(b), err)
+		}
+		if ev.Type == "error" {
+			t.Fatalf("unexpected websocket error waiting for state: %+v", ev)
+		}
+		if ev.Type == "state" && match(ev) {
+			return ev
+		}
+	}
+	t.Fatal("timeout waiting for matching websocket state")
 	return jog.Event{}
 }
 
