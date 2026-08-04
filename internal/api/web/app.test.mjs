@@ -3155,6 +3155,26 @@ test("an unconnected gamepad does not produce a disconnect status", () => {
   assert.equal(message.text, "");
 });
 
+test("active jog input does not produce a routine status alert", () => {
+  const ctx = buildContext(["movementOwnedElsewhere", "jogErrorText", "jogPanelMessage"], [], {
+    state: {
+      jog: {
+        error: "",
+        link: "online",
+        availability: { available: true },
+        pad: "Touch",
+        armed: true,
+        deadman: true,
+        axes: { x: 0.8, y: -0.3, z: 0 },
+      },
+    },
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(vm.runInContext("jogPanelMessage()", ctx))),
+    { text: "", kind: "" },
+  );
+});
+
 test("an observing UI describes the explicit movement handoff", () => {
   const ctx = buildContext(["movementOwnedElsewhere", "jogErrorText", "jogPanelMessage"], [], {
     state: {
@@ -4072,39 +4092,61 @@ test("machine learning summary reports learned machine data, not persistence met
   assert.ok(!lines.some((line) => line.includes("2026-07-23")));
 });
 
-// F13: terminal tap/outline feedback is displayed exactly once by the render
+// F13: terminal action feedback is displayed exactly once by the render
 // path and cleared on that edge; repeated renders with unchanged state must not
 // re-emit it (which would evict unrelated live notices after the suppression
 // window). A newly set terminal result is emitted again.
 test("consumeStatusFeedback emits a terminal result once and clears it", () => {
   const emitted = [];
-  const holder = { tapFeedback: "Tap move armed.", tapFeedbackKind: "ok" };
+  const holder = { feedback: "Outline saved.", feedbackKind: "ok" };
   const ctx = buildContext(["consumeStatusFeedback"], [], {
     setStatusMessage: (key, text, kind, opts) => emitted.push({ key, text, kind, opts }),
     holder,
   });
   vm.runInContext(
-    `consumeStatusFeedback("tap-move", holder, "tapFeedback", "tapFeedbackKind");
-     consumeStatusFeedback("tap-move", holder, "tapFeedback", "tapFeedbackKind");
-     consumeStatusFeedback("tap-move", holder, "tapFeedback", "tapFeedbackKind");`,
+    `consumeStatusFeedback("outline", holder, "feedback", "feedbackKind");
+     consumeStatusFeedback("outline", holder, "feedback", "feedbackKind");
+     consumeStatusFeedback("outline", holder, "feedback", "feedbackKind");`,
     ctx,
   );
   assert.equal(emitted.length, 1, "unchanged feedback is not re-emitted");
   assert.deepEqual(
     { key: emitted[0].key, text: emitted[0].text, kind: emitted[0].kind },
-    { key: "tap-move", text: "Tap move armed.", kind: "ok" },
+    { key: "outline", text: "Outline saved.", kind: "ok" },
   );
-  assert.equal(holder.tapFeedback, "", "feedback is cleared once displayed");
-  assert.equal(holder.tapFeedbackKind, "");
+  assert.equal(holder.feedback, "", "feedback is cleared once displayed");
+  assert.equal(holder.feedbackKind, "");
 
-  holder.tapFeedback = "Move failed: machine is not ready.";
-  holder.tapFeedbackKind = "error";
+  holder.feedback = "Outline save failed: storage unavailable.";
+  holder.feedbackKind = "error";
   vm.runInContext(
-    'consumeStatusFeedback("tap-move", holder, "tapFeedback", "tapFeedbackKind");',
+    'consumeStatusFeedback("outline", holder, "feedback", "feedbackKind");',
     ctx,
   );
   assert.equal(emitted.length, 2, "a new terminal result is emitted");
-  assert.equal(emitted[1].text, "Move failed: machine is not ready.");
+  assert.equal(emitted[1].text, "Outline save failed: storage unavailable.");
+});
+
+test("jog feedback alerts only on errors", () => {
+  const notices = [];
+  const clears = [];
+  const holder = { tapFeedback: "Jog input active.", tapFeedbackKind: "ok" };
+  const ctx = buildContext(["consumeJogAlertFeedback"], [], {
+    holder,
+    setStatusMessage: (key, text, kind) => notices.push({ key, text, kind }),
+    clearNotice: (key) => clears.push(key),
+  });
+
+  vm.runInContext('consumeJogAlertFeedback("tap-move", holder, "tapFeedback", "tapFeedbackKind")', ctx);
+  assert.deepEqual(notices, []);
+  assert.deepEqual(clears, ["tap-move"]);
+  assert.equal(holder.tapFeedback, "");
+  assert.equal(holder.tapFeedbackKind, "");
+
+  holder.tapFeedback = "Jog service disconnected.";
+  holder.tapFeedbackKind = "error";
+  vm.runInContext('consumeJogAlertFeedback("tap-move", holder, "tapFeedback", "tapFeedbackKind")', ctx);
+  assert.deepEqual(notices, [{ key: "tap-move", text: "Jog service disconnected.", kind: "error" }]);
 });
 
 test("outline summary contains persistent probe data, not validation messages", () => {

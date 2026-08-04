@@ -1440,7 +1440,7 @@ function renderJog() {
     btn.disabled = zStepBusy;
     setSoftDisabled(btn, !zStepBusy && !zStepReady);
   }
-  consumeStatusFeedback("tap-move", j, "tapFeedback", "tapFeedbackKind");
+  consumeJogAlertFeedback("tap-move", j, "tapFeedback", "tapFeedbackKind");
   const plot = document.getElementById("workarea-plot");
   if (plot) plot.classList.toggle("not-armed", !j.armed);
   renderWorkArea();
@@ -1685,29 +1685,14 @@ function deleteSelectedOrigin() {
 function jogPanelMessage() {
   const j = state.jog;
   if (j.error) return { text: jogErrorText(j.error), kind: "error" };
-  if (j.link !== "online") {
-    return { text: "Connecting to jog service...", kind: "" };
-  }
+  if (j.link !== "online") return { text: "", kind: "" };
   if (movementOwnedElsewhere(j)) {
     return { text: j.availability.message || jogErrorText("busy"), kind: "" };
   }
   if (!j.armed && j.availability && !j.availability.available) {
     return { text: j.availability.message || jogErrorText(j.availability.reason), kind: "error" };
   }
-  if (!j.pad) {
-    return { text: "", kind: "" };
-  }
-  const deadmanButton = state.ui.gamepad.deadman_button;
-  if (!j.armed) {
-    return { text: "Gamepad idle.", kind: "ok" };
-  }
-  if (!j.deadman) {
-    return { text: `Armed. Deadman ${deadmanButton} released.`, kind: "" };
-  }
-  if (Math.abs(j.axes.x) < 0.12 && Math.abs(j.axes.y) < 0.12 && Math.abs(j.axes.z) < 0.12) {
-    return { text: "Armed.", kind: "ok" };
-  }
-  return { text: "Jog input active.", kind: "ok" };
+  return { text: "", kind: "" };
 }
 
 function jogErrorText(err) {
@@ -9791,6 +9776,16 @@ function setTapFeedback(text, kind = "") {
   state.jog.tapFeedback = text;
   state.jog.tapFeedbackKind = kind;
   renderJog();
+}
+
+function consumeJogAlertFeedback(key, holder, textProp, kindProp) {
+  const text = holder[textProp];
+  if (!text) return;
+  const kind = holder[kindProp];
+  holder[textProp] = "";
+  holder[kindProp] = "";
+  if (kind === "error") setStatusMessage(key, text, kind, { force: true });
+  else clearNotice(key);
 }
 
 function tapMoveArmProgressText(action) {

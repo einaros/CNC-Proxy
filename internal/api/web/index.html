@@ -703,6 +703,7 @@
     .control-drawer-section > summary { min-height: 44px; }
     .tap-move-toolbar button, .tap-safe-z-toggle, .origin-action-grid button { min-height: 44px; }
     .workarea-frame { height: min(58dvh, 460px); min-height: 300px; }
+    #workarea-plot { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
     #workarea-actions-toggle { position: absolute; top: 8px; left: 8px; z-index: 4; display: inline-flex; width: min(178px, calc(100% - 16px)); min-height: 44px; align-items: center; justify-content: space-between; border-color: rgba(87,166,214,.72); background: rgba(18,23,28,.94); backdrop-filter: blur(6px); }
     #workarea-actions-toggle::after { content: "▾"; color: var(--muted); }
     #workarea-actions-toggle[aria-expanded="true"]::after { content: "▴"; }
@@ -1493,6 +1494,6 @@
 <div id="status-bar" role="status" aria-live="polite" hidden>
   <div id="notice"></div>
 </div>
-<script type="module" src="/app.js?v=mobile-files-1"></script>
+<script type="module" src="/app.js?v=jog-alerts-1"></script>
 </body>
 </html>
