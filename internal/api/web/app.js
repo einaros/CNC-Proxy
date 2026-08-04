@@ -34,6 +34,9 @@ const ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX = 320;
 const ACTIVE_JOB_SPLITTER_PX = 16;
 const JOG_INPUT_HEARTBEAT_MS = 100;
 const JOG_INPUT_DEADZONE = 0.12;
+const MOBILE_WORKAREA_MAX_WIDTH_PX = 600;
+const MOBILE_JOG_RADIUS_MIN_PX = 56;
+const MOBILE_JOG_RADIUS_MAX_PX = 88;
 const OUTLINE_CAPTURE_SETTLE_MS = 300;
 const OUTLINE_CAPTURE_POLL_MS = 50;
 const OUTLINE_CAPTURE_TIMEOUT_MS = 60000;
@@ -571,6 +574,14 @@ function defaultWorkAreaView() {
     probeDragOriginal: null,
     probeDragging: false,
     dragging: false,
+    mobileJogPointerId: null,
+    mobileJogOriginClientX: 0,
+    mobileJogOriginClientY: 0,
+    mobileJogOriginLocal: null,
+    mobileJogKnobLocal: null,
+    mobileJogRadiusPX: 0,
+    mobileJogAxes: { x: 0, y: 0, z: 0 },
+    mobileJogActive: false,
   };
 }
 
@@ -9311,8 +9322,8 @@ function disarmTapMoveForCommand() {
   const pending = { seq, resolve, reject, promise, timer: null };
   state.jog.commandDisarm = pending;
   pending.timer = setTimeout(() => {
-    if (completeCommandDisarm(seq, "Tap Move did not disarm before the command.")) {
-      state.jog.tapFeedback = "Tap Move did not disarm before the command.";
+    if (completeCommandDisarm(seq, "Movement did not disarm before the command.")) {
+      state.jog.tapFeedback = "Movement did not disarm before the command.";
       state.jog.tapFeedbackKind = "error";
       renderJog();
     }
@@ -9615,10 +9626,15 @@ function connectJog() {
     state.jog.ws = null;
     state.jog.link = "offline";
     state.jog.armed = false;
+    if (resetMobileWorkAreaJog()) {
+      state.jog.pad = "";
+      state.jog.deadman = false;
+      state.jog.axes = { x: 0, y: 0, z: 0 };
+    }
     state.jog.disarmAfterPendingArm = false;
     state.jog.sent.clear();
     resetJogInputSender();
-    completeCommandDisarm(state.jog.commandDisarm?.seq, "Tap Move disconnected before the command.");
+    completeCommandDisarm(state.jog.commandDisarm?.seq, "Movement disconnected before the command.");
     if (state.jog.armQueuedAction) {
       const action = state.jog.armQueuedAction;
       state.jog.armQueuedAction = "";
@@ -9764,11 +9780,11 @@ function setTapFeedback(text, kind = "") {
 }
 
 function tapMoveArmProgressText(action) {
-  return action === "arm" ? "Arming tap move..." : "Disarming tap move...";
+  return action === "arm" ? "Arming Movement..." : "Disarming Movement...";
 }
 
 function tapMoveArmSuccessText(action) {
-  return action === "arm" ? "Tap move armed." : "Tap move disarmed.";
+  return action === "arm" ? "Movement armed." : "Movement disarmed.";
 }
 
 function tapMoveArmFailureText(action, detail) {
@@ -9830,7 +9846,7 @@ function flushQueuedTapMoveArm() {
 function toggleTapMoveArm() {
   if (state.jog.armPending || state.jog.armQueuedAction) return;
   if (hasPendingOriginOperation()) {
-    setTapFeedback("Finish setting origin before changing tap move arm state.", "error");
+    setTapFeedback("Finish setting origin before changing Movement arm state.", "error");
     return;
   }
   if (state.jog.caps && !state.jog.caps.enabled) {
@@ -9842,6 +9858,7 @@ function toggleTapMoveArm() {
     return;
   }
   const action = state.jog.armed ? "disarm" : "arm";
+  if (action === "disarm") releaseJogInput(true);
   if (state.jog.link !== "online") {
     state.jog.armQueuedAction = action;
     state.jog.tapFeedback = "Connecting to jog service...";
@@ -10753,9 +10770,192 @@ function recallSelectedOrigin() {
 }
 
 function handleWorkAreaTap(local) {
+  if (mobileWorkAreaJogEnabled()) return;
   const target = workAreaToMachinePoint(workAreaLocalToContentPoint(local));
   if (!target) return;
   sendTapMove(target);
+}
+
+function mobileWorkAreaJogEnabled() {
+  return typeof window !== "undefined" && Number(window.innerWidth) <= MOBILE_WORKAREA_MAX_WIDTH_PX;
+}
+
+function mobileWorkAreaActionsOpen() {
+  return !!document.getElementById("workarea-actions-panel")?.classList.contains("is-open");
+}
+
+function mobileWorkAreaJogReady() {
+  return mobileWorkAreaJogEnabled() &&
+    !mobileWorkAreaActionsOpen() &&
+    state.activeTab === "control" &&
+    state.jog.link === "online" &&
+    state.jog.armed &&
+    !state.jog.inputSuspended &&
+    !tapMoveTargetBusy() &&
+    !state.jog.fieldProbeMovePending &&
+    !state.jog.zStepPending &&
+    !state.jog.zProbePending &&
+    !state.jog.probe3DPending &&
+    !hasPendingOriginOperation() &&
+    !state.outline.fieldProbePointMovePending &&
+    !state.outline.fieldProbePending;
+}
+
+function mobileJogAxisForResponse(value) {
+  value = clampAxis(value);
+  if (Math.abs(value) < 1e-6) return 0;
+  // The server applies a cubic response after its deadzone. Invert that
+  // response here so drag distance maps linearly to commanded feed and the
+  // edge of the controller reaches the configured jog maximum.
+  const sign = value < 0 ? -1 : 1;
+  return sign * (JOG_INPUT_DEADZONE + (1 - JOG_INPUT_DEADZONE) * Math.cbrt(Math.abs(value)));
+}
+
+function mobileWorkAreaJogAxes(originX, originY, clientX, clientY, radiusPX) {
+  const radius = Math.max(1, Number(radiusPX) || 1);
+  const dx = Number(clientX) - Number(originX);
+  const dy = Number(clientY) - Number(originY);
+  const distance = Math.hypot(dx, dy);
+  const scale = distance > radius ? radius / distance : 1;
+  return {
+    x: mobileJogAxisForResponse((dx * scale) / radius),
+    y: mobileJogAxisForResponse((-dy * scale) / radius),
+    z: 0,
+  };
+}
+
+function mobileWorkAreaJogRadius(svg) {
+  const rect = svg?.getBoundingClientRect?.();
+  const size = Math.min(Number(rect?.width) || 0, Number(rect?.height) || 0);
+  return clampNumber(size * 0.22, MOBILE_JOG_RADIUS_MIN_PX, MOBILE_JOG_RADIUS_MAX_PX);
+}
+
+function setMobileWorkAreaJogVisual(origin, knob, radiusPX) {
+  const svg = document.getElementById("workarea-plot");
+  const group = document.getElementById("workarea-mobile-jog");
+  if (!svg || !group || !origin || !knob) return;
+  const ctm = svg.getScreenCTM?.();
+  const screenScale = ctm ? Math.hypot(Number(ctm.a) || 0, Number(ctm.b) || 0) : 0;
+  const radius = screenScale > 0 ? radiusPX / screenScale : 18;
+  const base = group.querySelector(".mobile-jog-base");
+  const line = group.querySelector(".mobile-jog-line");
+  const handle = group.querySelector(".mobile-jog-knob");
+  base?.setAttribute("cx", pathNum(origin.x));
+  base?.setAttribute("cy", pathNum(origin.y));
+  base?.setAttribute("r", pathNum(radius));
+  line?.setAttribute("x1", pathNum(origin.x));
+  line?.setAttribute("y1", pathNum(origin.y));
+  line?.setAttribute("x2", pathNum(knob.x));
+  line?.setAttribute("y2", pathNum(knob.y));
+  handle?.setAttribute("cx", pathNum(knob.x));
+  handle?.setAttribute("cy", pathNum(knob.y));
+  group.removeAttribute("display");
+  svg.classList.add("mobile-jogging");
+}
+
+function resetMobileWorkAreaJog(e = null) {
+  const v = normalizeWorkAreaView();
+  if (e && v.mobileJogPointerId !== e.pointerId) return false;
+  const wasActive = !!v.mobileJogActive;
+  const pointerId = v.mobileJogPointerId;
+  v.mobileJogPointerId = null;
+  v.mobileJogOriginClientX = 0;
+  v.mobileJogOriginClientY = 0;
+  v.mobileJogOriginLocal = null;
+  v.mobileJogKnobLocal = null;
+  v.mobileJogRadiusPX = 0;
+  v.mobileJogAxes = { x: 0, y: 0, z: 0 };
+  v.mobileJogActive = false;
+  const svg = document.getElementById("workarea-plot");
+  const group = document.getElementById("workarea-mobile-jog");
+  group?.setAttribute("display", "none");
+  svg?.classList.remove("mobile-jogging");
+  if (svg && pointerId !== null) {
+    try {
+      svg.releasePointerCapture(pointerId);
+    } catch {
+      // Pointer capture may already have been released by the browser.
+    }
+  }
+  return wasActive;
+}
+
+function startMobileWorkAreaJog(e, local) {
+  if (!mobileWorkAreaJogReady()) return false;
+  if (e.target?.closest?.("#workarea-actions-toggle, #workarea-actions-panel")) return false;
+  const svg = document.getElementById("workarea-plot");
+  if (!svg || !local) return false;
+  const stopped = { x: 0, y: 0, z: 0 };
+  if (!sendJog({ type: "input", deadman: true, axes: stopped }, true)) {
+    setTapFeedback("Jog service is not connected.", "error");
+    e.preventDefault();
+    return true;
+  }
+  const v = normalizeWorkAreaView();
+  v.mobileJogPointerId = e.pointerId;
+  v.mobileJogOriginClientX = e.clientX;
+  v.mobileJogOriginClientY = e.clientY;
+  v.mobileJogOriginLocal = { x: local.x, y: local.y };
+  v.mobileJogKnobLocal = { x: local.x, y: local.y };
+  v.mobileJogRadiusPX = mobileWorkAreaJogRadius(svg);
+  v.mobileJogAxes = stopped;
+  v.mobileJogActive = true;
+  state.jog.pad = "Touch";
+  state.jog.deadman = true;
+  state.jog.axes = stopped;
+  setMobileWorkAreaJogVisual(v.mobileJogOriginLocal, v.mobileJogKnobLocal, v.mobileJogRadiusPX);
+  try {
+    svg.setPointerCapture(e.pointerId);
+  } catch {
+    // Pointer capture is best-effort; cancellation paths still force a stop.
+  }
+  e.preventDefault();
+  renderJog();
+  return true;
+}
+
+function updateMobileWorkAreaJog(e) {
+  const v = state.workarea;
+  if (!v?.mobileJogActive || v.mobileJogPointerId !== e.pointerId) return false;
+  const wasMoving = jogInputActive({ deadman: true, axes: v.mobileJogAxes });
+  const axes = mobileWorkAreaJogAxes(
+    v.mobileJogOriginClientX,
+    v.mobileJogOriginClientY,
+    e.clientX,
+    e.clientY,
+    v.mobileJogRadiusPX,
+  );
+  const dx = e.clientX - v.mobileJogOriginClientX;
+  const dy = e.clientY - v.mobileJogOriginClientY;
+  const distance = Math.hypot(dx, dy);
+  const scale = distance > v.mobileJogRadiusPX ? v.mobileJogRadiusPX / distance : 1;
+  const knob = workAreaSVGPointFromClient({
+    clientX: v.mobileJogOriginClientX + dx * scale,
+    clientY: v.mobileJogOriginClientY + dy * scale,
+  });
+  v.mobileJogAxes = axes;
+  if (knob) v.mobileJogKnobLocal = knob;
+  state.jog.deadman = true;
+  state.jog.axes = axes;
+  sendJog({ type: "input", deadman: true, axes });
+  setMobileWorkAreaJogVisual(v.mobileJogOriginLocal, v.mobileJogKnobLocal, v.mobileJogRadiusPX);
+  e.preventDefault();
+  const moving = jogInputActive({ deadman: true, axes });
+  if (moving !== wasMoving) renderJog();
+  return true;
+}
+
+function stopMobileWorkAreaJog(e = null) {
+  const v = state.workarea;
+  if (!v?.mobileJogActive || (e && v.mobileJogPointerId !== e.pointerId)) return false;
+  resetMobileWorkAreaJog(e);
+  state.jog.pad = "";
+  state.jog.deadman = false;
+  state.jog.axes = { x: 0, y: 0, z: 0 };
+  if (state.jog.armed) sendJog({ type: "input", deadman: false, axes: state.jog.axes }, true);
+  e?.preventDefault?.();
+  renderJog();
+  return true;
 }
 
 function handleWorkAreaPointerDown(e) {
@@ -10763,6 +10963,7 @@ function handleWorkAreaPointerDown(e) {
   const svg = document.getElementById("workarea-plot");
   const local = workAreaSVGPointFromClient(e);
   if (!svg || !local) return;
+  if (startMobileWorkAreaJog(e, local)) return;
   updateWorkAreaHoverPosition(local);
   const v = normalizeWorkAreaView();
   v.pointerId = e.pointerId;
@@ -10790,6 +10991,7 @@ function handleWorkAreaPointerDown(e) {
 }
 
 function handleWorkAreaPointerMove(e) {
+  if (updateMobileWorkAreaJog(e)) return;
   const v = state.workarea;
   const svg = document.getElementById("workarea-plot");
   const local = workAreaSVGPointFromClient(e);
@@ -10841,6 +11043,7 @@ function clearWorkAreaPointer(e) {
 }
 
 function handleWorkAreaPointerUp(e) {
+  if (stopMobileWorkAreaJog(e)) return;
   const v = state.workarea;
   if (!v || v.pointerId !== e.pointerId) return;
   const wasDragging = !!v.dragging;
@@ -10873,6 +11076,7 @@ function bindWorkAreaInteractions() {
   svg.addEventListener("pointerup", handleWorkAreaPointerUp);
   svg.addEventListener("pointerleave", hideWorkAreaHoverPosition);
   svg.addEventListener("pointercancel", (e) => {
+    if (stopMobileWorkAreaJog(e)) return;
     const original = state.workarea?.probeDragOriginal;
     if (original) {
       restoreSelectedFieldProbePosition(original);
@@ -10881,6 +11085,11 @@ function bindWorkAreaInteractions() {
     clearWorkAreaPointer(e);
     hideWorkAreaHoverPosition();
   });
+  svg.addEventListener("lostpointercapture", (e) => {
+    if (state.workarea?.mobileJogPointerId === e.pointerId) stopMobileWorkAreaJog(e);
+  });
+  window.addEventListener("pointerup", stopMobileWorkAreaJog);
+  window.addEventListener("pointercancel", stopMobileWorkAreaJog);
   svg.addEventListener("wheel", handleWorkAreaWheel, { passive: false });
   svg.addEventListener("keydown", (e) => {
     const probeID = String(e.target?.dataset?.fieldProbeId || "");
@@ -10900,6 +11109,11 @@ function bindWorkAreaInteractions() {
 }
 
 function clearDisarmedMovementState() {
+  if (resetMobileWorkAreaJog()) {
+    state.jog.pad = "";
+    state.jog.deadman = false;
+    state.jog.axes = { x: 0, y: 0, z: 0 };
+  }
   resetJogInputSender();
   state.jog.targetPending = 0;
   state.jog.targetMotionPending = 0;
@@ -11129,8 +11343,8 @@ function applyJogEvent(ev) {
     state.jog.errorCode = ev.code || "";
     state.jog.error = ev.message || ev.code || "jog error";
     if (ev.code === "controller_waiting" || ev.code === "not_idle" || ev.code === "stale_status") {
-      resetJogInputSender();
       state.jog.armed = false;
+      clearDisarmedMovementState();
     }
   }
   if (machineChanged) renderMachine();
@@ -11238,6 +11452,14 @@ function sampleJog() {
       if (changed) renderJog();
       return;
     }
+    if (state.workarea?.mobileJogActive) {
+      const axes = state.workarea.mobileJogAxes || { x: 0, y: 0, z: 0 };
+      state.jog.pad = "Touch";
+      state.jog.deadman = true;
+      state.jog.axes = axes;
+      if (state.jog.armed) sendJog({ type: "input", deadman: true, axes });
+      return;
+    }
     const gp = currentGamepad();
     if (!gp) {
       const changed = releaseJogInput();
@@ -11278,7 +11500,8 @@ function sampleJog() {
 }
 
 function releaseJogInput(force = false) {
-  const changed = !!state.jog.pad || !!state.jog.deadman ||
+  const touchChanged = resetMobileWorkAreaJog();
+  const changed = touchChanged || !!state.jog.pad || !!state.jog.deadman ||
     !sameJogAxes(state.jog.axes, { x: 0, y: 0, z: 0 }) ||
     (Array.isArray(state.jog.buttons) && state.jog.buttons.length > 0);
   state.jog.pad = "";
@@ -11810,6 +12033,11 @@ function init() {
     activeGcodeSource.resizeObserver.observe(gcodeSourceScroll);
   }
   window.addEventListener("resize", () => setActiveJobSplitPercent(state.activeJobSplitPercent));
+  window.addEventListener("resize", () => {
+    if (!mobileWorkAreaJogEnabled() && state.workarea?.mobileJogActive) {
+      if (releaseJogInput(true)) renderJog();
+    }
+  });
   const gcodeTimeline = document.getElementById("gcode-timeline");
   gcodeTimeline.onpointerdown = () => {
     gcodeView.timelineDragging = true;

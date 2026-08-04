@@ -3268,6 +3268,7 @@ test("disarming Movement clears a pending tap target so re-arm can recover", () 
         state.jog.tapFeedback = message;
         state.jog.tapFeedbackKind = kind;
       },
+      resetMobileWorkAreaJog: () => false,
       renderJog: () => {},
       renderMachine: () => {},
       renderOutlineCapture: () => {},
@@ -3621,6 +3622,67 @@ test("sendJog does not track fire-and-forget input messages", () => {
   assert.ok(jog.sent.has(4), "the arm message seq is tracked");
 });
 
+test("mobile work-area drag maps linearly through the server jog response", () => {
+  const ctx = buildContext(
+    ["clampAxis", "mobileJogAxisForResponse", "mobileWorkAreaJogAxes"],
+    ["JOG_INPUT_DEADZONE"],
+  );
+  const response = (value) => {
+    const sign = value < 0 ? -1 : 1;
+    const magnitude = Math.abs(value);
+    if (magnitude < 0.12) return 0;
+    return sign * Math.pow((magnitude - 0.12) / 0.88, 3);
+  };
+
+  ctx.axes = vm.runInContext("mobileWorkAreaJogAxes(100, 100, 130, 60, 50)", ctx);
+  assert.ok(Math.abs(response(ctx.axes.x) - 0.6) < 1e-9);
+  assert.ok(Math.abs(response(ctx.axes.y) - 0.8) < 1e-9);
+  assert.equal(ctx.axes.z, 0);
+
+  ctx.full = vm.runInContext("mobileWorkAreaJogAxes(0, 0, 200, 0, 50)", ctx);
+  assert.equal(ctx.full.x, 1, "dragging beyond the ring clamps at the configured jog maximum");
+  assert.equal(ctx.full.y, 0);
+});
+
+test("mobile work-area taps never become absolute spindle targets", () => {
+  let targets = 0;
+  const ctx = buildContext(["mobileWorkAreaJogEnabled", "handleWorkAreaTap"], ["MOBILE_WORKAREA_MAX_WIDTH_PX"], {
+    window: { innerWidth: 390 },
+    workAreaLocalToContentPoint: (point) => point,
+    workAreaToMachinePoint: (point) => point,
+    sendTapMove: () => { targets++; },
+  });
+  ctx.local = { x: 20, y: 30 };
+  vm.runInContext("handleWorkAreaTap(local)", ctx);
+  assert.equal(targets, 0);
+
+  ctx.window.innerWidth = 900;
+  vm.runInContext("handleWorkAreaTap(local)", ctx);
+  assert.equal(targets, 1, "desktop click-to-target behavior remains available");
+});
+
+test("the jog sampler heartbeats a held mobile work-area controller", () => {
+  const sent = [];
+  let gamepadReads = 0;
+  const state = {
+    workarea: { mobileJogActive: true, mobileJogAxes: { x: 0.7, y: -0.2, z: 0 } },
+    jog: { inputSuspended: false, armed: true, pad: "", deadman: false, axes: { x: 0, y: 0, z: 0 } },
+  };
+  const ctx = buildContext(["sampleJog"], [], {
+    state,
+    sendJog: (message) => sent.push(message),
+    currentGamepad: () => { gamepadReads++; return null; },
+    releaseJogInput: () => { throw new Error("touch input must not be released by the gamepad sampler"); },
+    scheduleJogSample: () => {},
+  });
+  vm.runInContext("sampleJog()", ctx);
+  assert.equal(gamepadReads, 0);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].deadman, true);
+  assert.deepEqual(sent[0].axes, { x: 0.7, y: -0.2, z: 0 });
+  assert.equal(state.jog.pad, "Touch");
+});
+
 test("gamepad input coalesces under backpressure but never delays release", () => {
   const sends = [];
   let now = 0;
@@ -3710,6 +3772,7 @@ test("focus-loss release clears gamepad intent and forces a stop frame", () => {
     ["JOG_INPUT_DEADZONE"],
     {
       state,
+      resetMobileWorkAreaJog: () => false,
       sendJog: (message, force) => sent.push({ message, force }),
     },
   );
