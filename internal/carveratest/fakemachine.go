@@ -5,6 +5,7 @@
 package carveratest
 
 import (
+	"fmt"
 	"math"
 	"net"
 	"sort"
@@ -1412,6 +1413,9 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 	if len(words) == 0 {
 		return
 	}
+	if m.applyFeedOverrideLocked(words) {
+		return
+	}
 	hasG10 := false
 	hasG92 := false
 	hasG53 := false
@@ -1602,6 +1606,41 @@ func (m *FakeMachine) applySimulatedGcodeLocked(line string) {
 		return
 	}
 	m.applyRelativeMoveLocked(axes, feedMMMin)
+}
+
+func (m *FakeMachine) applyFeedOverrideLocked(words []fakeGcodeWord) bool {
+	isM220 := false
+	percent := 0.0
+	hasPercent := false
+	for _, word := range words {
+		switch word.letter {
+		case 'M':
+			code, subcode := splitFakeGCode(word.value)
+			isM220 = code == 220 && subcode == 0
+		case 'S':
+			percent = word.value
+			hasPercent = true
+		}
+	}
+	if !isM220 || !hasPercent {
+		return false
+	}
+	if percent < 10 {
+		percent = 10
+	} else if percent > 1000 {
+		percent = 1000
+	}
+	current, target := "0", "0"
+	if _, _, fields, ok := parseFakeStatus(m.status); ok {
+		if index := findFakeStatusField(fields, "F"); index >= 0 {
+			parts := strings.Split(fields[index].value, ",")
+			if len(parts) >= 2 {
+				current, target = parts[0], parts[1]
+			}
+		}
+	}
+	m.upsertStatusFieldLocked("F", fmt.Sprintf("%s,%s,%.0f", current, target, percent))
+	return true
 }
 
 func (m *FakeMachine) applyToolGcodeLocked(line string) bool {

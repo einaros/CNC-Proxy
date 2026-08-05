@@ -2359,6 +2359,42 @@ func TestSendControlRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestSetFeedOverrideWhileRunningAndVerifyStatus(t *testing.T) {
+	svc, m, tr := serviceWithMachine(t)
+	status := "<Run|MPos:0,0,-5|WPos:0,0,-5|F:800,1000,100>"
+	m.SetStatus(status)
+	if !tr.ObserveStatusPayload(status) {
+		t.Fatal("running status should parse")
+	}
+
+	result, err := svc.SetFeedOverride(150)
+	if err != nil {
+		t.Fatalf("SetFeedOverride during Run: %v", err)
+	}
+	if !result.Verified || result.Percent != 150 || result.State != machine.Run {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := m.Gcodes(); len(got) != 1 || got[0] != "M220 S150" {
+		t.Fatalf("gcodes = %v, want [M220 S150]", got)
+	}
+	tracked, _ := tr.Current()
+	if tracked.Feed == nil || tracked.Feed.Override != 150 {
+		t.Fatalf("tracked feed = %+v, want 150%% override", tracked.Feed)
+	}
+}
+
+func TestSetFeedOverrideRejectsVendorOutOfRange(t *testing.T) {
+	svc, m, _ := serviceWithMachine(t)
+	for _, percent := range []int{49, 201} {
+		if _, err := svc.SetFeedOverride(percent); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("SetFeedOverride(%d) error = %v, want ErrInvalidArgument", percent, err)
+		}
+	}
+	if got := m.Gcodes(); len(got) != 0 {
+		t.Fatalf("invalid feed override reached machine: %v", got)
+	}
+}
+
 func TestRecoverAlarmSoftLimitUnlocksAndVerifies(t *testing.T) {
 	svc, m, tr := serviceWithMachine(t)
 	if !tr.ObserveStatusPayload("<Alarm|MPos:0,0,0|WPos:0,0,0|H:10>") {

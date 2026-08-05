@@ -1783,6 +1783,11 @@ const gcodeReplyCap = 30 * time.Second
 const recoveryStatusTimeout = 2 * time.Second
 
 const (
+	feedOverrideMinPercent = 50
+	feedOverrideMaxPercent = 200
+)
+
+const (
 	jobControlVerifyTimeout = 30 * time.Second
 	jobControlPollInterval  = 150 * time.Millisecond
 )
@@ -1806,6 +1811,56 @@ type RecoveryResult struct {
 	Recovered  bool                `json:"recovered"`
 	NeedsHome  bool                `json:"needs_home,omitempty"`
 	Message    string              `json:"message"`
+}
+
+// FeedOverrideResult reports the feed scaling observed after sending the
+// vendor-compatible M220 command. Feed override is deliberately a dedicated
+// action: unlike arbitrary state-changing gcode it is safe and useful while a
+// program is running, but it must still use the serialized machine transaction
+// path because M220 is a regular CTRL_MULTI command rather than realtime
+// CTRL_SINGLE control.
+type FeedOverrideResult struct {
+	Percent  int           `json:"percent"`
+	State    machine.State `json:"state"`
+	Verified bool          `json:"verified"`
+	Message  string        `json:"message"`
+}
+
+// SetFeedOverride applies the same 50-200 percent feed scale exposed by the
+// vendor controller and verifies it through the next status response. This is
+// intentionally not implemented through SendGcode: generic M220 SET commands
+// remain idle-gated along with every other state-changing MDI command.
+func (s *Service) SetFeedOverride(percent int) (FeedOverrideResult, error) {
+	res := FeedOverrideResult{Percent: percent}
+	if percent < feedOverrideMinPercent || percent > feedOverrideMaxPercent {
+		return res, fmt.Errorf("%w: feed override must be between %d%% and %d%%", ErrInvalidArgument, feedOverrideMinPercent, feedOverrideMaxPercent)
+	}
+
+	command := fmt.Sprintf("M220 S%d", percent)
+	err := s.arb.WithMachine(false, func(c *client.Conn) error {
+		s.gcodeLog.Append(gcodelog.DirSend, gcodelog.SourceAPI, command)
+		if _, err := c.SendGcodeLine(command, client.GcodeOpts{ExpectReply: false, Cap: gcodeReplyCap}); err != nil {
+			return err
+		}
+		st, err := s.queryRecoveryStatus(c)
+		if err != nil {
+			return fmt.Errorf("%w: could not verify feed override: %v", ErrMachineStatusStale, err)
+		}
+		res.State = st.State
+		if st.Feed == nil || math.Abs(st.Feed.Override-float64(percent)) > 0.5 {
+			return fmt.Errorf("%w: machine did not report the requested %d%% feed override", ErrJobControlUnavailable, percent)
+		}
+		return nil
+	})
+	if err != nil {
+		s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, "error: "+err.Error())
+		return res, err
+	}
+
+	res.Verified = true
+	res.Message = fmt.Sprintf("Feed override set to %d%%.", percent)
+	s.gcodeLog.Append(gcodelog.DirRecv, gcodelog.SourceAPI, res.Message)
+	return res, nil
 }
 
 // SendGcode runs a single gcode line on the machine and returns the machine's

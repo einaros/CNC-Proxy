@@ -97,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/outline/trace", s.traceOutline)          // serialized probe-laser outline trace
 	mux.HandleFunc("GET /api/gcode/log", s.getGcodeLog)                // recent gcode I/O lines
 	mux.HandleFunc("POST /api/control", s.postControl)                 // realtime, job-player, or recovery action
+	mux.HandleFunc("POST /api/feed-override", s.postFeedOverride)      // body: {percent}; valid while running
 	mux.HandleFunc("GET /api/ui/settings", s.getUISettings)
 	mux.HandleFunc("PUT /api/ui/settings", s.putUISettings)
 	mux.HandleFunc("POST /api/machine/learn", s.learnMachineParameters)
@@ -696,6 +697,21 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) postFeedOverride(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Percent int `json:"percent"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	result, err := s.svc.SetFeedOverride(body.Percent)
+	if err != nil {
+		s.mapError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) getBackup(w http.ResponseWriter, r *http.Request) {

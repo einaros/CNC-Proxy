@@ -6829,13 +6829,28 @@ function renderActiveGcodeControls(active) {
   const raise = document.getElementById("paused-job-raise");
   const stopSpindle = document.getElementById("paused-job-stop-spindle");
   const resume = document.getElementById("active-gcode-resume");
-  if (!run || !pause || !paused || !raise || !stopSpindle || !resume) return;
+  const feedControls = document.getElementById("feed-override-controls");
+  const feedDecrease = document.getElementById("feed-override-decrease");
+  const feedIncrease = document.getElementById("feed-override-increase");
+  const feedReset = document.getElementById("feed-override-reset");
+  const feedValue = document.getElementById("feed-override-value");
+  if (!run || !pause || !paused || !raise || !stopSpindle || !resume || !feedControls || !feedDecrease || !feedIncrease || !feedReset || !feedValue) return;
 
   const running = machineState === "Run";
   const suspended = machineState === "Pause";
   run.hidden = running || suspended;
   pause.hidden = !running;
   paused.hidden = !suspended;
+  feedControls.hidden = !running && !suspended;
+  const feedOverride = Number(state.machine?.feed?.override);
+  const hasFeedOverride = Number.isFinite(feedOverride);
+  const roundedFeedOverride = hasFeedOverride ? Math.round(feedOverride) : 0;
+  feedValue.value = hasFeedOverride ? roundedFeedOverride + "%" : "-";
+  feedValue.textContent = feedValue.value;
+  feedControls.setAttribute("aria-busy", pending ? "true" : "false");
+  feedDecrease.disabled = pending || !hasFeedOverride || roundedFeedOverride <= 50;
+  feedIncrease.disabled = pending || !hasFeedOverride || roundedFeedOverride >= 200;
+  feedReset.disabled = pending || roundedFeedOverride === 100;
   pause.disabled = pending;
   raise.disabled = pending;
   stopSpindle.disabled = pending;
@@ -8771,6 +8786,36 @@ async function runPausedJobCommand(action) {
     state.activeGcodePending = "";
     renderActiveGcode();
   }
+}
+
+async function setFeedOverride(percent) {
+  if (state.activeGcodePending) return;
+  percent = Math.max(50, Math.min(200, Math.round(Number(percent) / 10) * 10));
+  if (!Number.isFinite(percent)) return;
+  state.activeGcodePending = "feed_override";
+  setActiveFeedback("Setting feed override to " + percent + "%...", "");
+  renderActiveGcode();
+  try {
+    const response = await request("/api/feed-override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ percent }),
+    });
+    const result = await response.json();
+    setActiveFeedback(result.message, result.verified ? "ok" : "error");
+    await pollMachine();
+  } catch (error) {
+    setActiveFeedback("Feed override failed: " + error.message, "error");
+  } finally {
+    state.activeGcodePending = "";
+    renderActiveGcode();
+  }
+}
+
+function adjustFeedOverride(delta) {
+  const current = Number(state.machine?.feed?.override);
+  if (!Number.isFinite(current)) return;
+  return setFeedOverride(current + delta);
 }
 
 function setActiveFeedback(text, kind) {
@@ -12250,6 +12295,9 @@ function init() {
   bindButtonAction(document.getElementById("active-gcode-run"), runActiveGcode);
   bindButtonAction(document.getElementById("active-gcode-pause"), () => runActiveJobControl("pause_job"));
   bindButtonAction(document.getElementById("active-gcode-resume"), () => runActiveJobControl("resume_job"));
+  bindButtonAction(document.getElementById("feed-override-decrease"), () => adjustFeedOverride(-10));
+  bindButtonAction(document.getElementById("feed-override-increase"), () => adjustFeedOverride(10));
+  bindButtonAction(document.getElementById("feed-override-reset"), () => setFeedOverride(100));
   bindButtonAction(document.getElementById("paused-job-raise"), () => runPausedJobCommand("raise_z"));
   bindButtonAction(document.getElementById("paused-job-stop-spindle"), () => runPausedJobCommand("stop_spindle"));
   const gcodeSourceScroll = document.getElementById("active-gcode-source-scroll");
