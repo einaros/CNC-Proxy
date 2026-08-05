@@ -226,8 +226,9 @@ func (e *Engine) reconcile(maxDepth int, deep bool) error {
 	for p, de := range remote {
 		existing, ok := known[p]
 		if !ok {
-			// Newly discovered on the machine.
-			if err := e.store.PutEntry(store.Entry{
+			// Re-check under the store lock: a local upload may have published
+			// this path while the machine listing was in flight.
+			if err := e.putDiscoveredIfAbsent(store.Entry{
 				Path:  p,
 				IsDir: de.IsDir,
 				Size:  de.Size,
@@ -257,12 +258,42 @@ func (e *Engine) reconcile(maxDepth int, deep bool) error {
 			continue
 		}
 		if isSettled(en.Sync) {
-			if err := e.store.DeleteEntry(p); err != nil {
+			if err := e.deleteEntryIfUnchanged(en); err != nil {
 				log.Printf("synceng: failed to drop missing settled entry %s: %v", p, err)
 			}
 		}
 	}
 	return nil
+}
+
+func (e *Engine) putDiscoveredIfAbsent(entry store.Entry) error {
+	return e.store.Batch(func(b *store.Batch) error {
+		if _, exists := b.GetEntry(entry.Path); !exists {
+			b.PutEntry(entry)
+		}
+		return nil
+	})
+}
+
+func sameReconcileEntry(current, snapshot store.Entry) bool {
+	return current.Path == snapshot.Path &&
+		current.IsDir == snapshot.IsDir &&
+		current.Size == snapshot.Size &&
+		current.MD5 == snapshot.MD5 &&
+		current.CachePath == snapshot.CachePath &&
+		current.CacheState == snapshot.CacheState &&
+		current.Sync == snapshot.Sync &&
+		current.UpdatedAt.Equal(snapshot.UpdatedAt)
+}
+
+func (e *Engine) deleteEntryIfUnchanged(snapshot store.Entry) error {
+	return e.store.Batch(func(b *store.Batch) error {
+		current, ok := b.GetEntry(snapshot.Path)
+		if ok && sameReconcileEntry(current, snapshot) {
+			b.DeleteEntry(snapshot.Path)
+		}
+		return nil
+	})
 }
 
 func remoteOnlyMTimeChanged(existing store.Entry, de protocol.DirEntry) bool {
@@ -292,18 +323,23 @@ func (e *Engine) deepCheck(c *client.Conn, remote map[string]protocol.DirEntry) 
 }
 
 func (e *Engine) markRemoteOnly(existing store.Entry, de protocol.DirEntry, remoteMD5 string) {
-	if existing.CachePath != "" {
-		_ = os.Remove(existing.CachePath)
-	}
-	existing.Size = de.Size
-	existing.MTime = de.MTime
-	existing.Sync = store.RemoteOnly
-	existing.CachePath = ""
-	existing.CacheState = store.CacheNone
-	existing.CacheCheckedAt = time.Time{}
-	existing.MD5 = remoteMD5
-	existing.Error = ""
-	if err := e.store.PutEntry(existing); err != nil {
+	err := e.store.Batch(func(b *store.Batch) error {
+		latest, ok := b.GetEntry(existing.Path)
+		if !ok || !sameReconcileEntry(latest, existing) {
+			return nil
+		}
+		latest.Size = de.Size
+		latest.MTime = de.MTime
+		latest.Sync = store.RemoteOnly
+		latest.CachePath = ""
+		latest.CacheState = store.CacheNone
+		latest.CacheCheckedAt = time.Time{}
+		latest.MD5 = remoteMD5
+		latest.Error = ""
+		b.PutEntry(latest)
+		return nil
+	})
+	if err != nil {
 		log.Printf("synceng: failed to mark %s remote_only: %v", existing.Path, err)
 	}
 }
@@ -356,10 +392,7 @@ func (e *Engine) applyCacheValidationResults(candidates []store.Entry, results m
 		}
 		res := results[candidate.Path]
 		if !res.exists || res.remote.IsDir {
-			if latest.CachePath != "" {
-				_ = os.Remove(latest.CachePath)
-			}
-			if err := e.store.DeleteEntry(latest.Path); err != nil {
+			if err := e.deleteEntryIfUnchanged(latest); err != nil {
 				log.Printf("synceng: failed to delete invalid startup cache entry %s: %v", latest.Path, err)
 			}
 			continue
@@ -381,20 +414,24 @@ func (e *Engine) applyCacheValidationResults(candidates []store.Entry, results m
 }
 
 func (e *Engine) markCacheReady(existing store.Entry, de protocol.DirEntry, remoteMD5 string) {
-	latest, ok := e.store.GetEntry(existing.Path)
-	if !ok || latest.Sync != store.Synced || latest.CachePath != existing.CachePath {
-		return
-	}
-	latest.Size = de.Size
-	latest.MTime = de.MTime
-	if remoteMD5 != "" {
-		latest.MD5 = remoteMD5
-	}
-	latest.CacheState = store.CacheReady
-	latest.CacheCheckedAt = e.now()
-	latest.Error = ""
-	if err := e.store.PutEntry(latest); err != nil {
-		log.Printf("synceng: failed to mark %s cache ready: %v", latest.Path, err)
+	err := e.store.Batch(func(b *store.Batch) error {
+		latest, ok := b.GetEntry(existing.Path)
+		if !ok || !sameReconcileEntry(latest, existing) {
+			return nil
+		}
+		latest.Size = de.Size
+		latest.MTime = de.MTime
+		if remoteMD5 != "" {
+			latest.MD5 = remoteMD5
+		}
+		latest.CacheState = store.CacheReady
+		latest.CacheCheckedAt = e.now()
+		latest.Error = ""
+		b.PutEntry(latest)
+		return nil
+	})
+	if err != nil {
+		log.Printf("synceng: failed to mark %s cache ready: %v", existing.Path, err)
 	}
 }
 

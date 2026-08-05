@@ -625,6 +625,12 @@ func (s *Service) PruneCache(olderThan time.Duration) (CachePruneReport, error) 
 	if olderThan <= 0 {
 		olderThan = time.Hour
 	}
+	// Cache filenames are stable per remote path. Hold the same lock used by
+	// upload/fetch/rename commits so an orphan discovered below cannot be
+	// replaced with newly uploaded content between Stat and Remove.
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+
 	cutoff := time.Now().Add(-olderThan)
 	referenced := map[string]bool{}
 	cacheDir, err := filepath.Abs(s.cacheDir)

@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/uwin/cnc-proxy/internal/client"
 	"github.com/uwin/cnc-proxy/internal/machine"
+	"github.com/uwin/cnc-proxy/internal/protocol"
+	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/store"
 )
 
@@ -95,6 +98,73 @@ func TestReconcileLeavesInflightAlone(t *testing.T) {
 	_ = m
 }
 
+func TestStaleReconcileResultDoesNotClobberReplacementUpload(t *testing.T) {
+	_, st, arb, _ := setup(t)
+	eng := newEngine(st, arb)
+	svc, err := service.New(st, arb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := "/sd/gcodes/replaced.nc"
+	oldContent := []byte("G90\nG1 X1\n")
+	newContent := []byte("G90\nG1 X2\nG1 Y3\n")
+	oldEntry, err := svc.Upload(remote, bytes.NewReader(oldContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEntrySync(remote, store.Synced, ""); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := st.GetEntry(remote)
+
+	// This is the service.Upload commit that can happen while reconcile waits
+	// for a machine listing or md5sum response. The stable cache filename now
+	// contains the replacement content and the catalog records local intent.
+	replacement, err := svc.Upload(remote, bytes.NewReader(newContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.CachePath != oldEntry.CachePath {
+		t.Fatalf("replacement cache path = %q, want stable %q", replacement.CachePath, oldEntry.CachePath)
+	}
+
+	remoteEntry := protocol.DirEntry{Name: "replaced.nc", Size: int64(len(oldContent)), MTime: time.Now()}
+	eng.markRemoteOnly(stale, remoteEntry, md5HexBytes(oldContent))
+	eng.markCacheReady(stale, remoteEntry, md5HexBytes(oldContent))
+	if err := eng.deleteEntryIfUnchanged(stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.putDiscoveredIfAbsent(store.Entry{Path: remote, Size: int64(len(oldContent)), Sync: store.RemoteOnly}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := st.GetEntry(remote)
+	if !ok || got.Sync != store.PendingUpload || got.MD5 != replacement.MD5 || got.Size != replacement.Size || got.CachePath != replacement.CachePath || got.CacheState != store.CacheReady {
+		t.Fatalf("replacement upload was clobbered by stale reconcile result: %+v", got)
+	}
+	content, err := os.ReadFile(replacement.CachePath)
+	if err != nil {
+		t.Fatalf("replacement cache was removed: %v", err)
+	}
+	if !bytes.Equal(content, newContent) {
+		t.Fatalf("replacement cache = %q, want %q", content, newContent)
+	}
+	active, err := svc.SelectActiveGcode(remote)
+	if err != nil {
+		t.Fatalf("select replacement upload: %v", err)
+	}
+	if active.Path != remote || active.Preview == nil || active.Preview.LineCount != 3 {
+		t.Fatalf("selected replacement preview = %+v", active)
+	}
+	source, err := svc.ActiveGcodeSource(1, 3)
+	if err != nil {
+		t.Fatalf("read selected replacement source: %v", err)
+	}
+	if !reflect.DeepEqual(source.Lines, []string{"G90", "G1 X2", "G1 Y3"}) {
+		t.Fatalf("selected source = %q", source.Lines)
+	}
+}
+
 func TestReconcileRemoteOnlyMTimeChangeInvalidates(t *testing.T) {
 	m, st, arb, tr := setup(t)
 	eng := newEngine(st, arb)
@@ -154,8 +224,8 @@ func TestDeepReconcileDetectsSameSizeRemoteChange(t *testing.T) {
 	if got.Sync != store.RemoteOnly || got.CachePath != "" {
 		t.Fatalf("entry after deep reconcile = %+v, want remote_only without cache", got)
 	}
-	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
-		t.Fatalf("stale cache stat = %v, want removed", err)
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("detached stale cache should remain for race-safe pruning: %v", err)
 	}
 }
 
@@ -376,14 +446,14 @@ func TestValidateStartupCacheOutcomes(t *testing.T) {
 	if changed.Sync != store.RemoteOnly || changed.CacheState != store.CacheNone || changed.CachePath != "" || changed.MD5 == md5HexBytes(changedLocal) {
 		t.Fatalf("changed entry after validation = %+v, want remote_only with remote md5", changed)
 	}
-	if _, err := os.Stat(changedCache); !os.IsNotExist(err) {
-		t.Fatalf("changed cache stat = %v, want removed", err)
+	if _, err := os.Stat(changedCache); err != nil {
+		t.Fatalf("detached changed cache should remain for race-safe pruning: %v", err)
 	}
 	if _, ok := st.GetEntry("/sd/gcodes/missing.nc"); ok {
 		t.Fatal("missing remote entry should be removed from catalog")
 	}
-	if _, err := os.Stat(missingCache); !os.IsNotExist(err) {
-		t.Fatalf("missing cache stat = %v, want removed", err)
+	if _, err := os.Stat(missingCache); err != nil {
+		t.Fatalf("detached missing cache should remain for race-safe pruning: %v", err)
 	}
 	failed, _ := st.GetEntry("/sd/gcodes/fail-md5.nc")
 	if failed.CacheState != store.CacheValidating || failed.CachePath != failCache {
