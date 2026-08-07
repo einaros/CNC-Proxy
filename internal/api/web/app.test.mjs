@@ -24,6 +24,33 @@ test("file rows expose responsive metadata cells", () => {
   }
 });
 
+test("dashboard layout controls are hidden and expose their expanded state", () => {
+  const attributes = new Map();
+  let focused = false;
+  const button = {
+    title: "",
+    setAttribute: (name, value) => attributes.set(name, value),
+    focus: () => { focused = true; },
+  };
+  const panel = { hidden: true };
+  const ctx = buildContext(["setDashboardControlsOpen"], [], {
+    document: {
+      getElementById: (id) => id === "dashboard-controls-toggle" ? button : id === "dashboard-toolbar" ? panel : null,
+    },
+  });
+
+  vm.runInContext("setDashboardControlsOpen(true)", ctx);
+  assert.equal(panel.hidden, false);
+  assert.equal(attributes.get("aria-expanded"), "true");
+  assert.equal(attributes.get("aria-label"), "Hide dashboard layout controls");
+
+  vm.runInContext("setDashboardControlsOpen(false, true)", ctx);
+  assert.equal(panel.hidden, true);
+  assert.equal(attributes.get("aria-expanded"), "false");
+  assert.equal(attributes.get("aria-label"), "Show dashboard layout controls");
+  assert.equal(focused, true);
+});
+
 function extractFunction(name) {
   let start = source.indexOf("\nfunction " + name + "(");
   if (start < 0) start = source.indexOf("\nasync function " + name + "(");

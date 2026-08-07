@@ -1037,6 +1037,7 @@ function applyDashboardURLState(locationLike = window.location) {
   state.dashboardRequestedProfileID = urlState.profile;
   state.dashboardEmbed = urlState.embed && viewTabFromURL(locationLike) === "dashboard";
   document.body.classList.toggle("dashboard-embed", state.dashboardEmbed);
+  if (state.dashboardEmbed) setDashboardControlsOpen(false);
   if (state.dashboardSettingsLoaded || !state.dashboardProfileID) resolveDashboardProfile();
   else applyDashboardProfile(currentDashboardProfile());
 }
@@ -1533,6 +1534,35 @@ function setHeaderCollapsed(collapsed) {
   if (collapsed) {
     document.querySelectorAll(".command-popout[open]").forEach((popout) => { popout.open = false; });
   }
+}
+
+function setDashboardControlsOpen(open, restoreFocus = false) {
+  const button = document.getElementById("dashboard-controls-toggle");
+  const panel = document.getElementById("dashboard-toolbar");
+  if (!button || !panel) return;
+  const expanded = !!open;
+  panel.hidden = !expanded;
+  button.setAttribute("aria-expanded", String(expanded));
+  const label = expanded ? "Hide dashboard layout controls" : "Show dashboard layout controls";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  if (!expanded && restoreFocus) button.focus();
+}
+
+function initDashboardControlsMenu() {
+  const button = document.getElementById("dashboard-controls-toggle");
+  const panel = document.getElementById("dashboard-toolbar");
+  if (!button || !panel) return;
+  button.onclick = () => setDashboardControlsOpen(panel.hidden);
+  document.addEventListener("click", (event) => {
+    if (panel.hidden || button.contains(event.target) || panel.contains(event.target)) return;
+    setDashboardControlsOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || panel.hidden) return;
+    event.preventDefault();
+    setDashboardControlsOpen(false, true);
+  });
 }
 
 function setWorkAreaActionsOpen(open, restoreFocus = false) {
@@ -12420,6 +12450,7 @@ function showTab(name, urlMode = "push") {
   if (!VIEW_TABS.includes(name)) name = "active-job";
   disarmMovementOnControlExit(name);
   state.activeTab = name;
+  if (name !== "dashboard") setDashboardControlsOpen(false);
   document.body.dataset.activeTab = name;
   for (const tab of VIEW_TABS) {
     const view = document.getElementById(tab + "-view");
@@ -12609,6 +12640,7 @@ function init() {
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("header-toggle").onclick = () => setHeaderCollapsed(!document.body.classList.contains("header-collapsed"));
+  initDashboardControlsMenu();
   initWorkAreaActionsMenu();
   for (const [index, name] of VIEW_TABS.entries()) {
     const tab = document.getElementById("tab-" + name);
@@ -12632,8 +12664,14 @@ function init() {
   });
   showTab(viewTabFromURL(), "replace");
   document.getElementById("dashboard-profile").onchange = (e) => selectDashboardProfile(e.target.value);
-  document.getElementById("dashboard-new").onclick = () => openDashboardSettings(true);
-  document.getElementById("dashboard-configure").onclick = () => openDashboardSettings(false);
+  document.getElementById("dashboard-new").onclick = () => {
+    setDashboardControlsOpen(false);
+    openDashboardSettings(true);
+  };
+  document.getElementById("dashboard-configure").onclick = () => {
+    setDashboardControlsOpen(false);
+    openDashboardSettings(false);
+  };
   document.getElementById("dashboard-copy-link").onclick = () => copyDashboardURL(false);
   document.getElementById("dashboard-copy-obs").onclick = () => copyDashboardURL(true);
   document.getElementById("dashboard-settings-close").onclick = closeDashboardSettings;
