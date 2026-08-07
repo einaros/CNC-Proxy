@@ -593,7 +593,7 @@
   .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 70px minmax(0, 1fr) auto; }
   .empty.compact { padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
   #files-view { --files-control-h: 38px; align-content: start; }
-  .files-toolbar { min-width: 0; display: grid; grid-template-columns: minmax(260px, 360px) minmax(220px, 320px) minmax(0, 1fr); gap: 8px; align-items: center; }
+  .files-toolbar { min-width: 0; display: grid; grid-template-columns: minmax(260px, 1fr) max-content minmax(220px, 320px); gap: 8px; align-items: center; }
   #drop, #filter { width: 100%; min-width: 0; height: var(--files-control-h); min-height: var(--files-control-h); }
   #drop { justify-content: flex-start; padding: 0 12px; color: var(--muted); background: var(--panel); border-style: dashed; font-weight: 550; }
   #file-summary { height: var(--files-control-h); min-width: 0; display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
@@ -1408,9 +1408,9 @@
     <section class="page-section">
       <div class="files-toolbar">
         <button type="button" id="drop">Upload files or drop them here</button>
+        <div id="file-summary" aria-label="File synchronization summary"></div>
         <label class="visually-hidden" for="filter">Filter files</label>
         <input id="filter" type="search" placeholder="Filter files or states">
-        <div id="file-summary" aria-label="File synchronization summary"></div>
       </div>
       <input id="file" type="file" multiple hidden>
     </section>

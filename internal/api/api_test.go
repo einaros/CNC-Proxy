@@ -859,6 +859,7 @@ func TestWebUIServed(t *testing.T) {
 	}
 	for _, want := range []string{
 		`class="files-toolbar"`,
+		`grid-template-columns: minmax(260px, 1fr) max-content minmax(220px, 320px)`,
 		`<button type="button" id="drop">Upload files or drop them here</button>`,
 		`#files-view { --files-control-h: 38px; align-content: start; }`,
 		`#drop, #filter { width: 100%; min-width: 0; height: var(--files-control-h); min-height: var(--files-control-h); }`,
