@@ -9,9 +9,8 @@ import (
 //go:embed web/index.html web/app.js web/three.module.min.js
 var webFS embed.FS
 
-// webHandler serves the embedded single-page app. index.html is served at "/"
-// and app.js at "/app.js"; everything else under "/" falls through to index so
-// the SPA can own client-side routing.
+// webHandler serves the embedded single-page app. Each operator tab has a real
+// route so dashboards and task views can be bookmarked or opened directly.
 func webHandler() http.Handler {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -22,7 +21,8 @@ func webHandler() http.Handler {
 	mux.Handle("/app.js", noStore(files))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		noStoreHeaders(w)
-		if r.URL.Path == "/" {
+		switch r.URL.Path {
+		case "/", "/dashboard", "/active-job", "/control", "/files":
 			http.ServeFileFS(w, r, sub, "index.html")
 			return
 		}

@@ -147,6 +147,7 @@ go run -mod=mod ./cmd/fakemachine -addr 127.0.0.1:12222
 
 Then:
 - Web UI: <http://127.0.0.1:8420/>
+- Direct dashboard URL: <http://127.0.0.1:8420/dashboard>
 - API: `POST /api/files?path=part.nc` (raw body or multipart), `GET /api/files`,
   `DELETE /api/files/{path}`, `POST /api/files/rename`, `GET /api/machine`,
   `GET /api/machine/status`, `GET /api/jobs`, `GET /api/runs`,

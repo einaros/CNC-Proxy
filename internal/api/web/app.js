@@ -32,6 +32,7 @@ const ACTIVE_JOB_SPLIT_STEP_PERCENT = 2;
 const ACTIVE_JOB_SPLIT_MIN_LEFT_PX = 260;
 const ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX = 320;
 const ACTIVE_JOB_SPLITTER_PX = 16;
+const VIEW_TABS = ["dashboard", "active-job", "control", "files"];
 const JOG_INPUT_HEARTBEAT_MS = 100;
 const JOG_INPUT_DEADZONE = 0.12;
 const JOG_PREDICTION_TOLERANCE_MM = 0.02;
@@ -11842,13 +11843,32 @@ function connectFilesSSE() {
   es.onerror = () => setNotice("Files event stream disconnected; retrying.", "error", "files-sse");
 }
 
-function showTab(name) {
-  const tabs = ["dashboard", "active-job", "control", "files"];
-  if (!tabs.includes(name)) name = "active-job";
+function viewTabFromURL(locationLike = window.location) {
+  const pathname = String(locationLike?.pathname || "/").replace(/^\/+|\/+$/g, "");
+  if (VIEW_TABS.includes(pathname)) return pathname;
+  const queryTab = new URLSearchParams(String(locationLike?.search || "")).get("tab");
+  return VIEW_TABS.includes(queryTab) ? queryTab : "active-job";
+}
+
+function syncViewTabURL(name, mode) {
+  if (mode === "none" || !window.history) return;
+  const url = new URL(window.location.href);
+  url.pathname = "/" + name;
+  url.searchParams.delete("tab");
+  url.hash = "";
+  const next = url.pathname + url.search;
+  const current = window.location.pathname + window.location.search;
+  if (mode === "push" && next === current) return;
+  const method = mode === "replace" ? "replaceState" : "pushState";
+  window.history[method]({ tab: name }, "", next);
+}
+
+function showTab(name, urlMode = "push") {
+  if (!VIEW_TABS.includes(name)) name = "active-job";
   disarmMovementOnControlExit(name);
   state.activeTab = name;
   document.body.dataset.activeTab = name;
-  for (const tab of tabs) {
+  for (const tab of VIEW_TABS) {
     const view = document.getElementById(tab + "-view");
     if (view) view.hidden = tab !== name;
     const button = document.getElementById("tab-" + tab);
@@ -11862,6 +11882,7 @@ function showTab(name) {
   if (name === "dashboard") renderDashboard();
   if (name === "control") renderJog();
   else clearNotice("jog-availability");
+  syncViewTabURL(name, urlMode);
 }
 
 function showActiveJobLeftTab(name) {
@@ -12038,23 +12059,24 @@ function init() {
   const input = document.getElementById("file");
   document.getElementById("header-toggle").onclick = () => setHeaderCollapsed(!document.body.classList.contains("header-collapsed"));
   initWorkAreaActionsMenu();
-  const viewTabs = ["dashboard", "active-job", "control", "files"];
-  for (const [index, name] of viewTabs.entries()) {
+  for (const [index, name] of VIEW_TABS.entries()) {
     const tab = document.getElementById("tab-" + name);
     tab.onclick = () => showTab(name);
     tab.onkeydown = (e) => {
       let next = index;
-      if (e.key === "ArrowRight") next = (index + 1) % viewTabs.length;
-      else if (e.key === "ArrowLeft") next = (index - 1 + viewTabs.length) % viewTabs.length;
+      if (e.key === "ArrowRight") next = (index + 1) % VIEW_TABS.length;
+      else if (e.key === "ArrowLeft") next = (index - 1 + VIEW_TABS.length) % VIEW_TABS.length;
       else if (e.key === "Home") next = 0;
       else if (e.key === "End") next = viewTabs.length - 1;
       else return;
       e.preventDefault();
-      const nextTab = document.getElementById("tab-" + viewTabs[next]);
-      showTab(viewTabs[next]);
+      const nextTab = document.getElementById("tab-" + VIEW_TABS[next]);
+      showTab(VIEW_TABS[next]);
       nextTab.focus();
     };
   }
+  window.addEventListener("popstate", () => showTab(viewTabFromURL(), "none"));
+  showTab(viewTabFromURL(), "replace");
   const activeJobLeftTabs = ["source", "console"];
   for (const [index, name] of activeJobLeftTabs.entries()) {
     const tab = document.getElementById("active-job-left-tab-" + name);

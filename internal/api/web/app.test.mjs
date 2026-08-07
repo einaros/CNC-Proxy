@@ -526,6 +526,42 @@ test("control sections start collapsed on mobile and retain desktop defaults", (
   assert.equal(elements["gamepad-section"].open, false);
 });
 
+test("top-level tabs resolve from canonical and legacy URLs", () => {
+  const ctx = buildContext(["viewTabFromURL"], ["VIEW_TABS"], { URLSearchParams });
+  for (const name of ["dashboard", "active-job", "control", "files"]) {
+    assert.equal(vm.runInContext(`viewTabFromURL({ pathname: "/${name}", search: "" })`, ctx), name);
+  }
+  assert.equal(vm.runInContext(`viewTabFromURL({ pathname: "/", search: "?tab=dashboard" })`, ctx), "dashboard");
+  assert.equal(vm.runInContext(`viewTabFromURL({ pathname: "/", search: "" })`, ctx), "active-job");
+  assert.equal(vm.runInContext(`viewTabFromURL({ pathname: "/unknown", search: "?tab=unknown" })`, ctx), "active-job");
+});
+
+test("tab URL updates are canonical and avoid duplicate history entries", () => {
+  const calls = [];
+  const location = { href: "http://cnc.local/?tab=dashboard", pathname: "/", search: "?tab=dashboard" };
+  const ctx = buildContext(["syncViewTabURL"], [], {
+    URL,
+    window: {
+      location,
+      history: {
+        replaceState: (state, title, url) => calls.push({ method: "replace", state, url }),
+        pushState: (state, title, url) => calls.push({ method: "push", state, url }),
+      },
+    },
+  });
+  vm.runInContext(`syncViewTabURL("dashboard", "replace")`, ctx);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ method: "replace", state: { tab: "dashboard" }, url: "/dashboard" }]);
+
+  calls.length = 0;
+  location.href = "http://cnc.local/control";
+  location.pathname = "/control";
+  location.search = "";
+  vm.runInContext(`syncViewTabURL("control", "push")`, ctx);
+  assert.deepEqual(calls, [], "selecting the current tab does not add history");
+  vm.runInContext(`syncViewTabURL("files", "push")`, ctx);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ method: "push", state: { tab: "files" }, url: "/files" }]);
+});
+
 test("leaving Control requests a Movement disarm and releases live input", () => {
   const calls = [];
   const state = {
