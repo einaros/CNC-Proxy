@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/md5"
@@ -675,7 +676,7 @@ func TestMachineEndpoint(t *testing.T) {
 
 func TestMachineStatusEndpointRichFields(t *testing.T) {
 	srv, _, tr := serverWithMachine(t)
-	tr.ObserveStatusPayload("<Run|MPos:1.25,-2.5,3.75|WPos:6,7,8|F:10,20,150|S:1000,12000,80,1,31.5,42.0,0,0,1|T:2,12.345,3|H:10|P:100,45,12|C:1,7,0,1>")
+	tr.ObserveStatusPayload("<Run|MPos:1.25,-2.5,3.75,4|WPos:6,7,8,9|F:10,20,150|S:1000,12000,80,1,31.5,42.0,0,0,1|T:2,12.345,3|W:3.72|L:1,1,0,42.5,80|A:5|O:0.125|H:10|P:100,45,12|C:2,7,0,1>")
 	resp := get(t, srv.URL+"/api/machine/status")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -702,6 +703,12 @@ func TestMachineStatusEndpointRichFields(t *testing.T) {
 	}
 	if st.Tool == nil || st.Tool.Active != 2 || st.Tool.Offset != 12.345 || st.Tool.Target == nil || *st.Tool.Target != 3 {
 		t.Fatalf("tool = %+v", st.Tool)
+	}
+	if st.ProbeV == nil || *st.ProbeV != 3.72 || st.Laser == nil || !st.Laser.Mode || !st.Laser.State || st.Laser.Power != 42.5 || st.ATCState == nil || *st.ATCState != 5 || st.LevelDelta == nil || *st.LevelDelta != 0.125 {
+		t.Fatalf("optional telemetry = probe:%v laser:%+v atc:%v leveling:%v", st.ProbeV, st.Laser, st.ATCState, st.LevelDelta)
+	}
+	if st.Controller == nil || st.Controller.Model != 2 || st.Controller.Functions != 7 || st.Controller.InchMode || !st.Controller.AbsoluteMode {
+		t.Fatalf("controller status = %+v", st.Controller)
 	}
 	if st.HaltReason == nil || st.HaltReason.Code != 10 || len(st.Progress) != 3 || len(st.Machine) != 4 {
 		t.Fatalf("extended status = halt:%+v progress:%+v machine:%+v", st.HaltReason, st.Progress, st.Machine)
@@ -793,7 +800,16 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index missing mobile work area actions marker %s", want)
 		}
 	}
-	for _, want := range []string{`<canvas id="dashboard-preview" role="img" aria-label="Active job 3D preview"></canvas>`, `#dashboard-preview-empty { z-index: 1; display: grid; place-items: center;`} {
+	for _, want := range []string{
+		`<canvas id="dashboard-preview" role="img" aria-label="Active job 3D preview"></canvas>`,
+		`#dashboard-preview-empty { z-index: 1; display: grid; place-items: center;`,
+		`id="dashboard-profile"`,
+		`id="dashboard-copy-obs"`,
+		`id="dashboard-settings-modal"`,
+		`data-dashboard-panel="telemetry"`,
+		`data-dashboard-panel="gcode"`,
+		`body.dashboard-embed header`,
+	} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing dashboard 3D preview marker %s", want)
 		}
@@ -803,7 +819,7 @@ func TestWebUIServed(t *testing.T) {
 			t.Errorf("index still contains obsolete dashboard 2D preview marker %s", gone)
 		}
 	}
-	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `.status-item`, `#status-bar { position: fixed;`, `background: transparent; border: 0; box-shadow: none; pointer-events: none;`, `.status-item.entering`, `.status-item.leaving`, `.status-dismiss`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="header-toggle"`, `aria-label="Hide top bars"`, `body.header-collapsed #command-toolbar, body.header-collapsed .tabs { display: none; }`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos"`, `.dashboard-position-metric > strong, .dashboard-position-metric > b { overflow: visible; text-overflow: clip; white-space: normal;`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="feed-override-controls"`, `id="feed-override-decrease"`, `id="feed-override-increase"`, `id="feed-override-reset"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `id="jog-settings-section"`, `id="move-to-work-section"`, `id="work-zero-section"`, `id="gamepad-section"`, `id="workarea-mobile-jog"`, `.mobile-jog-base`, `.mobile-jog-knob`, `class="command-panel-close" aria-label="Close Macros menu"`, `class="command-panel-close" aria-label="Close Tool menu"`, `type="module"`, `/app.js?v=tab-routes-1`} {
+	for _, want := range []string{`[hidden] { display: none !important; }`, `id="status-bar"`, `.status-item`, `#status-bar { position: fixed;`, `background: transparent; border: 0; box-shadow: none; pointer-events: none;`, `.status-item.entering`, `.status-item.leaving`, `.status-dismiss`, `.jobs-head`, `.job-recovery`, `id="machine-status-toolbar"`, `id="machine-status-popout"`, `class="connection-status"`, `id="header-toggle"`, `aria-label="Hide top bars"`, `body.header-collapsed #command-toolbar, body.header-collapsed .tabs { display: none; }`, `id="alarm-panel"`, `id="alarm-recover"`, `data-control-action="recover"`, `id="ctl-home-main"`, `data-control-action="home"`, `id="dashboard-view"`, `id="dashboard-state"`, `class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos"`, `.dashboard-position-metric > strong, .dashboard-position-metric > b { overflow: visible; text-overflow: clip; white-space: normal;`, `id="dashboard-spindle-temp"`, `id="dashboard-power-temp"`, `id="dashboard-preview"`, `id="dashboard-progress-bar"`, `id="dashboard-remaining"`, `id="active-job-view"`, `id="active-gcode-left"`, `id="active-job-left-tab-source"`, `id="active-job-left-tab-console"`, `id="active-gcode-console"`, `id="active-gcode-splitter"`, `role="separator"`, `aria-orientation="vertical"`, `id="gcode-form"`, `id="gcode-input"`, `id="log-filter"`, `id="file-summary"`, `id="tool-panel"`, `id="tool-set"`, `id="tool-change-select"`, `id="tool-continue"`, `Tool Status`, `id="active-gcode-panel"`, `class="active-gcode-head"`, `id="active-gcode-progress"`, `id="active-gcode-elapsed"`, `id="active-gcode-remaining"`, `id="active-gcode-pause"`, `id="active-gcode-resume"`, `id="feed-override-controls"`, `id="feed-override-decrease"`, `id="feed-override-increase"`, `id="feed-override-reset"`, `id="paused-job-raise"`, `id="paused-job-stop-spindle"`, `id="active-gcode-source"`, `id="active-gcode-source-scroll"`, `id="active-gcode-source-position"`, `id="gcode-preview"`, `id="gcode-timeline"`, `id="gcode-projection-persp" aria-pressed="false"`, `id="gcode-projection-ortho" aria-pressed="true"`, `id="jog-settings-section"`, `id="move-to-work-section"`, `id="work-zero-section"`, `id="gamepad-section"`, `id="workarea-mobile-jog"`, `.mobile-jog-base`, `.mobile-jog-knob`, `class="command-panel-close" aria-label="Close Macros menu"`, `class="command-panel-close" aria-label="Close Tool menu"`, `type="module"`, `/app.js?v=dashboard-layouts-1`} {
 		if !strings.Contains(bodyText, want) {
 			t.Errorf("index missing %s", want)
 		}
@@ -1070,7 +1086,7 @@ func TestWebUIServed(t *testing.T) {
 	if !strings.Contains(string(jsBody), `availability.available && isTransientJogBlock(state.jog.errorCode || state.jog.error)`) {
 		t.Errorf("app.js does not retain stale jog recovery feedback until fresh machine status is observed")
 	}
-	for _, want := range []string{`function drawDashboardGcodePreview`, `function ensureDashboardGcodeViewer`, `function populateGcodePathScene`, `function rebuildGcodeContextOverlayForGroup`, `geometryReady ? activeGcodeGeometry.segments : []`} {
+	for _, want := range []string{`function drawDashboardGcodePreview`, `function ensureDashboardGcodeViewer`, `function populateGcodePathScene`, `function rebuildGcodeContextOverlayForGroup`, `function activeGcodeDisplaySegments`, `overview_segments`, `function renderDashboardGcodeStream`, `function renderDashboardTelemetry`} {
 		if !strings.Contains(string(jsBody), want) {
 			t.Errorf("app.js missing dashboard 3D preview behavior %s", want)
 		}
@@ -1189,6 +1205,9 @@ func TestUISettingsAPI(t *testing.T) {
 	if initial.Macros == nil || initial.MacroButtons == nil || initial.Machine.SavedOrigins == nil || initial.Gamepad.SlowButtons == nil || initial.Gamepad.MacroButtons == nil {
 		t.Fatalf("initial settings should use empty arrays, got %+v", initial)
 	}
+	if initial.Dashboard.DefaultProfileID != "overview" || len(initial.Dashboard.Profiles) != 1 || initial.Dashboard.Profiles[0].GcodeLines != 9 {
+		t.Fatalf("initial dashboard defaults = %+v", initial.Dashboard)
+	}
 	if initial.Gamepad.Axes.Y.Axis != 1 || !initial.Gamepad.Axes.Y.Invert || initial.Gamepad.Axes.Z.Axis != 3 {
 		t.Fatalf("initial gamepad defaults = %+v", initial.Gamepad)
 	}
@@ -1200,6 +1219,7 @@ func TestUISettingsAPI(t *testing.T) {
 		"macros":[{"id":"m1","name":"Probe","lines":["G38.2 Z-5 F50","G10 L20 P1 Z0"],"color":"#44c27b"}],
 		"macro_buttons":[{"id":"b1","macro_id":"m1","region":"toolbar","order":2}],
 		"log":{"filter":"jog","autoscroll":false},
+		"dashboard":{"profiles":[{"id":"recording","name":"Recording","layout":"grid","density":"compact","background":"transparent","panels":["job","gcode","telemetry"],"gcode_lines":17}],"default_profile_id":"recording"},
 		"machine":{"work_area":{"x_min":-300,"x_max":5,"y_min":-210,"y_max":10},"origin":{"x":1,"y":2},"saved_origins":[{"id":"fixture","label":"Fixture","origin":{"x":-12.5,"y":-20}}],"feed_min_mm_min":100,"feed_max_mm_min":1800,"tap_feed_mm_min":700},
 		"gamepad":{
 			"axes":{
@@ -1224,6 +1244,9 @@ func TestUISettingsAPI(t *testing.T) {
 	if saved.Log.Filter != "jog" || saved.Log.Autoscroll {
 		t.Fatalf("saved log settings = %+v", saved.Log)
 	}
+	if saved.Dashboard.DefaultProfileID != "recording" || len(saved.Dashboard.Profiles) != 1 || saved.Dashboard.Profiles[0].Background != "transparent" || saved.Dashboard.Profiles[0].GcodeLines != 17 {
+		t.Fatalf("saved dashboard settings = %+v", saved.Dashboard)
+	}
 	if saved.Gamepad.Axes.X.Axis != 2 || saved.Gamepad.Axes.X.Scale != 0.5 || saved.Gamepad.DeadmanButton != 7 {
 		t.Fatalf("saved gamepad settings = %+v", saved.Gamepad)
 	}
@@ -1246,6 +1269,27 @@ func TestUISettingsAPI(t *testing.T) {
 	}
 	if got.Machine.WorkArea.XMax != 5 || got.Machine.Origin.Y != 2 || got.Machine.FeedMinMMMin != 100 || got.Machine.FeedMaxMMMin != 1800 || got.Machine.TapFeedMMMin != 700 || len(got.Machine.SavedOrigins) != 1 || got.Machine.SavedOrigins[0].Label != "Fixture" {
 		t.Fatalf("round trip machine settings = %+v", got.Machine)
+	}
+	if got.Dashboard.DefaultProfileID != "recording" || got.Dashboard.Profiles[0].Panels[1] != "gcode" {
+		t.Fatalf("round trip dashboard settings = %+v", got.Dashboard)
+	}
+}
+
+func TestUISettingsAPIRejectsInvalidDashboard(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, body := range []string{
+		`{"dashboard":{"profiles":[{"id":"Bad ID","name":"Recording","layout":"grid","density":"compact","background":"solid","panels":["job"],"gcode_lines":9}],"default_profile_id":"Bad ID"}}`,
+		`{"dashboard":{"profiles":[{"id":"recording","name":"Recording","layout":"floating","density":"compact","background":"solid","panels":["job"],"gcode_lines":9}],"default_profile_id":"recording"}}`,
+		`{"dashboard":{"profiles":[{"id":"recording","name":"Recording","layout":"grid","density":"compact","background":"solid","panels":["job","job"],"gcode_lines":9}],"default_profile_id":"recording"}}`,
+		`{"dashboard":{"profiles":[{"id":"recording","name":"Recording","layout":"grid","density":"compact","background":"solid","panels":["job"],"gcode_lines":31}],"default_profile_id":"recording"}}`,
+	} {
+		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/ui/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp := do(t, req)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for %s", resp.StatusCode, body)
+		}
 	}
 }
 
@@ -2717,6 +2761,48 @@ func TestEventsControlScopeOmitsCatalog(t *testing.T) {
 	}
 	if !strings.Contains(got, `"gcode"`) {
 		t.Errorf("control snapshot should include gcode history: %q", got)
+	}
+}
+
+func TestEventsControlScopeStreamsLiveMachineStatus(t *testing.T) {
+	srv, _, tr := serverWithMachine(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/events?scope=control", nil)
+	resp := do(t, req)
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	readEvent := func() (string, string) {
+		t.Helper()
+		var event, data string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" && event != "" {
+				return event, data
+			}
+			if strings.HasPrefix(line, "event: ") {
+				event = strings.TrimPrefix(line, "event: ")
+			} else if strings.HasPrefix(line, "data: ") {
+				data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+		t.Fatalf("event stream ended: %v", scanner.Err())
+		return "", ""
+	}
+	if event, _ := readEvent(); event != "snapshot" {
+		t.Fatalf("first event = %q, want snapshot", event)
+	}
+	tr.ObserveStatusPayload("<Run|MPos:1,2,3|WPos:4,5,6|W:3.71|A:2|O:0.250>")
+	event, data := readEvent()
+	if event != "machine" {
+		t.Fatalf("next event = %q, want machine: %s", event, data)
+	}
+	var status service.MachineStatus
+	if err := json.Unmarshal([]byte(data), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.State != machine.Run || status.WPos["x"] != 4 || status.ProbeV == nil || *status.ProbeV != 3.71 || status.ATCState == nil || *status.ATCState != 2 || status.LevelDelta == nil || *status.LevelDelta != 0.25 {
+		t.Fatalf("streamed machine status = %+v", status)
 	}
 }
 

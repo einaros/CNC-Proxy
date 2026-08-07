@@ -59,6 +59,9 @@ const (
 	maxMacroDescLen      = 240
 	maxMacroButtons      = 96
 	maxMacroColorLen     = 32
+	maxDashboardProfiles = 16
+	maxDashboardIDLen    = 64
+	maxDashboardNameLen  = 80
 	maxGamepadAxis       = 31
 	maxGamepadButton     = 63
 	maxGamepadMacros     = 32
@@ -162,25 +165,30 @@ func (s *Service) startRunHistoryObservers() {
 
 // MachineStatus is the snapshot returned to clients.
 type MachineStatus struct {
-	State        machine.State       `json:"state"`
-	Mode         string              `json:"mode"`
-	Connected    bool                `json:"connected"`
-	Reconnecting bool                `json:"reconnecting"`
-	PendingJobs  int                 `json:"pending_jobs"`
-	AgeMs        int64               `json:"age_ms"`
-	ObservedAt   time.Time           `json:"observed_at,omitempty"`
-	Stale        bool                `json:"stale"`
-	Raw          string              `json:"raw,omitempty"`
-	Fields       map[string]string   `json:"fields,omitempty"`
-	MPos         machine.AxisValues  `json:"mpos,omitempty"`
-	WPos         machine.AxisValues  `json:"wpos,omitempty"`
-	Feed         *machine.Triple     `json:"feed,omitempty"`
-	Spindle      *machine.Spindle    `json:"spindle,omitempty"`
-	Tool         *machine.ToolStatus `json:"tool,omitempty"`
-	HaltReason   *machine.HaltReason `json:"halt_reason,omitempty"`
-	Progress     []float64           `json:"progress,omitempty"`
-	Machine      []float64           `json:"machine,omitempty"`
-	ActiveJob    *MachineJobProgress `json:"active_job,omitempty"`
+	State        machine.State             `json:"state"`
+	Mode         string                    `json:"mode"`
+	Connected    bool                      `json:"connected"`
+	Reconnecting bool                      `json:"reconnecting"`
+	PendingJobs  int                       `json:"pending_jobs"`
+	AgeMs        int64                     `json:"age_ms"`
+	ObservedAt   time.Time                 `json:"observed_at,omitempty"`
+	Stale        bool                      `json:"stale"`
+	Raw          string                    `json:"raw,omitempty"`
+	Fields       map[string]string         `json:"fields,omitempty"`
+	MPos         machine.AxisValues        `json:"mpos,omitempty"`
+	WPos         machine.AxisValues        `json:"wpos,omitempty"`
+	Feed         *machine.Triple           `json:"feed,omitempty"`
+	Spindle      *machine.Spindle          `json:"spindle,omitempty"`
+	Tool         *machine.ToolStatus       `json:"tool,omitempty"`
+	Laser        *machine.LaserStatus      `json:"laser,omitempty"`
+	Controller   *machine.ControllerStatus `json:"controller,omitempty"`
+	ProbeV       *float64                  `json:"wireless_probe_voltage,omitempty"`
+	ATCState     *int                      `json:"atc_state,omitempty"`
+	LevelDelta   *float64                  `json:"leveling_max_delta,omitempty"`
+	HaltReason   *machine.HaltReason       `json:"halt_reason,omitempty"`
+	Progress     []float64                 `json:"progress,omitempty"`
+	Machine      []float64                 `json:"machine,omitempty"`
+	ActiveJob    *MachineJobProgress       `json:"active_job,omitempty"`
 }
 
 // MachineJobProgress is the normalized player progress reported by the
@@ -300,6 +308,11 @@ func (s *Service) Status() MachineStatus {
 		Feed:         st.Feed,
 		Spindle:      st.Spindle,
 		Tool:         st.Tool,
+		Laser:        st.Laser,
+		Controller:   st.Controller,
+		ProbeV:       st.ProbeV,
+		ATCState:     st.ATCState,
+		LevelDelta:   st.LevelDelta,
 		HaltReason:   st.HaltReason,
 		Progress:     st.Progress,
 		Machine:      st.Machine,
@@ -495,6 +508,12 @@ func (s *Service) enrichJob(j *store.Job) {
 
 // Subscribe proxies the store's event subscription for SSE.
 func (s *Service) Subscribe() (<-chan store.Event, func()) { return s.store.Subscribe() }
+
+// SubscribeMachineStatus exposes future tracker observations for live API
+// clients. Consumers call Status after each signal to include proxy metadata.
+func (s *Service) SubscribeMachineStatus() (<-chan machine.Status, func()) {
+	return s.arb.Tracker().Subscribe()
+}
 
 // Backup is the portable JSON export for the proxy's local state.
 type Backup struct {
@@ -702,6 +721,9 @@ func (s *Service) UISettings() store.UISettings { return s.store.UISettings() }
 
 // SetUISettings validates and persists durable web UI preferences.
 func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
+	if err := validateDashboardSettings(ui.Dashboard); err != nil {
+		return store.UISettings{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
 	if len(ui.Macros) > maxUIMacros {
 		return store.UISettings{}, fmt.Errorf("%w: at most %d macros are allowed", ErrInvalidArgument, maxUIMacros)
 	}
@@ -757,6 +779,74 @@ func (s *Service) SetUISettings(ui store.UISettings) (store.UISettings, error) {
 		ui.Log.Autoscroll = current.Log.Autoscroll
 	}
 	return s.store.SetUISettings(ui)
+}
+
+func validateDashboardSettings(settings store.DashboardSettings) error {
+	if len(settings.Profiles) > maxDashboardProfiles {
+		return fmt.Errorf("at most %d dashboard profiles are allowed", maxDashboardProfiles)
+	}
+	seenProfiles := map[string]bool{}
+	for index, profile := range settings.Profiles {
+		id := strings.TrimSpace(profile.ID)
+		name := strings.TrimSpace(profile.Name)
+		if id == "" || len(id) > maxDashboardIDLen || !dashboardProfileIDValid(id) {
+			return fmt.Errorf("dashboard profile %d has an invalid id", index+1)
+		}
+		if seenProfiles[id] {
+			return fmt.Errorf("dashboard profile id %q is duplicated", id)
+		}
+		seenProfiles[id] = true
+		if name == "" || len(name) > maxDashboardNameLen {
+			return fmt.Errorf("dashboard profile %q requires a name of at most %d bytes", id, maxDashboardNameLen)
+		}
+		switch profile.Layout {
+		case "grid", "job-focus", "stacked":
+		default:
+			return fmt.Errorf("dashboard profile %q has an invalid layout", id)
+		}
+		if profile.Density != "comfortable" && profile.Density != "compact" {
+			return fmt.Errorf("dashboard profile %q has an invalid density", id)
+		}
+		if profile.Background != "solid" && profile.Background != "transparent" {
+			return fmt.Errorf("dashboard profile %q has an invalid background", id)
+		}
+		if profile.GcodeLines < 3 || profile.GcodeLines > 30 {
+			return fmt.Errorf("dashboard profile %q gcode_lines must be between 3 and 30", id)
+		}
+		if len(profile.Panels) == 0 || len(profile.Panels) > 4 {
+			return fmt.Errorf("dashboard profile %q requires between 1 and 4 panels", id)
+		}
+		seenPanels := map[string]bool{}
+		for _, panel := range profile.Panels {
+			if seenPanels[panel] || !dashboardPanelValid(panel) {
+				return fmt.Errorf("dashboard profile %q has invalid panel organization", id)
+			}
+			seenPanels[panel] = true
+		}
+	}
+	if len(settings.Profiles) > 0 && !seenProfiles[strings.TrimSpace(settings.DefaultProfileID)] {
+		return errors.New("dashboard default profile does not exist")
+	}
+	return nil
+}
+
+func dashboardProfileIDValid(id string) bool {
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func dashboardPanelValid(panel string) bool {
+	switch panel {
+	case "machine", "job", "telemetry", "gcode":
+		return true
+	default:
+		return false
+	}
 }
 
 func newerMachineLearned(current, candidate store.MachineLearned) store.MachineLearned {

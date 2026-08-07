@@ -998,6 +998,7 @@ func normalizeUISettings(in UISettings, now time.Time) UISettings {
 		out.Log.Filter = "all"
 	}
 	out.Machine = normalizeMachineUI(in.Machine, now)
+	out.Dashboard = normalizeDashboardSettings(in.Dashboard)
 	seenMacros := map[string]bool{}
 	for i, m := range in.Macros {
 		if m.ID == "" {
@@ -1055,6 +1056,84 @@ func defaultUISettings() UISettings {
 		Log:          LogSettings{Filter: "all", Autoscroll: true},
 		Gamepad:      defaultGamepadSettings(),
 		Machine:      defaultMachineUI(),
+		Dashboard:    defaultDashboardSettings(),
+	}
+}
+
+func defaultDashboardSettings() DashboardSettings {
+	return DashboardSettings{
+		Profiles: []DashboardProfile{{
+			ID:         "overview",
+			Name:       "Overview",
+			Layout:     "job-focus",
+			Density:    "comfortable",
+			Background: "solid",
+			Panels:     []string{"machine", "job", "telemetry", "gcode"},
+			GcodeLines: 9,
+		}},
+		DefaultProfileID: "overview",
+	}
+}
+
+func normalizeDashboardSettings(in DashboardSettings) DashboardSettings {
+	defaults := defaultDashboardSettings()
+	seenProfiles := map[string]bool{}
+	out := DashboardSettings{Profiles: []DashboardProfile{}}
+	for _, profile := range in.Profiles {
+		profile.ID = strings.TrimSpace(profile.ID)
+		profile.Name = strings.TrimSpace(profile.Name)
+		if profile.ID == "" || seenProfiles[profile.ID] {
+			continue
+		}
+		seenProfiles[profile.ID] = true
+		if profile.Name == "" {
+			profile.Name = profile.ID
+		}
+		switch profile.Layout {
+		case "grid", "job-focus", "stacked":
+		default:
+			profile.Layout = "job-focus"
+		}
+		if profile.Density != "compact" {
+			profile.Density = "comfortable"
+		}
+		if profile.Background != "transparent" {
+			profile.Background = "solid"
+		}
+		seenPanels := map[string]bool{}
+		panels := make([]string, 0, len(profile.Panels))
+		for _, panel := range profile.Panels {
+			if seenPanels[panel] || !dashboardPanelKnown(panel) {
+				continue
+			}
+			seenPanels[panel] = true
+			panels = append(panels, panel)
+		}
+		if len(panels) == 0 {
+			panels = append([]string(nil), defaults.Profiles[0].Panels...)
+		}
+		profile.Panels = panels
+		if profile.GcodeLines < 3 || profile.GcodeLines > 30 {
+			profile.GcodeLines = defaults.Profiles[0].GcodeLines
+		}
+		out.Profiles = append(out.Profiles, profile)
+	}
+	if len(out.Profiles) == 0 {
+		return defaults
+	}
+	out.DefaultProfileID = strings.TrimSpace(in.DefaultProfileID)
+	if !seenProfiles[out.DefaultProfileID] {
+		out.DefaultProfileID = out.Profiles[0].ID
+	}
+	return out
+}
+
+func dashboardPanelKnown(panel string) bool {
+	switch panel {
+	case "machine", "job", "telemetry", "gcode":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1529,6 +1608,13 @@ func copyUISettings(in UISettings) UISettings {
 	out.MacroButtons = append([]MacroSlot(nil), in.MacroButtons...)
 	if out.MacroButtons == nil {
 		out.MacroButtons = []MacroSlot{}
+	}
+	out.Dashboard.Profiles = append([]DashboardProfile(nil), in.Dashboard.Profiles...)
+	if out.Dashboard.Profiles == nil {
+		out.Dashboard.Profiles = []DashboardProfile{}
+	}
+	for i := range out.Dashboard.Profiles {
+		out.Dashboard.Profiles[i].Panels = append([]string(nil), in.Dashboard.Profiles[i].Panels...)
 	}
 	out.Machine.SavedOrigins = append([]SavedOrigin(nil), in.Machine.SavedOrigins...)
 	if out.Machine.SavedOrigins == nil {

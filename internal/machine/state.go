@@ -65,6 +65,23 @@ type ToolStatus struct {
 	Target *int    `json:"target,omitempty"`
 }
 
+// LaserStatus describes the optional L: status field.
+type LaserStatus struct {
+	Mode    bool    `json:"mode"`
+	State   bool    `json:"state"`
+	Testing bool    `json:"testing"`
+	Power   float64 `json:"power"`
+	Scale   float64 `json:"scale"`
+}
+
+// ControllerStatus describes the optional C: machine/mode status field.
+type ControllerStatus struct {
+	Model        int  `json:"model"`
+	Functions    int  `json:"functions"`
+	InchMode     bool `json:"inch_mode"`
+	AbsoluteMode bool `json:"absolute_mode"`
+}
+
 // HaltReason describes the firmware's H: alarm/halt reason field. The ranges
 // mirror the official controller's recovery policy.
 type HaltReason struct {
@@ -85,6 +102,11 @@ type Status struct {
 	Feed       *Triple           `json:"feed,omitempty"`
 	Spindle    *Spindle          `json:"spindle,omitempty"`
 	Tool       *ToolStatus       `json:"tool,omitempty"`
+	Laser      *LaserStatus      `json:"laser,omitempty"`
+	Controller *ControllerStatus `json:"controller,omitempty"`
+	ProbeV     *float64          `json:"wireless_probe_voltage,omitempty"`
+	ATCState   *int              `json:"atc_state,omitempty"`
+	LevelDelta *float64          `json:"leveling_max_delta,omitempty"`
 	HaltReason *HaltReason       `json:"halt_reason,omitempty"`
 	Progress   []float64         `json:"progress,omitempty"`
 	Machine    []float64         `json:"machine,omitempty"`
@@ -118,6 +140,20 @@ func (s Status) copy() Status {
 		}
 		cp.Tool = &v
 	}
+	if s.Laser != nil {
+		v := *s.Laser
+		cp.Laser = &v
+	}
+	if s.Controller != nil {
+		v := *s.Controller
+		cp.Controller = &v
+	}
+	cp.ProbeV = copyFloat64(s.ProbeV)
+	if s.ATCState != nil {
+		v := *s.ATCState
+		cp.ATCState = &v
+	}
+	cp.LevelDelta = copyFloat64(s.LevelDelta)
 	if s.HaltReason != nil {
 		v := *s.HaltReason
 		cp.HaltReason = &v
@@ -184,6 +220,14 @@ func ParseStatusPayload(payload string) (Status, bool) {
 			st.Spindle = parseSpindle(val)
 		case "T":
 			st.Tool = parseTool(val)
+		case "W":
+			st.ProbeV = parseFirstFloat(val)
+		case "L":
+			st.Laser = parseLaser(val)
+		case "A":
+			st.ATCState = parseFirstInt(val)
+		case "O":
+			st.LevelDelta = parseFirstFloat(val)
 		case "H":
 			if reason := ParseHaltReason(val); reason != nil {
 				st.HaltReason = reason
@@ -192,6 +236,7 @@ func ParseStatusPayload(payload string) (Status, bool) {
 			st.Progress = parseNumberList(val)
 		case "C":
 			st.Machine = parseNumberList(val)
+			st.Controller = parseController(val)
 		}
 	}
 	if len(st.Fields) == 0 {
@@ -292,6 +337,50 @@ func copyFloat64(value *float64) *float64 {
 	}
 	copy := *value
 	return &copy
+}
+
+func parseFirstFloat(s string) *float64 {
+	vals := parseNumberList(s)
+	if len(vals) == 0 {
+		return nil
+	}
+	return &vals[0]
+}
+
+func parseFirstInt(s string) *int {
+	value := parseFirstFloat(s)
+	if value == nil {
+		return nil
+	}
+	out := int(*value)
+	return &out
+}
+
+func parseLaser(s string) *LaserStatus {
+	vals := parseNumberList(s)
+	if len(vals) < 5 {
+		return nil
+	}
+	return &LaserStatus{
+		Mode:    vals[0] != 0,
+		State:   vals[1] != 0,
+		Testing: vals[2] != 0,
+		Power:   vals[3],
+		Scale:   vals[4],
+	}
+}
+
+func parseController(s string) *ControllerStatus {
+	vals := parseNumberList(s)
+	if len(vals) < 4 {
+		return nil
+	}
+	return &ControllerStatus{
+		Model:        int(vals[0]),
+		Functions:    int(vals[1]),
+		InchMode:     vals[2] != 0,
+		AbsoluteMode: vals[3] != 0,
+	}
 }
 
 func parseTool(s string) *ToolStatus {

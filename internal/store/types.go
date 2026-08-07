@@ -108,11 +108,31 @@ type Job struct {
 // the store file with the catalog/queue so a deployment restart preserves the
 // control console layout without requiring browser-local state.
 type UISettings struct {
-	Macros       []Macro     `json:"macros"`
-	MacroButtons []MacroSlot `json:"macro_buttons"`
-	Log          LogSettings `json:"log"`
-	Gamepad      Gamepad     `json:"gamepad"`
-	Machine      MachineUI   `json:"machine"`
+	Macros       []Macro           `json:"macros"`
+	MacroButtons []MacroSlot       `json:"macro_buttons"`
+	Log          LogSettings       `json:"log"`
+	Gamepad      Gamepad           `json:"gamepad"`
+	Machine      MachineUI         `json:"machine"`
+	Dashboard    DashboardSettings `json:"dashboard"`
+}
+
+// DashboardSettings stores named recording/dashboard layouts. A profile ID is
+// stable so /dashboard?profile=<id> URLs survive display-name edits.
+type DashboardSettings struct {
+	Profiles         []DashboardProfile `json:"profiles"`
+	DefaultProfileID string             `json:"default_profile_id"`
+}
+
+// DashboardProfile controls dashboard organization without affecting the
+// machine. Panels is both the visible set and its display order.
+type DashboardProfile struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Layout     string   `json:"layout"`
+	Density    string   `json:"density"`
+	Background string   `json:"background"`
+	Panels     []string `json:"panels"`
+	GcodeLines int      `json:"gcode_lines"`
 }
 
 // Macro is a named sequence of gcode/console lines that can be assigned to a

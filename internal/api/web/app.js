@@ -33,6 +33,7 @@ const ACTIVE_JOB_SPLIT_MIN_LEFT_PX = 260;
 const ACTIVE_JOB_SPLIT_MIN_PREVIEW_PX = 320;
 const ACTIVE_JOB_SPLITTER_PX = 16;
 const VIEW_TABS = ["dashboard", "active-job", "control", "files"];
+const DASHBOARD_PANEL_DEFS = [{ id: "machine", label: "Machine" }, { id: "job", label: "Current job" }, { id: "telemetry", label: "Machine telemetry" }, { id: "gcode", label: "Gcode stream" }];
 const JOG_INPUT_HEARTBEAT_MS = 100;
 const JOG_INPUT_DEADZONE = 0.12;
 const JOG_PREDICTION_TOLERANCE_MM = 0.02;
@@ -63,13 +64,18 @@ const state = {
   logSearch: "",
   logPaused: false,
   selectedMacroId: "",
-  ui: { macros: [], macro_buttons: [], log: { filter: "all", autoscroll: true }, gamepad: defaultGamepadSettings(), machine: defaultMachineSettings() },
+  ui: { macros: [], macro_buttons: [], log: { filter: "all", autoscroll: true }, gamepad: defaultGamepadSettings(), machine: defaultMachineSettings(), dashboard: defaultDashboardSettings() },
   settingsSaveTimer: null,
   machineLearnPending: false,
   macroRunning: false,
   activeTab: "active-job",
   activeJobLeftTab: "source",
   activeJobSplitPercent: ACTIVE_JOB_SPLIT_DEFAULT_PERCENT,
+  dashboardProfileID: "overview",
+  dashboardRequestedProfileID: "",
+  dashboardEmbed: false,
+  dashboardSettingsLoaded: false,
+  dashboardDraftProfileID: "",
 	filesLoaded: false,
 	fileActions: new Map(),
 	fileRenderTimer: null,
@@ -870,6 +876,57 @@ function normalizeUISettings(ui) {
     },
     gamepad: normalizeGamepadSettings(ui.gamepad, macroIDs),
     machine: normalizeMachineSettings(ui.machine),
+    dashboard: normalizeDashboardSettings(ui.dashboard),
+  };
+}
+
+function defaultDashboardSettings() {
+  return {
+    profiles: [{
+      id: "overview",
+      name: "Overview",
+      layout: "job-focus",
+      density: "comfortable",
+      background: "solid",
+      panels: DASHBOARD_PANEL_DEFS.map((panel) => panel.id),
+      gcode_lines: 9,
+    }],
+    default_profile_id: "overview",
+  };
+}
+
+function normalizeDashboardSettings(settings) {
+  const defaults = defaultDashboardSettings();
+  const knownPanels = new Set(DASHBOARD_PANEL_DEFS.map((panel) => panel.id));
+  const profiles = [];
+  const seen = new Set();
+  for (const candidate of Array.isArray(settings?.profiles) ? settings.profiles : []) {
+    const id = String(candidate?.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const panels = [];
+    const seenPanels = new Set();
+    for (const panel of Array.isArray(candidate.panels) ? candidate.panels : []) {
+      if (!knownPanels.has(panel) || seenPanels.has(panel)) continue;
+      seenPanels.add(panel);
+      panels.push(panel);
+    }
+    const lines = Math.trunc(Number(candidate.gcode_lines));
+    profiles.push({
+      id,
+      name: String(candidate.name || id).trim() || id,
+      layout: ["grid", "job-focus", "stacked"].includes(candidate.layout) ? candidate.layout : "job-focus",
+      density: candidate.density === "compact" ? "compact" : "comfortable",
+      background: candidate.background === "transparent" ? "transparent" : "solid",
+      panels: panels.length ? panels : [...defaults.profiles[0].panels],
+      gcode_lines: lines >= 3 && lines <= 30 ? lines : defaults.profiles[0].gcode_lines,
+    });
+  }
+  if (!profiles.length) return defaults;
+  const requestedDefault = String(settings?.default_profile_id || "").trim();
+  return {
+    profiles,
+    default_profile_id: profiles.some((profile) => profile.id === requestedDefault) ? requestedDefault : profiles[0].id,
   };
 }
 
@@ -907,6 +964,7 @@ async function refreshMachineLearnedSettings() {
 
 function applyUISettings(ui) {
   state.ui = normalizeUISettings(ui);
+  state.dashboardSettingsLoaded = true;
   state.logFilter = state.ui.log.filter || "all";
   document.getElementById("log-filter").value = state.logFilter;
   document.getElementById("log-autoscroll").checked = state.ui.log.autoscroll !== false;
@@ -918,6 +976,7 @@ function applyUISettings(ui) {
   renderJog();
   renderGcodeLog();
   renderWorkArea();
+  resolveDashboardProfile();
 }
 
 function queueSaveUISettings() {
@@ -925,7 +984,7 @@ function queueSaveUISettings() {
   state.settingsSaveTimer = setTimeout(saveUISettings, 250);
 }
 
-async function saveUISettings() {
+async function saveUISettings(options = {}) {
   clearTimeout(state.settingsSaveTimer);
   state.settingsSaveTimer = null;
   try {
@@ -935,9 +994,317 @@ async function saveUISettings() {
       body: JSON.stringify(state.ui),
     });
     applyUISettings(await r.json());
-    clearNotice("ui-settings-save");
+    if (options.successMessage) setNotice(options.successMessage, "ok", "ui-settings-save");
+    else clearNotice("ui-settings-save");
+    return true;
   } catch (e) {
     setNotice("Saving UI settings failed: " + e.message, "error", "ui-settings-save");
+    return false;
+  }
+}
+
+function dashboardURLState(locationLike = window.location) {
+  const query = new URLSearchParams(String(locationLike?.search || ""));
+  const embed = String(query.get("embed") || "").toLowerCase();
+  return {
+    profile: String(query.get("profile") || "").trim(),
+    embed: embed === "1" || embed === "true" || embed === "yes",
+  };
+}
+
+function dashboardProfileByID(id) {
+  return state.ui.dashboard?.profiles?.find((profile) => profile.id === id) || null;
+}
+
+function currentDashboardProfile() {
+  const settings = normalizeDashboardSettings(state.ui.dashboard);
+  const find = (id) => settings.profiles.find((profile) => profile.id === id) || null;
+  return find(state.dashboardProfileID) || find(settings.default_profile_id) || settings.profiles[0];
+}
+
+function resolveDashboardProfile() {
+  state.ui.dashboard = normalizeDashboardSettings(state.ui.dashboard);
+  const requested = state.dashboardRequestedProfileID;
+  const fallback = state.ui.dashboard.default_profile_id || state.ui.dashboard.profiles[0]?.id;
+  state.dashboardProfileID = dashboardProfileByID(requested) ? requested : fallback;
+  renderDashboardProfileControls();
+  applyDashboardProfile(currentDashboardProfile());
+  renderDashboard();
+}
+
+function applyDashboardURLState(locationLike = window.location) {
+  const urlState = dashboardURLState(locationLike);
+  state.dashboardRequestedProfileID = urlState.profile;
+  state.dashboardEmbed = urlState.embed && viewTabFromURL(locationLike) === "dashboard";
+  document.body.classList.toggle("dashboard-embed", state.dashboardEmbed);
+  if (state.dashboardSettingsLoaded || !state.dashboardProfileID) resolveDashboardProfile();
+  else applyDashboardProfile(currentDashboardProfile());
+}
+
+function syncDashboardProfileURL(profileID, embed = state.dashboardEmbed, mode = "push") {
+  const url = new URL(window.location.href);
+  url.pathname = "/dashboard";
+  url.searchParams.delete("tab");
+  if (profileID) url.searchParams.set("profile", profileID);
+  else url.searchParams.delete("profile");
+  if (embed) url.searchParams.set("embed", "1");
+  else url.searchParams.delete("embed");
+  url.hash = "";
+  const next = url.pathname + url.search;
+  const current = window.location.pathname + window.location.search;
+  if (mode === "push" && next === current) return;
+  window.history[mode === "replace" ? "replaceState" : "pushState"](
+    { tab: "dashboard", profile: profileID, embed: !!embed },
+    "",
+    next,
+  );
+}
+
+function selectDashboardProfile(profileID, urlMode = "push") {
+  const profile = dashboardProfileByID(profileID);
+  if (!profile) return false;
+  state.dashboardRequestedProfileID = profile.id;
+  state.dashboardProfileID = profile.id;
+  applyDashboardProfile(profile);
+  syncDashboardProfileURL(profile.id, state.dashboardEmbed, urlMode);
+  return true;
+}
+
+function renderDashboardProfileControls() {
+  const select = document.getElementById("dashboard-profile");
+  if (!select) return;
+  const prior = select.value;
+  const fragment = document.createDocumentFragment();
+  for (const profile of state.ui.dashboard.profiles) {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.name;
+    fragment.appendChild(option);
+  }
+  select.replaceChildren(fragment);
+  select.value = dashboardProfileByID(state.dashboardProfileID) ? state.dashboardProfileID : prior;
+}
+
+function applyDashboardProfile(profile) {
+  if (!profile) return;
+  const grid = document.querySelector(".dashboard-grid");
+  if (!grid) return;
+  grid.classList.remove(
+    "layout-grid",
+    "layout-job-focus",
+    "layout-stacked",
+    "dashboard-density-compact",
+    "dashboard-job-focus-split",
+    "dashboard-panel-count-1",
+    "dashboard-panel-count-2",
+    "dashboard-panel-count-3",
+    "dashboard-panel-count-4",
+  );
+  grid.classList.add("layout-" + profile.layout);
+  grid.classList.toggle("dashboard-density-compact", profile.density === "compact");
+  document.body.classList.toggle("dashboard-background-transparent", profile.background === "transparent");
+  const visible = new Set(profile.panels);
+  grid.classList.add(`dashboard-panel-count-${visible.size}`);
+  grid.classList.toggle(
+    "dashboard-job-focus-split",
+    profile.layout === "job-focus" && visible.has("job") && visible.size > 1,
+  );
+  const order = new Map(profile.panels.map((panel, index) => [panel, index]));
+  for (const panel of document.querySelectorAll("[data-dashboard-panel]")) {
+    const id = panel.dataset.dashboardPanel;
+    panel.hidden = !visible.has(id);
+    panel.style.order = String(order.get(id) ?? DASHBOARD_PANEL_DEFS.length);
+  }
+  const select = document.getElementById("dashboard-profile");
+  if (select && select.value !== profile.id) select.value = profile.id;
+  if (dashboardGcodeView.renderer) {
+    dashboardGcodeView.renderer.setClearColor(0x202832, profile.background === "transparent" ? 0 : 1);
+  }
+  scheduleDashboardGcodeRender();
+}
+
+function dashboardProfileSlug(name, profiles = state.ui.dashboard.profiles) {
+  const stem = String(name || "dashboard").toLowerCase().normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "dashboard";
+  const used = new Set(profiles.map((profile) => profile.id));
+  if (!used.has(stem)) return stem;
+  for (let suffix = 2; suffix < 1000; suffix++) {
+    const id = `${stem}-${suffix}`;
+    if (!used.has(id)) return id;
+  }
+  return newID("dashboard").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+}
+
+function renderDashboardPanelOrder(panels) {
+  const container = document.getElementById("dashboard-panel-order");
+  if (!container) return;
+  const selected = new Set(panels);
+  const ordered = [
+    ...panels.map((id) => DASHBOARD_PANEL_DEFS.find((panel) => panel.id === id)).filter(Boolean),
+    ...DASHBOARD_PANEL_DEFS.filter((panel) => !selected.has(panel.id)),
+  ];
+  const fragment = document.createDocumentFragment();
+  for (const definition of ordered) {
+    const row = document.createElement("div");
+    row.className = "dashboard-panel-row";
+    row.dataset.dashboardPanelOption = definition.id;
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selected.has(definition.id);
+    checkbox.setAttribute("aria-label", `Show ${definition.label}`);
+    const label = document.createElement("span");
+    label.textContent = definition.label;
+    const up = document.createElement("button");
+    up.type = "button";
+    up.textContent = "↑";
+    up.setAttribute("aria-label", `Move ${definition.label} up`);
+    up.onclick = () => {
+      const previous = row.previousElementSibling;
+      if (previous) container.insertBefore(row, previous);
+      refreshDashboardPanelOrderButtons();
+    };
+    const down = document.createElement("button");
+    down.type = "button";
+    down.textContent = "↓";
+    down.setAttribute("aria-label", `Move ${definition.label} down`);
+    down.onclick = () => {
+      const next = row.nextElementSibling;
+      if (next) container.insertBefore(next, row);
+      refreshDashboardPanelOrderButtons();
+    };
+    row.append(checkbox, label, up, down);
+    fragment.appendChild(row);
+  }
+  container.replaceChildren(fragment);
+  refreshDashboardPanelOrderButtons();
+}
+
+function refreshDashboardPanelOrderButtons() {
+  const rows = Array.from(document.querySelectorAll("#dashboard-panel-order .dashboard-panel-row"));
+  rows.forEach((row, index) => {
+    const buttons = row.querySelectorAll("button");
+    if (buttons[0]) buttons[0].disabled = index === 0;
+    if (buttons[1]) buttons[1].disabled = index === rows.length - 1;
+  });
+}
+
+function openDashboardSettings(createNew = false) {
+  const profile = currentDashboardProfile();
+  state.dashboardDraftProfileID = createNew ? "" : profile.id;
+  document.getElementById("dashboard-profile-name").value = createNew ? "" : profile.name;
+  document.getElementById("dashboard-layout").value = profile.layout;
+  document.getElementById("dashboard-density").value = profile.density;
+  document.getElementById("dashboard-background").value = profile.background;
+  document.getElementById("dashboard-default").checked = !createNew && profile.id === state.ui.dashboard.default_profile_id;
+  document.getElementById("dashboard-gcode-lines-count").value = String(profile.gcode_lines);
+  document.getElementById("dashboard-delete").disabled = createNew || state.ui.dashboard.profiles.length <= 1;
+  renderDashboardPanelOrder(profile.panels);
+  document.getElementById("dashboard-settings-modal")?.showModal();
+  document.getElementById("dashboard-profile-name")?.focus();
+}
+
+function closeDashboardSettings() {
+  document.getElementById("dashboard-settings-modal")?.close();
+  state.dashboardDraftProfileID = "";
+}
+
+function dashboardProfileFromForm() {
+  const nameInput = document.getElementById("dashboard-profile-name");
+  const name = String(nameInput?.value || "").trim();
+  if (!name) {
+    nameInput?.setCustomValidity("Enter a dashboard name.");
+    nameInput?.reportValidity();
+    return null;
+  }
+  nameInput.setCustomValidity("");
+  const panels = Array.from(document.querySelectorAll("#dashboard-panel-order .dashboard-panel-row"))
+    .filter((row) => row.querySelector('input[type="checkbox"]')?.checked)
+    .map((row) => row.dataset.dashboardPanelOption);
+  if (!panels.length) {
+    setNotice("Dashboard layout requires at least one panel.", "error", "dashboard-settings");
+    return null;
+  }
+  const lines = Math.max(3, Math.min(30, Math.trunc(Number(document.getElementById("dashboard-gcode-lines-count")?.value) || 9)));
+  return {
+    id: state.dashboardDraftProfileID || dashboardProfileSlug(name),
+    name,
+    layout: document.getElementById("dashboard-layout")?.value || "job-focus",
+    density: document.getElementById("dashboard-density")?.value || "comfortable",
+    background: document.getElementById("dashboard-background")?.value || "solid",
+    panels,
+    gcode_lines: lines,
+  };
+}
+
+async function saveDashboardProfile() {
+  const profile = dashboardProfileFromForm();
+  if (!profile) return;
+  const modal = document.getElementById("dashboard-settings-modal");
+  const save = document.getElementById("dashboard-save");
+  const previousDashboard = normalizeDashboardSettings(state.ui.dashboard);
+  save.disabled = true;
+  modal?.setAttribute("aria-busy", "true");
+  const profiles = [...state.ui.dashboard.profiles];
+  const index = profiles.findIndex((candidate) => candidate.id === profile.id);
+  if (index >= 0) profiles[index] = profile;
+  else profiles.push(profile);
+  state.ui.dashboard.profiles = profiles;
+  if (document.getElementById("dashboard-default")?.checked || !dashboardProfileByID(state.ui.dashboard.default_profile_id)) {
+    state.ui.dashboard.default_profile_id = profile.id;
+  }
+  state.dashboardRequestedProfileID = profile.id;
+  state.dashboardProfileID = profile.id;
+  const saved = await saveUISettings({ successMessage: `Dashboard layout saved: ${profile.name}` });
+  save.disabled = false;
+  modal?.removeAttribute("aria-busy");
+  if (!saved) {
+    state.ui.dashboard = previousDashboard;
+    resolveDashboardProfile();
+    return;
+  }
+  closeDashboardSettings();
+  selectDashboardProfile(profile.id, "push");
+}
+
+async function deleteDashboardProfile() {
+  const profile = dashboardProfileByID(state.dashboardDraftProfileID);
+  if (!profile || state.ui.dashboard.profiles.length <= 1) return;
+  if (!confirm(`Delete dashboard layout “${profile.name}”?`)) return;
+  const button = document.getElementById("dashboard-delete");
+  const modal = document.getElementById("dashboard-settings-modal");
+  const previousDashboard = normalizeDashboardSettings(state.ui.dashboard);
+  button.disabled = true;
+  modal?.setAttribute("aria-busy", "true");
+  state.ui.dashboard.profiles = state.ui.dashboard.profiles.filter((candidate) => candidate.id !== profile.id);
+  if (state.ui.dashboard.default_profile_id === profile.id) {
+    state.ui.dashboard.default_profile_id = state.ui.dashboard.profiles[0].id;
+  }
+  state.dashboardRequestedProfileID = state.ui.dashboard.default_profile_id;
+  state.dashboardProfileID = state.dashboardRequestedProfileID;
+  const saved = await saveUISettings({ successMessage: `Dashboard layout deleted: ${profile.name}` });
+  button.disabled = false;
+  modal?.removeAttribute("aria-busy");
+  if (!saved) {
+    state.ui.dashboard = previousDashboard;
+    resolveDashboardProfile();
+    return;
+  }
+  closeDashboardSettings();
+  selectDashboardProfile(state.dashboardProfileID, "replace");
+}
+
+async function copyDashboardURL(embed) {
+  const profile = currentDashboardProfile();
+  const url = new URL(window.location.href);
+  url.pathname = "/dashboard";
+  url.search = "";
+  url.searchParams.set("profile", profile.id);
+  if (embed) url.searchParams.set("embed", "1");
+  try {
+    await navigator.clipboard.writeText(url.href);
+    setNotice(embed ? "OBS dashboard URL copied." : "Dashboard URL copied.", "ok", "dashboard-copy");
+  } catch (error) {
+    setNotice("Copying dashboard URL failed: " + error.message, "error", "dashboard-copy");
   }
 }
 
@@ -6796,8 +7163,7 @@ function renderActiveGcode() {
   ensureActiveGcodeGeometry(active);
   ensureActiveGcodeSource(active);
   const preview = active.preview || {};
-  const geometryReady = activeGcodeGeometry.signature === activeGcodeSourceSignature(active);
-  const renderedPreview = { ...preview, segments: geometryReady ? activeGcodeGeometry.segments : [] };
+  const renderedPreview = { ...preview, segments: activeGcodeDisplaySegments(active) };
   const live = activeJobPreviewState(state.machine, renderedPreview, active.path);
   const tools = Array.isArray(preview.tools) && preview.tools.length ? " tools T" + preview.tools.join(", T") : "";
   const entry = active.entry || state.files.get(active.path) || {};
@@ -6860,12 +7226,185 @@ function renderActiveGcodeControls(active) {
   if (!pending) setSoftDisabled(run, !active?.runnable || machineState !== "Idle");
 }
 
+function activeGcodeDisplaySegments(active) {
+  if (activeGcodeGeometry.signature === activeGcodeSourceSignature(active)) {
+    return activeGcodeGeometry.segments;
+  }
+  return Array.isArray(active?.preview?.overview_segments) ? active.preview.overview_segments : [];
+}
+
+function dashboardOptionalNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function dashboardOnOff(value) {
+  const number = dashboardOptionalNumber(value);
+  return number === null ? null : (number !== 0 ? "On" : "Off");
+}
+
+function dashboardRotaryText(machine) {
+  const position = machine?.wpos || machine?.mpos || {};
+  const values = [];
+  for (const axis of ["a", "b", "c"]) {
+    const value = dashboardOptionalNumber(position[axis]);
+    if (value !== null) values.push(`${axis.toUpperCase()} ${value.toFixed(3)}°`);
+  }
+  return values.length ? values.join(" · ") : null;
+}
+
+function dashboardLaserText(laser) {
+  if (!laser) return null;
+  const stateText = laser.testing ? "Testing" : (laser.state ? "Firing" : (laser.mode ? "Ready" : "Off"));
+  const power = dashboardOptionalNumber(laser.power);
+  const scale = dashboardOptionalNumber(laser.scale);
+  const details = [];
+  if (power !== null) details.push(`power ${power.toFixed(1)}`);
+  if (scale !== null) details.push(`scale ${scale.toFixed(1)}`);
+  return details.length ? `${stateText} · ${details.join(" · ")}` : stateText;
+}
+
+function dashboardATCText(value) {
+  const stateCode = dashboardOptionalNumber(value);
+  if (stateCode === null) return null;
+  const labels = {
+    0: "Idle",
+    1: "Dropping tool",
+    2: "Picking tool",
+    3: "Calibrating",
+    4: "Measuring margin",
+    5: "Z probing",
+    6: "Auto leveling",
+    9: "Done",
+  };
+  return labels[stateCode] || `State ${stateCode}`;
+}
+
+function dashboardControllerText(controller) {
+  if (!controller) return null;
+  const models = { 1: "C1", 2: "CA1", 3: "Z1" };
+  const model = models[controller.model] || `Model ${controller.model}`;
+  return `${model} · ${controller.inch_mode ? "inch" : "mm"} · ${controller.absolute_mode ? "absolute" : "relative"}`;
+}
+
+function dashboardAlarmText(reason) {
+  if (!reason) return null;
+  const message = String(reason.message || `Alarm ${reason.code ?? ""}`).trim();
+  const recovery = String(reason.recovery || "").replaceAll("_", " ").trim();
+  return recovery ? `${message} · ${recovery}` : message;
+}
+
+function renderDashboardTelemetry(machine) {
+  const spindle = machine?.spindle || {};
+  const probeV = dashboardOptionalNumber(machine?.wireless_probe_voltage);
+  const levelDelta = dashboardOptionalNumber(machine?.leveling_max_delta);
+  const values = {
+    rotary: dashboardRotaryText(machine),
+    probe: probeV === null ? null : `${probeV.toFixed(2)} V`,
+    vacuum: dashboardOnOff(spindle.vacuum_mode),
+    air: dashboardOnOff(spindle.blowing_mode),
+    outputs: (() => {
+      const values = [];
+      const bed = dashboardOnOff(spindle.bed_clean_mode);
+      const external = dashboardOnOff(spindle.external_mode);
+      if (bed !== null) values.push(`Bed clean ${bed}`);
+      if (external !== null) values.push(`External ${external}`);
+      return values.length ? values.join(" · ") : null;
+    })(),
+    laser: dashboardLaserText(machine?.laser),
+    atc: dashboardATCText(machine?.atc_state),
+    leveling: levelDelta === null ? null : `Max delta ${levelDelta.toFixed(3)} mm`,
+    controller: dashboardControllerText(machine?.controller),
+    alarm: dashboardAlarmText(machine?.halt_reason),
+  };
+  let visible = 0;
+  for (const [key, value] of Object.entries(values)) {
+    const row = document.querySelector(`[data-dashboard-telemetry="${key}"]`);
+    const output = row?.querySelector("strong");
+    if (!row || !output) continue;
+    row.hidden = value === null;
+    if (value !== null) {
+      output.textContent = value;
+      visible++;
+    }
+  }
+  const empty = document.getElementById("dashboard-telemetry-empty");
+  if (empty) empty.hidden = visible > 0;
+}
+
+function dashboardGcodeWindow(totalLines, currentLine, visibleLines) {
+  const total = Math.max(0, Math.trunc(Number(totalLines) || 0));
+  const count = Math.max(3, Math.min(30, Math.trunc(Number(visibleLines) || 9)));
+  const current = Math.max(0, Math.min(total, Math.trunc(Number(currentLine) || 0)));
+  if (!total) return { start: 0, end: 0, current: 0 };
+  if (!current) return { start: 0, end: Math.min(total, count), current: 0 };
+  const before = Math.floor((count - 1) / 2);
+  let start = Math.max(0, current - 1 - before);
+  let end = Math.min(total, start + count);
+  start = Math.max(0, end - count);
+  return { start, end, current };
+}
+
+function renderDashboardGcodeStream(live = null) {
+  const container = document.getElementById("dashboard-gcode-lines");
+  const position = document.getElementById("dashboard-gcode-position");
+  if (!container || !position) return;
+  if (!activeGcodeSource.path) {
+    position.textContent = "-";
+    const empty = document.createElement("div");
+    empty.className = "dashboard-gcode-line dashboard-gcode-empty";
+    empty.textContent = "No gcode loaded";
+    container.replaceChildren(empty);
+    return;
+  }
+
+  const currentLine = Math.max(0, Math.trunc(Number(live?.playedLines) || 0));
+  const range = dashboardGcodeWindow(
+    activeGcodeSource.totalLines,
+    currentLine,
+    currentDashboardProfile()?.gcode_lines,
+  );
+  position.textContent = range.current
+    ? `Ln ${range.current} / ${activeGcodeSource.totalLines || "—"}`
+    : (activeGcodeSource.totalLines ? `${activeGcodeSource.totalLines} lines` : "Loading…");
+  if (range.end > range.start) {
+    fetchActiveGcodeSourcePage(range.start);
+    fetchActiveGcodeSourcePage(range.end - 1);
+  } else {
+    fetchActiveGcodeSourcePage(0);
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (let index = range.start; index < range.end; index++) {
+    const lineNumber = index + 1;
+    const row = document.createElement("div");
+    row.className = "dashboard-gcode-line" + (lineNumber === range.current ? " current" : "");
+    if (lineNumber === range.current) row.setAttribute("aria-current", "step");
+    const number = document.createElement("span");
+    number.className = "dashboard-gcode-number";
+    number.textContent = String(lineNumber);
+    number.setAttribute("aria-hidden", "true");
+    const code = document.createElement("span");
+    code.className = "dashboard-gcode-code";
+    code.textContent = activeGcodeSourceLine(index) || " ";
+    row.append(number, code);
+    fragment.appendChild(row);
+  }
+  if (!range.end) {
+    const loading = document.createElement("div");
+    loading.className = "dashboard-gcode-line dashboard-gcode-empty";
+    loading.textContent = "Loading gcode…";
+    fragment.appendChild(loading);
+  }
+  container.replaceChildren(fragment);
+}
+
 function renderDashboard() {
   const machine = state.machine || {};
   const active = state.activeGcode || {};
   const preview = active.preview || {};
-  const geometryReady = activeGcodeGeometry.signature === activeGcodeSourceSignature(active);
-  const dashboardPreview = { ...preview, segments: geometryReady ? activeGcodeGeometry.segments : [] };
+  const dashboardPreview = { ...preview, segments: activeGcodeDisplaySegments(active) };
   const live = active.path ? activeJobPreviewState(machine, dashboardPreview, active.path) : null;
   const setText = (id, value) => {
     const element = document.getElementById(id);
@@ -6893,7 +7432,7 @@ function renderDashboard() {
   const offset = Number(machine.tool?.offset);
   const target = Number(machine.tool?.target);
   setText("dashboard-tool-detail", `${Number.isFinite(offset) ? "TLO " + offset.toFixed(3) : "TLO -"}${Number.isFinite(target) ? " · next " + toolDisplayName(target) : ""}`);
-  setText("dashboard-connection", machine.connected ? "Connected" : (machine.reconnecting ? "Reconnecting" : "Disconnected"));
+  setText("dashboard-connection", machine.stale ? "Stale" : (machine.connected ? "Connected" : (machine.reconnecting ? "Reconnecting" : "Disconnected")));
   setText("dashboard-mode", `${machine.mode || "owner"} · ${fmtAge(machine.age_ms)}`);
   setText("dashboard-job-title", active.path ? relPath(active.path) : "No active gcode selected.");
 
@@ -6903,6 +7442,8 @@ function renderDashboard() {
   setText("dashboard-progress-label", live ? `${live.percent}% · line ${live.playedLines}${lineCount ? " / " + lineCount : ""}` : "Progress");
   setText("dashboard-elapsed", live ? fmtDuration(live.elapsedMs) : "-");
   setText("dashboard-remaining", live && Number.isFinite(live.remainingMs) ? fmtDuration(live.remainingMs) : "-");
+  renderDashboardTelemetry(machine);
+  renderDashboardGcodeStream(live);
   drawDashboardGcodePreview(dashboardPreview, live);
 }
 
@@ -6921,7 +7462,8 @@ function drawDashboardGcodePreview(preview, live = null) {
   const contextKey = activeJobContextOverlayKey(origin);
   const sceneBounds = combineGcodeBounds(preview.bounds, context.bounds);
   const key = [
-    activeGcodeGeometry.signature,
+    activeGcodeSourceSignature(state.activeGcode),
+    activeGcodeGeometry.signature ? "full" : "overview",
     segments.length,
     preview.has_4axis ? "4" : "3",
     contextKey,
@@ -7114,6 +7656,10 @@ async function fetchActiveGcodeSourcePage(index) {
     }
     clearNotice("active-gcode-source");
     renderActiveGcodeSource();
+    const active = state.activeGcode || {};
+    const preview = { ...(active.preview || {}), segments: activeGcodeDisplaySegments(active) };
+    const live = active.path ? activeJobPreviewState(state.machine, preview, active.path) : null;
+    renderDashboardGcodeStream(live);
   } catch (error) {
     if (requestID === activeGcodeSource.requestID) {
       setNotice("Gcode source unavailable: " + error.message, "error", "active-gcode-source");
@@ -11774,9 +12320,7 @@ function clampAxis(v) {
 
 function applySnapshot(snap) {
   if (snap.machine) {
-    state.machine = reconcileObservedMachineStatus(snap.machine);
-    syncActiveGcodeFromMachine(snap.machine);
-    clearNotice("machine-status");
+    applyMachineStatus(snap.machine, false);
   }
   if (Array.isArray(snap.files)) {
     state.files = new Map(snap.files.map((f) => [f.path, f]));
@@ -11793,6 +12337,14 @@ function applySnapshot(snap) {
     document.getElementById("gcode-log").innerHTML = "";
     for (const ln of snap.gcode) appendGcodeLine(ln);
   }
+}
+
+function applyMachineStatus(next, render = true) {
+  if (!next) return;
+  state.machine = reconcileObservedMachineStatus(next);
+  syncActiveGcodeFromMachine(next);
+  clearNotice("machine-status");
+  if (render) renderMachine();
 }
 
 function applyChange(ev) {
@@ -11826,6 +12378,7 @@ function connectControlSSE() {
     clearNotice("control-sse");
     applySnapshot(JSON.parse(e.data));
   });
+  es.addEventListener("machine", (e) => applyMachineStatus(JSON.parse(e.data)));
   es.addEventListener("gcode", (e) => appendGcodeLine(JSON.parse(e.data)));
   es.onerror = () => setNotice("Control event stream disconnected; retrying.", "error", "control-sse");
 }
@@ -11975,10 +12528,7 @@ async function pollMachine() {
   try {
     const r = await request("/api/machine/status");
     const next = await r.json();
-    state.machine = reconcileObservedMachineStatus(next);
-    syncActiveGcodeFromMachine(next);
-    clearNotice("machine-status");
-    renderMachine();
+    applyMachineStatus(next);
   } catch (e) {
     setNotice("Machine status unavailable: " + e.message, "error", "machine-status");
   }
@@ -12055,6 +12605,7 @@ function initializeResponsiveControlSections(isMobile = window.matchMedia?.("(ma
 
 function init() {
   initializeResponsiveControlSections();
+  applyDashboardURLState();
   const drop = document.getElementById("drop");
   const input = document.getElementById("file");
   document.getElementById("header-toggle").onclick = () => setHeaderCollapsed(!document.body.classList.contains("header-collapsed"));
@@ -12075,8 +12626,24 @@ function init() {
       nextTab.focus();
     };
   }
-  window.addEventListener("popstate", () => showTab(viewTabFromURL(), "none"));
+  window.addEventListener("popstate", () => {
+    applyDashboardURLState();
+    showTab(viewTabFromURL(), "none");
+  });
   showTab(viewTabFromURL(), "replace");
+  document.getElementById("dashboard-profile").onchange = (e) => selectDashboardProfile(e.target.value);
+  document.getElementById("dashboard-new").onclick = () => openDashboardSettings(true);
+  document.getElementById("dashboard-configure").onclick = () => openDashboardSettings(false);
+  document.getElementById("dashboard-copy-link").onclick = () => copyDashboardURL(false);
+  document.getElementById("dashboard-copy-obs").onclick = () => copyDashboardURL(true);
+  document.getElementById("dashboard-settings-close").onclick = closeDashboardSettings;
+  document.getElementById("dashboard-settings-cancel").onclick = closeDashboardSettings;
+  document.getElementById("dashboard-save").onclick = saveDashboardProfile;
+  document.getElementById("dashboard-delete").onclick = deleteDashboardProfile;
+  document.getElementById("dashboard-settings-modal").addEventListener("cancel", (e) => {
+    e.preventDefault();
+    closeDashboardSettings();
+  });
   const activeJobLeftTabs = ["source", "console"];
   for (const [index, name] of activeJobLeftTabs.entries()) {
     const tab = document.getElementById("active-job-left-tab-" + name);

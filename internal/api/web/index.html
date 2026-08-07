@@ -14,6 +14,7 @@
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
+  .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
   html { height: 100%; color-scheme: dark; }
   body { height: 100dvh; margin: 0; display: flex; flex-direction: column; overflow: hidden; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
   button, input, select, textarea { font: inherit; }
@@ -176,9 +177,18 @@
   .metric .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
   .metric--wide { grid-column: span 2; }
   .metric--compact { min-width: 130px; }
-  #dashboard-view { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
-  .dashboard-grid { min-height: 0; height: 100%; display: grid; grid-template-columns: minmax(420px, .9fr) minmax(460px, 1.1fr); gap: 12px; }
-  .dashboard-machine, .dashboard-job { min-width: 0; min-height: 0; display: grid; gap: 10px; padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+  #dashboard-view { grid-template-rows: auto minmax(0, 1fr); gap: 8px; overflow: hidden; }
+  .dashboard-toolbar { min-width: 0; display: grid; grid-template-columns: minmax(160px, 260px) repeat(4, max-content); gap: 6px; align-items: center; justify-content: end; }
+  .dashboard-toolbar select { width: 100%; min-width: 0; }
+  .dashboard-grid { min-height: 0; height: 100%; display: grid; gap: 12px; overflow: hidden; }
+  .dashboard-grid.layout-job-focus { grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(0, 1fr); }
+  .dashboard-grid.layout-job-focus.dashboard-job-focus-split { grid-template-columns: minmax(340px, .82fr) minmax(460px, 1.38fr); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+  .dashboard-grid.layout-job-focus.dashboard-job-focus-split .dashboard-job { grid-column: 2; grid-row: 1 / span 3; }
+  .dashboard-grid.layout-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
+  .dashboard-grid.layout-grid.dashboard-panel-count-1 { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .dashboard-grid.layout-grid.dashboard-panel-count-2 { grid-template-rows: minmax(0, 1fr); }
+  .dashboard-grid.layout-stacked { grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(220px, auto); overflow-y: auto; }
+  .dashboard-panel { min-width: 0; min-height: 0; display: grid; gap: 10px; padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .dashboard-machine { grid-template-rows: auto minmax(0, 1fr); }
   .dashboard-heading { min-width: 0; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
   .dashboard-heading h2 { color: var(--text); font-size: 14px; text-transform: none; letter-spacing: 0; }
@@ -202,6 +212,41 @@
   #dashboard-preview, #dashboard-preview-empty { grid-area: 1 / 1; width: 100%; height: 100%; min-height: 0; }
   #dashboard-preview { display: block; }
   #dashboard-preview-empty { z-index: 1; display: grid; place-items: center; color: var(--muted); background: #12171c; pointer-events: none; }
+  .dashboard-telemetry { grid-template-rows: auto minmax(0, 1fr); }
+  .dashboard-telemetry-grid { min-height: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-content: start; overflow-y: auto; }
+  .dashboard-telemetry-item { min-width: 0; min-height: 58px; display: grid; align-content: center; gap: 3px; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); }
+  .dashboard-telemetry-item span { color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+  .dashboard-telemetry-item strong { min-width: 0; color: var(--text); font: 650 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  #dashboard-telemetry-empty { grid-column: 1 / -1; align-self: center; color: var(--muted); text-align: center; }
+  .dashboard-gcode { grid-template-rows: auto minmax(0, 1fr); }
+  #dashboard-gcode-position { color: var(--muted); font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
+  .dashboard-gcode-lines { min-height: 0; display: grid; align-content: center; overflow: hidden; background: #12171c; border: 1px solid var(--border); border-radius: var(--radius); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .dashboard-gcode-line { min-width: 0; min-height: 0; display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 10px; align-items: center; padding: 0 8px; color: var(--muted); }
+  .dashboard-gcode-line.current { color: var(--text); background: rgba(87,166,214,.18); box-shadow: 3px 0 0 var(--accent) inset; }
+  .dashboard-gcode-line.dashboard-gcode-empty { grid-template-columns: minmax(0, 1fr); padding: 8px; }
+  .dashboard-gcode-number { color: #687784; text-align: right; font-variant-numeric: tabular-nums; }
+  .dashboard-gcode-code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+  .dashboard-density-compact.dashboard-grid { gap: 8px; }
+  .dashboard-density-compact .dashboard-panel { gap: 6px; padding: 8px; }
+  .dashboard-density-compact .dashboard-metric { min-height: 60px; padding: 6px 8px; }
+  .dashboard-density-compact .dashboard-telemetry-item { min-height: 48px; padding: 6px 8px; }
+  body.dashboard-background-transparent { background: transparent; }
+  body.dashboard-background-transparent .dashboard-panel { background: rgba(24,29,31,.76); }
+  body.dashboard-embed header, body.dashboard-embed main > .page-section, body.dashboard-embed .dashboard-toolbar, body.dashboard-embed #status-bar { display: none !important; }
+  body.dashboard-embed main { height: 100dvh; padding: 0; grid-template-rows: minmax(0, 1fr); }
+  body.dashboard-embed #dashboard-view { height: 100dvh; grid-template-rows: minmax(0, 1fr); padding: 8px; overflow: hidden; scrollbar-gutter: auto; }
+  #dashboard-settings-modal { width: min(640px, calc(100vw - 24px)); }
+  .dashboard-settings-body { max-height: calc(100dvh - 96px); overflow-y: auto; padding: 16px; display: grid; gap: 16px; }
+  .dashboard-settings-fields { display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(110px, 1fr)); gap: 8px; }
+  .dashboard-settings-fields label { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+  .dashboard-settings-fields input, .dashboard-settings-fields select { width: 100%; min-width: 0; }
+  .dashboard-default-toggle { display: inline-flex !important; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px !important; }
+  .dashboard-panel-order { display: grid; gap: 6px; }
+  .dashboard-panel-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 36px 36px; gap: 6px; align-items: center; min-height: 38px; padding: 4px 6px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+  .dashboard-panel-row label { display: contents; }
+  .dashboard-panel-row button { width: 36px; min-width: 36px; padding: 0; }
+  .dashboard-settings-actions { position: sticky; bottom: 0; z-index: 1; display: flex; justify-content: space-between; gap: 8px; padding-block: 8px calc(8px + env(safe-area-inset-bottom)); background: var(--panel); box-shadow: 0 -1px 0 var(--border); }
+  .dashboard-settings-actions > div { display: flex; gap: 8px; }
   .action-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 10px; margin: 0; min-width: 0; }
   .action-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
   .action-row label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -598,8 +643,10 @@
     #file-table .file-col-modified, #file-table thead th:nth-child(4), #file-table .file-modified-cell { display: none; }
     .file-col-actions { width: 32%; }
     .file-col-status { width: 15%; }
-    #dashboard-view { grid-template-rows: auto; align-content: start; overflow-y: auto; }
-    .dashboard-grid { height: auto; grid-template-columns: 1fr; grid-template-rows: auto auto; align-content: start; align-self: start; overflow: visible; }
+    #dashboard-view { grid-template-rows: auto auto; align-content: start; overflow-y: auto; }
+    .dashboard-toolbar { grid-template-columns: minmax(140px, 1fr) repeat(4, max-content); justify-content: stretch; }
+    .dashboard-grid, .dashboard-grid.layout-job-focus, .dashboard-grid.layout-job-focus.dashboard-job-focus-split, .dashboard-grid.layout-grid { height: auto; grid-template-columns: 1fr; grid-template-rows: none; grid-auto-rows: minmax(220px, auto); align-content: start; align-self: start; overflow: visible; }
+    .dashboard-grid.layout-job-focus.dashboard-job-focus-split .dashboard-job { grid-column: auto; grid-row: auto; }
     .dashboard-machine { min-height: 0; grid-template-rows: auto auto; }
     .dashboard-job { min-height: 0; grid-template-rows: auto auto auto; }
     .dashboard-preview-frame { min-height: 0; aspect-ratio: 16 / 9; }
@@ -642,6 +689,10 @@
     #alarm-panel { grid-template-columns: 1fr; }
     #alarm-actions { justify-content: stretch; }
     .metric--wide { grid-column: auto; }
+    .dashboard-toolbar { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .dashboard-toolbar select { grid-column: 1 / -1; }
+    .dashboard-toolbar button { width: 100%; min-width: 0; padding-inline: 8px; justify-content: center; }
+    .dashboard-settings-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .workarea-frame { height: clamp(280px, 48vh, 460px); min-height: 280px; }
     .z-step-controls { grid-template-columns: 1fr auto 1fr; grid-template-rows: auto; }
     .z-step-controls button { min-height: 48px; }
@@ -680,7 +731,7 @@
     .command-panel::before { display: none; }
     .command-panel-close { position: sticky; top: 0; z-index: 2; display: inline-flex; width: 100%; min-height: 44px; justify-content: center; background: #252b2d; box-shadow: 0 1px 0 var(--border); }
     .dashboard-grid { gap: 8px; }
-    .dashboard-machine, .dashboard-job { gap: 8px; padding: 10px; }
+    .dashboard-panel { gap: 8px; padding: 10px; }
     #dashboard-state { display: none; }
     .dashboard-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .dashboard-metric { min-height: 68px; padding: 8px 10px; }
@@ -692,6 +743,10 @@
     .dashboard-progress-main { grid-column: 1 / -1; }
     .dashboard-preview-frame { width: 100%; }
     .dashboard-job.is-empty .dashboard-progress, .dashboard-job.is-empty .dashboard-preview-frame { display: none; }
+    .dashboard-settings-fields { grid-template-columns: 1fr; }
+    .dashboard-settings-actions { display: grid; grid-template-columns: 1fr; }
+    .dashboard-settings-actions > div { display: grid; grid-template-columns: 1fr 1fr; }
+    .dashboard-settings-actions button { min-height: 44px; }
     .active-gcode-head { gap: 10px; }
     .active-gcode-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
     .active-gcode-stat > strong { font-size: 13px; }
@@ -955,8 +1010,16 @@
   </section>
 
   <section id="dashboard-view" class="view" role="tabpanel" aria-labelledby="tab-dashboard" hidden>
-    <section class="dashboard-grid" aria-label="Machine and active job summary">
-      <div class="dashboard-machine">
+    <div class="dashboard-toolbar" aria-label="Dashboard layouts">
+      <label class="visually-hidden" for="dashboard-profile">Dashboard layout</label>
+      <select id="dashboard-profile" aria-label="Dashboard layout"></select>
+      <button type="button" id="dashboard-new">New</button>
+      <button type="button" id="dashboard-configure">Configure</button>
+      <button type="button" id="dashboard-copy-link">Copy link</button>
+      <button type="button" id="dashboard-copy-obs">OBS link</button>
+    </div>
+    <section class="dashboard-grid layout-job-focus dashboard-job-focus-split dashboard-panel-count-4" aria-label="Machine and active job summary">
+      <section class="dashboard-panel dashboard-machine" data-dashboard-panel="machine">
         <div class="dashboard-heading"><h2>Machine</h2><span id="dashboard-state" class="badge state-Unknown">Unknown</span></div>
         <div class="dashboard-metrics">
           <div class="dashboard-metric dashboard-position-metric"><span>Work position</span><strong id="dashboard-wpos">-</strong><b id="dashboard-mpos">-</b></div>
@@ -966,8 +1029,8 @@
           <div class="dashboard-metric"><span>Tool</span><strong id="dashboard-tool">-</strong><b id="dashboard-tool-detail">-</b></div>
           <div class="dashboard-metric"><span>Connection</span><strong id="dashboard-connection">-</strong><b id="dashboard-mode">-</b></div>
         </div>
-      </div>
-      <div class="dashboard-job">
+      </section>
+      <section class="dashboard-panel dashboard-job" data-dashboard-panel="job">
         <div class="dashboard-heading"><h2>Current job</h2><div id="dashboard-job-title">No active gcode selected.</div></div>
         <div class="dashboard-progress">
           <div class="dashboard-progress-main"><span id="dashboard-progress-label">Progress</span><progress id="dashboard-progress-bar" max="100" value="0"></progress></div>
@@ -978,7 +1041,27 @@
           <canvas id="dashboard-preview" role="img" aria-label="Active job 3D preview"></canvas>
           <div id="dashboard-preview-empty">No plotted moves</div>
         </div>
-      </div>
+      </section>
+      <section class="dashboard-panel dashboard-telemetry" data-dashboard-panel="telemetry">
+        <div class="dashboard-heading"><h2>Machine telemetry</h2></div>
+        <div class="dashboard-telemetry-grid">
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="rotary"><span>Rotary position</span><strong id="dashboard-rotary">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="probe"><span>Wireless probe</span><strong id="dashboard-probe-voltage">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="vacuum"><span>Vacuum</span><strong id="dashboard-vacuum">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="air"><span>Air</span><strong id="dashboard-air">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="outputs"><span>Outputs</span><strong id="dashboard-outputs">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="laser"><span>Laser</span><strong id="dashboard-laser">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="atc"><span>ATC operation</span><strong id="dashboard-atc">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="leveling"><span>Auto leveling</span><strong id="dashboard-leveling">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="controller"><span>Controller mode</span><strong id="dashboard-controller">-</strong></div>
+          <div class="dashboard-telemetry-item" data-dashboard-telemetry="alarm"><span>Alarm</span><strong id="dashboard-alarm">-</strong></div>
+          <div id="dashboard-telemetry-empty" hidden>No optional telemetry reported</div>
+        </div>
+      </section>
+      <section class="dashboard-panel dashboard-gcode" data-dashboard-panel="gcode">
+        <div class="dashboard-heading"><h2>Gcode stream</h2><div id="dashboard-gcode-position">-</div></div>
+        <div id="dashboard-gcode-lines" class="dashboard-gcode-lines" aria-label="Gcode around the current job line"></div>
+      </section>
     </section>
   </section>
 
@@ -1361,6 +1444,30 @@
     </section>
   </section>
 </main>
+<dialog id="dashboard-settings-modal" aria-labelledby="dashboard-settings-title">
+  <div class="machine-settings-modal-head">
+    <h2 id="dashboard-settings-title">Dashboard layout</h2>
+    <button type="button" id="dashboard-settings-close" aria-label="Close dashboard layout">Close</button>
+  </div>
+  <div class="dashboard-settings-body">
+    <div class="dashboard-settings-fields">
+      <label><span>Name</span><input id="dashboard-profile-name" type="text" maxlength="80" autocomplete="off"></label>
+      <label><span>Organization</span><select id="dashboard-layout"><option value="job-focus">Job focus</option><option value="grid">Grid</option><option value="stacked">Stacked</option></select></label>
+      <label><span>Density</span><select id="dashboard-density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
+      <label><span>Background</span><select id="dashboard-background"><option value="solid">Solid</option><option value="transparent">Transparent</option></select></label>
+    </div>
+    <label class="dashboard-default-toggle"><input id="dashboard-default" type="checkbox"><span>Use as default dashboard</span></label>
+    <section aria-labelledby="dashboard-panels-title">
+      <h2 id="dashboard-panels-title">Panels and order</h2>
+      <div id="dashboard-panel-order" class="dashboard-panel-order"></div>
+    </section>
+    <label><span>Visible gcode lines</span><input id="dashboard-gcode-lines-count" type="number" min="3" max="30" step="2" inputmode="numeric"></label>
+    <div class="dashboard-settings-actions">
+      <button type="button" id="dashboard-delete" class="danger">Delete</button>
+      <div><button type="button" id="dashboard-settings-cancel">Cancel</button><button type="button" id="dashboard-save" class="primary">Save</button></div>
+    </div>
+  </div>
+</dialog>
 <dialog id="origin-xyz-modal" class="origin-modal" aria-labelledby="origin-xyz-title">
   <div class="machine-settings-modal-head">
     <h2 id="origin-xyz-title">Set XYZ</h2>
@@ -1508,6 +1615,6 @@
 <div id="status-bar" role="status" aria-live="polite" hidden>
   <div id="notice"></div>
 </div>
-<script type="module" src="/app.js?v=tab-routes-1"></script>
+<script type="module" src="/app.js?v=dashboard-layouts-1"></script>
 </body>
 </html>

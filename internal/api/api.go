@@ -15,6 +15,7 @@ import (
 
 	"github.com/uwin/cnc-proxy/internal/gcodelog"
 	"github.com/uwin/cnc-proxy/internal/jog"
+	"github.com/uwin/cnc-proxy/internal/machine"
 	"github.com/uwin/cnc-proxy/internal/service"
 	"github.com/uwin/cnc-proxy/internal/session"
 	"github.com/uwin/cnc-proxy/internal/store"
@@ -784,6 +785,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	includeFiles := scope == "" || scope == "all" || scope == "files"
 	includeGcode := scope == "" || scope == "all" || scope == "control"
+	includeMachine := scope == "" || scope == "all" || scope == "control" || scope == "files"
 
 	var ch <-chan store.Event
 	var unsub func()
@@ -796,6 +798,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if includeGcode {
 		gch, gunsub = s.svc.GcodeLog().Subscribe()
 		defer gunsub()
+	}
+	var mch <-chan machine.Status
+	var munsub func()
+	if includeMachine {
+		mch, munsub = s.svc.SubscribeMachineStatus()
+		defer munsub()
 	}
 
 	// Send an initial snapshot so a fresh client is immediately consistent.
@@ -830,6 +838,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sendEvent(w, "gcode", ln)
+			flusher.Flush()
+		case _, ok := <-mch:
+			if !ok {
+				return
+			}
+			sendEvent(w, "machine", s.svc.Status())
 			flusher.Flush()
 		}
 	}

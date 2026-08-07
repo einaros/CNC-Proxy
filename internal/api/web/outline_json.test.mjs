@@ -147,6 +147,7 @@ test("outline file load reports transient completion only through the bottom sta
     state,
     confirm: () => true,
     outlineStateFromJSON: () => loaded,
+    cancelOutlineCaptureIntents: () => {},
     markGcodeContextOverlayDirty: () => {},
     updateFieldProbePreview: () => { previewUpdates++; },
     renderOutlineCapture: () => {},

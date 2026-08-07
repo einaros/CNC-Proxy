@@ -323,8 +323,9 @@ test("summary dashboard uses the full Active job 3D scene and live cursor", () =
     canvas: { setAttribute: (name, value) => { attributes[name] = value; } },
   };
   const ctx = buildContext(["drawDashboardGcodePreview"], [], {
-    state: { outline: {} },
+    state: { outline: {}, activeGcode: { path: "/sd/gcodes/part.nc" } },
     activeGcodeGeometry: { signature: "full-geometry-signature" },
+    activeGcodeSourceSignature: () => "full-geometry-signature",
     dashboardGcodeView,
     clearDashboardGcodeScene: () => assert.fail("nonempty scene was cleared"),
     setDashboardGcodePreviewEmpty: (text) => { emptyText = text; },
@@ -357,6 +358,112 @@ test("summary dashboard uses the full Active job 3D scene and live cursor", () =
   assert.equal(emptyText, "");
   assert.equal(renderCount, 1);
   assert.match(attributes["aria-label"], /Active job 3D preview; live spindle/);
+});
+
+test("dashboard profiles normalize durable organization and bounded gcode lines", () => {
+  const ctx = buildContext(
+    ["defaultDashboardSettings", "normalizeDashboardSettings"],
+    ["DASHBOARD_PANEL_DEFS"],
+  );
+  const normalized = JSON.parse(vm.runInContext(`JSON.stringify(normalizeDashboardSettings({
+    profiles: [{
+      id: "camera",
+      name: " Camera view ",
+      layout: "grid",
+      density: "compact",
+      background: "transparent",
+      panels: ["job", "gcode", "job", "unknown"],
+      gcode_lines: 17
+    }],
+    default_profile_id: "camera"
+  }))`, ctx));
+  assert.deepEqual(normalized, {
+    profiles: [{
+      id: "camera",
+      name: "Camera view",
+      layout: "grid",
+      density: "compact",
+      background: "transparent",
+      panels: ["job", "gcode"],
+      gcode_lines: 17,
+    }],
+    default_profile_id: "camera",
+  });
+});
+
+test("dashboard URLs select named profiles and expose an OBS embed mode", () => {
+  const ctx = buildContext(["dashboardURLState"], [], { URLSearchParams });
+  assert.deepEqual(
+    JSON.parse(vm.runInContext(`JSON.stringify(dashboardURLState({ search: "?profile=camera&embed=1" }))`, ctx)),
+    { profile: "camera", embed: true },
+  );
+  assert.deepEqual(
+    JSON.parse(vm.runInContext(`JSON.stringify(dashboardURLState({ search: "?profile=overview" }))`, ctx)),
+    { profile: "overview", embed: false },
+  );
+});
+
+test("dashboard URL profile resolution applies the saved organization after settings load", () => {
+  const profiles = [
+    { id: "overview", name: "Overview", layout: "job-focus", density: "comfortable", background: "solid", panels: ["machine", "job"], gcode_lines: 9 },
+    { id: "recording", name: "Recording", layout: "grid", density: "compact", background: "transparent", panels: ["job", "gcode"], gcode_lines: 15 },
+  ];
+  const state = {
+    dashboardRequestedProfileID: "recording",
+    dashboardProfileID: "overview",
+    ui: { dashboard: { profiles, default_profile_id: "overview" } },
+  };
+  let applied = null;
+  let controls = 0;
+  let renders = 0;
+  const ctx = buildContext(
+    ["dashboardProfileByID", "currentDashboardProfile", "resolveDashboardProfile"],
+    [],
+    {
+      state,
+      normalizeDashboardSettings: (settings) => settings,
+      renderDashboardProfileControls: () => { controls++; },
+      applyDashboardProfile: (profile) => { applied = profile; },
+      renderDashboard: () => { renders++; },
+    },
+  );
+  vm.runInContext(`resolveDashboardProfile()`, ctx);
+  assert.equal(state.dashboardProfileID, "recording");
+  assert.equal(applied, profiles[1]);
+  assert.equal(controls, 1);
+  assert.equal(renders, 1);
+});
+
+test("dashboard gcode stream remains a bounded window around the current line", () => {
+  const ctx = buildContext(["dashboardGcodeWindow"]);
+  const ranges = JSON.parse(vm.runInContext(`JSON.stringify([
+    dashboardGcodeWindow(200000, 100000, 9),
+    dashboardGcodeWindow(5, 1, 9),
+    dashboardGcodeWindow(200000, 0, 30),
+    dashboardGcodeWindow(0, 0, 9)
+  ])`, ctx));
+  assert.deepEqual(ranges, [
+    { start: 99995, end: 100004, current: 100000 },
+    { start: 0, end: 5, current: 1 },
+    { start: 0, end: 30, current: 0 },
+    { start: 0, end: 0, current: 0 },
+  ]);
+});
+
+test("active gcode uses the summary overview until streamed full geometry is ready", () => {
+  const state = { activeGcode: {} };
+  const active = { path: "/sd/gcodes/part.nc", preview: { overview_segments: [{ line: 1 }, { line: 99 }] } };
+  const ctx = buildContext(["activeGcodeDisplaySegments"], [], {
+    activeGcodeGeometry: { signature: "", segments: [] },
+    activeGcodeSourceSignature: () => "part-signature",
+  });
+  ctx.active = active;
+  assert.deepEqual(
+    JSON.parse(vm.runInContext(`JSON.stringify(activeGcodeDisplaySegments(active))`, ctx)),
+    active.preview.overview_segments,
+  );
+  vm.runInContext(`activeGcodeGeometry.signature = "part-signature"; activeGcodeGeometry.segments = [{line: 1}, {line: 2}, {line: 3}]`, ctx);
+  assert.equal(vm.runInContext(`activeGcodeDisplaySegments(active).length`, ctx), 3);
 });
 
 test("gcode source lines preserve instruction numbering across newline styles", () => {

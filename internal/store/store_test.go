@@ -142,6 +142,13 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 		}},
 		MacroButtons: []MacroSlot{{ID: "slot1", MacroID: "probe", Region: "toolbar", Order: 4}},
 		Log:          LogSettings{Filter: "jog", Autoscroll: false},
+		Dashboard: DashboardSettings{
+			Profiles: []DashboardProfile{
+				{ID: "overview", Name: "Overview", Layout: "job-focus", Density: "comfortable", Background: "solid", Panels: []string{"machine", "job"}, GcodeLines: 9},
+				{ID: "recording", Name: "Recording", Layout: "grid", Density: "compact", Background: "transparent", Panels: []string{"job", "gcode", "telemetry"}, GcodeLines: 17},
+			},
+			DefaultProfileID: "recording",
+		},
 		Machine: MachineUI{
 			WorkArea:      WorkArea{XMin: -300, XMax: 5, YMin: -210, YMax: 10},
 			Origin:        XYPoint{X: 1, Y: 2},
@@ -194,6 +201,9 @@ func TestUISettingsPersistenceRoundTrip(t *testing.T) {
 	}
 	if got.Log.Filter != "jog" || got.Log.Autoscroll {
 		t.Fatalf("reopened log settings = %+v", got.Log)
+	}
+	if len(got.Dashboard.Profiles) != 2 || got.Dashboard.DefaultProfileID != "recording" || got.Dashboard.Profiles[1].Background != "transparent" || got.Dashboard.Profiles[1].GcodeLines != 17 {
+		t.Fatalf("reopened dashboard settings = %+v", got.Dashboard)
 	}
 	if got.Machine.WorkArea.XMin != -300 || got.Machine.WorkArea.YMax != 10 || got.Machine.Origin.Y != 2 || got.Machine.FeedMinMMMin != 100 || got.Machine.FeedMaxMMMin != 1800 || got.Machine.TapFeedMMMin != 700 || got.Machine.SafeZMM != -1.5 || !got.Machine.SafeZDisabled {
 		t.Fatalf("reopened machine settings = %+v", got.Machine)
@@ -250,6 +260,7 @@ func TestUISettingsCopiesAndNormalizesSlots(t *testing.T) {
 	got.Machine.Learned.Diagnostics = map[string][]float64{"E": {9}}
 	got.Gamepad.SlowButtons = append(got.Gamepad.SlowButtons, 9)
 	got.Gamepad.MacroButtons = append(got.Gamepad.MacroButtons, GamepadMacroButton{ID: "x", Button: 2, MacroID: "probe"})
+	got.Dashboard.Profiles[0].Panels[0] = "gcode"
 	gotAgain := s.UISettings()
 	if gotAgain.Macros[0].Lines[0] != "M114" {
 		t.Fatalf("UISettings returned shared macro lines: %+v", gotAgain.Macros)
@@ -262,6 +273,21 @@ func TestUISettingsCopiesAndNormalizesSlots(t *testing.T) {
 	}
 	if len(gotAgain.Gamepad.SlowButtons) != 2 || len(gotAgain.Gamepad.MacroButtons) != 0 {
 		t.Fatalf("UISettings returned shared gamepad slices: %+v", gotAgain.Gamepad)
+	}
+	if gotAgain.Dashboard.Profiles[0].Panels[0] != "machine" {
+		t.Fatalf("UISettings returned shared dashboard panels: %+v", gotAgain.Dashboard)
+	}
+}
+
+func TestUISettingsDashboardDefaults(t *testing.T) {
+	s, _ := Open("")
+	got := s.UISettings().Dashboard
+	if got.DefaultProfileID != "overview" || len(got.Profiles) != 1 {
+		t.Fatalf("default dashboard = %+v", got)
+	}
+	profile := got.Profiles[0]
+	if profile.Layout != "job-focus" || profile.Density != "comfortable" || profile.Background != "solid" || profile.GcodeLines != 9 || len(profile.Panels) != 4 {
+		t.Fatalf("default dashboard profile = %+v", profile)
 	}
 }
 

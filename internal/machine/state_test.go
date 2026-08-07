@@ -34,7 +34,7 @@ func TestParseStatus(t *testing.T) {
 }
 
 func TestParseStatusPayloadRichFields(t *testing.T) {
-	st, ok := ParseStatusPayload("<Run|MPos:1.25,-2.5,3.75,4,5|WPos:6,7,8|F:10,20,150|S:1000,12000,80,1,31.5,42.0,0,0,1|T:2,12.345,3|H:10|P:100,45,12|C:1,7,0,1>")
+	st, ok := ParseStatusPayload("<Run|MPos:1.25,-2.5,3.75,4,5|WPos:6,7,8|F:10,20,150|S:1000,12000,80,1,31.5,42.0,1,0,1|T:2,12.345,3|W:3.72|L:1,1,0,42.5,80|A:5|O:0.125|H:10|P:100,45,12|C:2,7,0,1>")
 	if !ok {
 		t.Fatal("status should parse")
 	}
@@ -56,7 +56,7 @@ func TestParseStatusPayloadRichFields(t *testing.T) {
 	if st.Spindle == nil || st.Spindle.CurrentRPM != 1000 || st.Spindle.TargetRPM != 12000 || st.Spindle.Override != 80 {
 		t.Fatalf("spindle = %+v", st.Spindle)
 	}
-	if st.Spindle.VacuumMode == nil || *st.Spindle.VacuumMode != 1 || st.Spindle.SpindleTempC == nil || *st.Spindle.SpindleTempC != 31.5 || st.Spindle.PowerTempC == nil || *st.Spindle.PowerTempC != 42 || st.Spindle.ExternalMode == nil || *st.Spindle.ExternalMode != 1 {
+	if st.Spindle.VacuumMode == nil || *st.Spindle.VacuumMode != 1 || st.Spindle.SpindleTempC == nil || *st.Spindle.SpindleTempC != 31.5 || st.Spindle.PowerTempC == nil || *st.Spindle.PowerTempC != 42 || st.Spindle.BlowingMode == nil || *st.Spindle.BlowingMode != 1 || st.Spindle.BedCleanMode == nil || *st.Spindle.BedCleanMode != 0 || st.Spindle.ExternalMode == nil || *st.Spindle.ExternalMode != 1 {
 		t.Fatalf("extended spindle status = %+v", st.Spindle)
 	}
 	if st.Tool == nil || st.Tool.Active != 2 || st.Tool.Offset != 12.345 || st.Tool.Target == nil || *st.Tool.Target != 3 {
@@ -64,6 +64,12 @@ func TestParseStatusPayloadRichFields(t *testing.T) {
 	}
 	if st.HaltReason == nil || st.HaltReason.Code != 10 || st.HaltReason.Message != "Soft limit triggered" || st.HaltReason.Recovery != "unlock" {
 		t.Fatalf("halt reason = %+v", st.HaltReason)
+	}
+	if st.ProbeV == nil || *st.ProbeV != 3.72 || st.Laser == nil || !st.Laser.Mode || !st.Laser.State || st.Laser.Testing || st.Laser.Power != 42.5 || st.Laser.Scale != 80 {
+		t.Fatalf("probe/laser status = probe:%v laser:%+v", st.ProbeV, st.Laser)
+	}
+	if st.ATCState == nil || *st.ATCState != 5 || st.LevelDelta == nil || *st.LevelDelta != 0.125 || st.Controller == nil || st.Controller.Model != 2 || st.Controller.Functions != 7 || st.Controller.InchMode || !st.Controller.AbsoluteMode {
+		t.Fatalf("controller status = atc:%v leveling:%v controller:%+v", st.ATCState, st.LevelDelta, st.Controller)
 	}
 	if len(st.Progress) != 3 || st.Progress[1] != 45 {
 		t.Fatalf("progress = %+v", st.Progress)
