@@ -161,6 +161,9 @@ Then:
   `GET|PUT /api/ui/settings` (durable web UI macros/layout/log/gamepad preferences),
   `GET /api/jog/capabilities`, and authenticated `GET /api/jog/ws` WebSocket
   for low-latency gamepad jogging.
+  - **Home Assistant and automation:** use the existing JSON machine snapshot
+    and realtime control API. See [Home Assistant and automation API](docs/home-assistant.md)
+    for a complete authenticated REST sensor and halt-command configuration.
   - **Injecting gcode** works whether the proxy runs alone (owner mode) or with
     the official controller attached (relay mode — injected between the
     controller's transactions). Read-only queries (`M114`, `M115`, `version`,

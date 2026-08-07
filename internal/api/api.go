@@ -140,6 +140,7 @@ func requestBodyTooLarge(err error) bool {
 }
 
 func (s *Server) getMachine(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, s.svc.Status())
 }
 
@@ -681,13 +682,16 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var c byte
+	canonicalAction := action
 	switch action {
 	case "hold", "feedhold":
 		c = service.ControlFeedHold
+		canonicalAction = "hold"
 	case "resume":
 		c = service.ControlResume
 	case "halt", "stop", "estop":
 		c = service.ControlHalt
+		canonicalAction = "halt"
 	default:
 		writeErr(w, http.StatusBadRequest, "action must be one of: hold, resume, halt, pause_job, resume_job, recover, unlock, home, reset")
 		return
@@ -696,7 +700,28 @@ func (s *Server) postControl(w http.ResponseWriter, r *http.Request) {
 		s.mapError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, http.StatusAccepted, struct {
+		Action   string `json:"action"`
+		Accepted bool   `json:"accepted"`
+		Message  string `json:"message"`
+	}{
+		Action:   canonicalAction,
+		Accepted: true,
+		Message:  realtimeControlMessage(canonicalAction),
+	})
+}
+
+func realtimeControlMessage(action string) string {
+	switch action {
+	case "hold":
+		return "Hold command sent."
+	case "resume":
+		return "Resume command sent."
+	case "halt":
+		return "Halt command sent."
+	default:
+		return "Realtime control command sent."
+	}
 }
 
 func (s *Server) postFeedOverride(w http.ResponseWriter, r *http.Request) {

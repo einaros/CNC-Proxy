@@ -675,18 +675,39 @@ func TestMachineEndpoint(t *testing.T) {
 
 func TestMachineStatusEndpointRichFields(t *testing.T) {
 	srv, _, tr := serverWithMachine(t)
-	tr.ObserveStatusPayload("<Idle|MPos:1,2,3|WPos:4,5,6|F:0,100,100>")
+	tr.ObserveStatusPayload("<Run|MPos:1.25,-2.5,3.75|WPos:6,7,8|F:10,20,150|S:1000,12000,80,1,31.5,42.0,0,0,1|T:2,12.345,3|H:10|P:100,45,12|C:1,7,0,1>")
 	resp := get(t, srv.URL+"/api/machine/status")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
 	var st service.MachineStatus
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	if st.State != machine.Idle || st.MPos["x"] != 1 || st.WPos["z"] != 6 || st.Feed == nil {
-		t.Fatalf("machine status = %+v", st)
+	if st.State != machine.Run || !st.Connected || st.Stale || st.ObservedAt.IsZero() {
+		t.Fatalf("connection status = %+v", st)
+	}
+	if st.MPos["x"] != 1.25 || st.MPos["y"] != -2.5 || st.MPos["z"] != 3.75 || st.WPos["x"] != 6 || st.WPos["y"] != 7 || st.WPos["z"] != 8 {
+		t.Fatalf("positions = mpos:%+v wpos:%+v", st.MPos, st.WPos)
+	}
+	if st.Feed == nil || st.Feed.Current != 10 || st.Feed.Target != 20 || st.Feed.Override != 150 {
+		t.Fatalf("feed = %+v", st.Feed)
+	}
+	if st.Spindle == nil || st.Spindle.CurrentRPM != 1000 || st.Spindle.TargetRPM != 12000 || st.Spindle.SpindleTempC == nil || *st.Spindle.SpindleTempC != 31.5 || st.Spindle.PowerTempC == nil || *st.Spindle.PowerTempC != 42 {
+		t.Fatalf("spindle = %+v", st.Spindle)
+	}
+	if st.Tool == nil || st.Tool.Active != 2 || st.Tool.Offset != 12.345 || st.Tool.Target == nil || *st.Tool.Target != 3 {
+		t.Fatalf("tool = %+v", st.Tool)
+	}
+	if st.HaltReason == nil || st.HaltReason.Code != 10 || len(st.Progress) != 3 || len(st.Machine) != 4 {
+		t.Fatalf("extended status = halt:%+v progress:%+v machine:%+v", st.HaltReason, st.Progress, st.Machine)
+	}
+	if st.ActiveJob == nil || st.ActiveJob.PlayedLines != 100 || st.ActiveJob.Percent != 45 || st.ActiveJob.ElapsedMs != 12000 || st.ActiveJob.RemainingMs == nil || *st.ActiveJob.RemainingMs != 14000 {
+		t.Fatalf("active job = %+v", st.ActiveJob)
 	}
 }
 
@@ -2373,9 +2394,22 @@ func TestPostControl(t *testing.T) {
 
 	for _, action := range []string{"hold", "resume", "halt"} {
 		resp := postJSON(t, srv.URL+"/api/control", map[string]string{"action": action})
-		resp.Body.Close()
 		if resp.StatusCode != http.StatusAccepted {
+			resp.Body.Close()
 			t.Fatalf("control %q: status = %d, want 202", action, resp.StatusCode)
+		}
+		var result struct {
+			Action   string `json:"action"`
+			Accepted bool   `json:"accepted"`
+			Message  string `json:"message"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			t.Fatalf("control %q response: %v", action, err)
+		}
+		resp.Body.Close()
+		if result.Action != action || !result.Accepted || result.Message == "" {
+			t.Fatalf("control %q response = %+v", action, result)
 		}
 	}
 	deadline := time.Now().Add(time.Second)
