@@ -120,7 +120,6 @@
   #alarm-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
   #alarm-actions button { border-color: rgba(232,106,95,.45); }
   .toolbar { display: flex; gap: 10px; align-items: center; margin: 0; }
-  #drop { flex: 1; border: 1px dashed var(--border); border-radius: var(--radius); padding: 14px; text-align: center; color: var(--muted); cursor: pointer; background: var(--panel); min-width: min(100%, 260px); }
   #drop.over { border-color: var(--accent); color: var(--accent); }
   input[type="search"], input[type="text"], input[type="number"], #gcode-input, select { height: var(--control-h); min-height: var(--control-h); background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 0 10px; }
   select option { background: #fff; color: #18202a; }
@@ -593,8 +592,13 @@
   .control-command-drawer .gamepad-axis-row label:last-child { grid-column: 2 / -1; }
   .control-command-drawer .gamepad-bindings-head, .control-command-drawer .gamepad-binding { grid-template-columns: 70px minmax(0, 1fr) auto; }
   .empty.compact { padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
-  #file-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; min-width: 0; }
-  .summary-pill { flex: 0 0 auto; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; color: var(--muted); font-size: 12px; }
+  #files-view { --files-control-h: 38px; align-content: start; }
+  .files-toolbar { min-width: 0; display: grid; grid-template-columns: minmax(260px, 360px) minmax(220px, 320px) minmax(0, 1fr); gap: 8px; align-items: center; }
+  #drop, #filter { width: 100%; min-width: 0; height: var(--files-control-h); min-height: var(--files-control-h); }
+  #drop { justify-content: flex-start; padding: 0 12px; color: var(--muted); background: var(--panel); border-style: dashed; font-weight: 550; }
+  #file-summary { height: var(--files-control-h); min-width: 0; display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
+  #file-summary .summary-pill:first-child { display: none; }
+  .summary-pill { flex: 0 0 auto; min-height: 28px; display: inline-flex; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; color: var(--muted); font-size: 12px; }
   #file-browser { display: grid; grid-template-columns: minmax(220px, 260px) minmax(0, 1fr); gap: 12px; align-items: start; }
   #folder-sidebar { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   #folder-sidebar .side-title { padding: 8px 10px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); }
@@ -604,9 +608,10 @@
   #file-main { min-width: 0; display: grid; gap: var(--gap-sm); }
   #folder-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; margin: 0; }
   #breadcrumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
-  #breadcrumbs button { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #breadcrumbs button { max-width: 170px; height: var(--files-control-h); min-height: var(--files-control-h); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .crumb-sep { color: var(--muted); }
   #folder-actions { display: grid; grid-template-columns: minmax(0, 240px) max-content max-content; gap: 6px; align-items: center; justify-content: flex-end; min-width: 0; }
+  #folder-actions button { height: var(--files-control-h); min-height: var(--files-control-h); }
   #current-folder { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-name { display: inline; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; overflow-wrap: anywhere; }
   .file-name:hover { color: var(--accent); border: 0; }
@@ -620,7 +625,7 @@
   .file-col-status { width: 13%; }
   .file-col-actions { width: 28%; }
   @media (min-width: 881px) {
-    #folder-sidebar { position: sticky; top: 142px; }
+    #folder-sidebar { position: sticky; top: 0; }
     #active-job-view { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }
     #active-job-view > .page-section { min-height: 0; height: 100%; align-content: stretch; }
     #active-gcode-panel { min-height: 0; height: 100%; grid-template-rows: minmax(0, 1fr); align-content: stretch; }
@@ -787,15 +792,15 @@
     #workarea-actions-panel .workarea-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
     #workarea-actions-panel .workarea-controls button, #workarea-actions-panel .outline-preview-controls button, #workarea-actions-panel .outline-active-controls label { min-height: 44px; height: 44px; }
     .toolbar { gap: 8px; }
-    #drop { min-height: 56px; display: grid; place-items: center; padding: 10px; }
-    #filter { min-height: 44px; }
-    #file-summary { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+    .files-toolbar { grid-template-columns: minmax(0, 1fr); }
+    #drop, #filter { height: 44px; min-height: 44px; }
+    #file-summary { display: none; }
     #folder-bar { grid-template-columns: minmax(0, 1fr); gap: 8px; justify-content: stretch; }
     #breadcrumbs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
-    #breadcrumbs button { flex: 0 0 auto; min-height: 44px; }
+    #breadcrumbs button { flex: 0 0 auto; height: 44px; min-height: 44px; }
     #folder-actions { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; justify-content: stretch; }
     #current-folder { display: none; }
-    #folder-actions button { width: 100%; min-width: 0; min-height: 44px; }
+    #folder-actions button { width: 100%; min-width: 0; height: 44px; min-height: 44px; }
     #status-bar { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
     #notice { width: calc(100vw - 20px); max-height: 42dvh; }
     .status-item { width: 100%; }
@@ -1401,15 +1406,16 @@
 
   <section id="files-view" class="view" role="tabpanel" aria-labelledby="tab-files" hidden>
     <section class="page-section">
-      <div class="toolbar">
-        <div id="drop">Drop files here or click to upload to <span class="name">the current folder</span></div>
+      <div class="files-toolbar">
+        <button type="button" id="drop">Upload files or drop them here</button>
+        <label class="visually-hidden" for="filter">Filter files</label>
         <input id="filter" type="search" placeholder="Filter files or states">
+        <div id="file-summary" aria-label="File synchronization summary"></div>
       </div>
       <input id="file" type="file" multiple hidden>
     </section>
 
     <section class="page-section">
-      <div id="file-summary"></div>
       <div id="file-browser">
         <aside id="folder-sidebar">
           <div class="side-title">Folders</div>

@@ -858,6 +858,18 @@ func TestWebUIServed(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
+		`class="files-toolbar"`,
+		`<button type="button" id="drop">Upload files or drop them here</button>`,
+		`#files-view { --files-control-h: 38px; align-content: start; }`,
+		`#drop, #filter { width: 100%; min-width: 0; height: var(--files-control-h); min-height: var(--files-control-h); }`,
+		`#file-summary .summary-pill:first-child { display: none; }`,
+		`#folder-sidebar { position: sticky; top: 0; }`,
+	} {
+		if !strings.Contains(bodyText, want) {
+			t.Errorf("index missing desktop Files control marker %s", want)
+		}
+	}
+	for _, want := range []string{
 		`id="file-table"`,
 		`#file-table .file-col-modified, #file-table thead th:nth-child(4), #file-table .file-modified-cell`,
 		`#files tr { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr) max-content; grid-template-areas: "name name name status" "type size modified modified" "actions actions actions actions";`,
